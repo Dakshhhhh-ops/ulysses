@@ -44,3 +44,6 @@ data/live.md
 
 # A scripted mock run never belongs next to the real model transcripts
 examples/llm_agent/transcripts/*.mock.jsonl
+
+# local editor and agent settings
+.claude/
