@@ -49,6 +49,7 @@ from .flagsmith.gateway import (
     ResultsSnapshot,
     Throttled,
 )
+from .health import FeatureHealth
 from .horizon import plan as horizon_plan
 from .store import Store
 
@@ -116,6 +117,7 @@ class Settings:
     # Only scripts/judge_demo.py --replay sets this, to replay taps recorded before the confirmation carried
     # the looks' evidence chain. The service built by ``ulysses serve`` never accepts that form.
     replay_accepts_earlier_tap_form: bool = False
+    health_webhook_url: str | None = None  # Flagsmith Feature Health "Webhook" provider URL (a secret path)
 
 
 def _rollout_of(exp: ExperimentInfo) -> dict | None:
@@ -181,6 +183,8 @@ class Ulysses:
         self._deferred: dict[tuple[str, int], dict[str, AuditEntry]] = {}
         self._flight_guard = threading.Lock()
         self._repairing = threading.local()
+        self.health = FeatureHealth(store, gateway, webhook_url=self.settings.health_webhook_url,
+                                    public_url=self.settings.public_url, clock=clock, sleep=sleep)
 
     # ================================================================ signers
 
@@ -983,6 +987,8 @@ class Ulysses:
                                               action=d.action or "keep_control", state="pending", now=self.clock())
         out["look_id"] = look_id
         out["card_url"] = self.link(f"/card/{look_id}", h)
+        if health := self.health.after_look(c, h, look_id, d.to_dict()):
+            out["feature_health"] = health
         if pid:
             out["proposal"] = self._proposal_view(self.store.proposal(pid))
             self._emit("fired", {"hash": h, "outcome": d.outcome, "action": d.action, "reason": d.reason,
@@ -1171,6 +1177,10 @@ class Ulysses:
         reconcile = exp.status not in ("running", "paused")
         if reconcile and not (earlier and self._completed_as(exp, ship)):
             raise Conflict(f"experiment is {exp.status}; nothing to complete")
+        health = None if reconcile else self.health.check_ship(c, exp, p["action"])
+        if health and health.get("blocked"):
+            self.store.log_refusal("execute", health["detail"], h, self.clock())
+            raise Refused(health["detail"], feature_health={k: v for k, v in health.items() if k != "detail"})
         # Claim the contract for this write. The claim fails if an amendment superseded it, or a
         # deviation froze it, since the checks above ran; an amendment cannot supersede it after.
         prior = row["state"] if row["state"] != "executing" else "decided"
@@ -1192,10 +1202,13 @@ class Ulysses:
         except FlagsmithError as exc:
             log.warning("could not record the outcome on the experiment: %s", exc)
         result = {"flagsmith": res, "serving": ship or CONTROL_KEY, "flag": ref.flag}
+        if health:
+            result["feature_health"] = health
         with self.store.transaction():
             self.store.update_proposal(pid, self.clock(), state="executed", result=json.dumps(result))
             self.store.set_contract_state(h, "executed")
         self._emit("executed", {"hash": h, "action": p["action"], "serving": ship or CONTROL_KEY})
+        self.health.after_execute(c, h, p["look_id"], p["action"], ship or CONTROL_KEY)
         return self._proposal_view(self.store.proposal(pid))
 
     def _send_complete(self, c: ct.Contract, h: str, p: dict, exp: ExperimentInfo, ship: str | None,
@@ -1527,6 +1540,7 @@ class Ulysses:
                         if p["state"] in ("pending", "confirmed", "failed"):
                             self.store.update_proposal(p["id"], self.clock(), state="void")
         self.drain_notes()
+        self.health.after_deviation(c, h, kind, log)
         self._emit("deviation", {"hash": h, "log": log, "author": author, "kind": kind, "source": source})
         return did
 
@@ -1845,4 +1859,9 @@ def summarise(c: ct.Contract) -> dict:
         "expires_after_days": c.validity.start_within_days,  # older name, kept for the pages
         "design": c.design.model_dump() if c.design else None,
         "amendment": c.amendment.model_dump() if c.amendment else None,
+        "health": None if c.health is None else {
+            "block_ship_when_unhealthy": c.health.block_ship_when_unhealthy,
+            "text": ("Shipping the treatment is refused while Flagsmith's Feature Health reports the flag "
+                     "unhealthy in this environment, from any provider. Keeping control is never blocked."
+                     if c.health.block_ship_when_unhealthy else "Feature Health is not checked before a ship.")},
     }

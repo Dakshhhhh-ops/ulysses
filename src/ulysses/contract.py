@@ -273,6 +273,16 @@ class Design(_Model):
         return _nfc(v)
 
 
+class Health(_Model):
+    """Flagsmith Feature Health as a signed ship condition."""
+
+    block_ship_when_unhealthy: bool = Field(
+        True, description="Shipping the treatment is refused while Flagsmith's Feature Health reports the flag "
+        "unhealthy in this experiment's environment, from any provider (Ulysses' own Webhook provider, Grafana, "
+        "or another Webhook caller). Keeping control is never blocked. Absent in contracts signed before the rule "
+        "existed; those ship without the check.")
+
+
 class Amendment(_Model):
     supersedes: str = Field(description="Hash of the contract this one replaces")
     reason: str
@@ -305,6 +315,8 @@ class Contract(_Model):
     sample_ratio: SampleRatio | None = Field(
         None, description="Signed traffic split and mismatch test. Absent in contracts signed before the check "
         "existed; those can ship without it.")
+    health: Health | None = Field(
+        None, description="Feature Health rule. Absent in contracts signed before it existed.")
 
     @field_validator("ulysses_contract")
     @classmethod
@@ -415,14 +427,19 @@ def draft(
     design: Design | None = None,
     require_guardrail_results_to_ship: bool = True,
     sample_ratio: "SampleRatio | None | Literal['equal']" = "equal",
+    health: "Health | None | Literal['default']" = "default",
 ) -> Contract:
     """Build a contract. ``sample_ratio="equal"`` signs an even split at the default threshold; pass a
-    ``SampleRatio`` for Flagsmith's actual weights, or None to sign no sample-ratio check."""
+    ``SampleRatio`` for Flagsmith's actual weights, or None to sign no sample-ratio check. ``health="default"``
+    signs the Feature Health rule (block a ship while Flagsmith reports the flag unhealthy); None leaves it out."""
     m = len(experiment.treatments)
     if sample_ratio == "equal":
         sample_ratio = SampleRatio(split=equal_split(experiment.arms))
+    if health == "default":
+        health = Health()
     return Contract(
         sample_ratio=sample_ratio,
+        health=health,
         design=design,
         require_guardrail_results_to_ship=require_guardrail_results_to_ship,
         experiment=experiment,

@@ -80,7 +80,8 @@ def build(db_path: str | Path | None = None) -> tuple[Ulysses, dict]:
         raise SystemExit("ULYSSES_AGENT_TOKEN must be set (16+ characters). Run `ulysses init` to create one.")
     public_url = os.environ.get("ULYSSES_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")
     slack = os.environ.get("ULYSSES_SLACK_WEBHOOK") or None
-    settings = Settings(public_url=public_url, slack_webhook=slack,
+    health_url = os.environ.get("ULYSSES_HEALTH_WEBHOOK_URL") or None
+    settings = Settings(public_url=public_url, slack_webhook=slack, health_webhook_url=health_url,
                         # Kept well under the 300 s client timeout so a slow look does not invite a retry.
                         refresh_wait_seconds=float(os.environ.get("ULYSSES_REFRESH_WAIT", "150")),
                         **link_settings())
@@ -88,7 +89,7 @@ def build(db_path: str | Path | None = None) -> tuple[Ulysses, dict]:
     svc = Ulysses(store, RestFlagsmith(url, key), settings,
                   notify=slack_notifier(slack, public_url) if slack else None)
     return svc, {"agent_token": token, "flagsmith_key": key, "webhook_secret": os.environ.get("ULYSSES_WEBHOOK_SECRET") or None,
-                 "public_url": public_url}
+                 "public_url": public_url, "health_webhook_url": health_url}
 
 
 def make_asgi():
@@ -102,7 +103,8 @@ def make_asgi():
     print(f"Ulysses contract list (read link, expires in {svc.settings.link_ttl_seconds / 3600:g} h): "
           f"{svc.overview_link()}", flush=True)
     return create_app(svc, agent_token=cfg["agent_token"],
-                      protected_secrets=[cfg["flagsmith_key"], cfg["webhook_secret"] or ""],
+                      protected_secrets=[cfg["flagsmith_key"], cfg["webhook_secret"] or "",
+                                         cfg["health_webhook_url"] or ""],
                       webhook_secret=cfg["webhook_secret"], webhook_insecure=insecure)
 
 
