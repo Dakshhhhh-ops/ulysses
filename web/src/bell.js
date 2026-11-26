@@ -266,7 +266,7 @@ class Instrument {
 
     // shell (back half, sectioned toward the camera)
     const prof = e.profile;
-    const showShell = prof.length > 1 && !sc.wire;
+    const showShell = prof.length > 1 && (!sc.wire || sc.kind === "sign");  // a sign page keeps its shell uncast (uCast 0) until the signature
     mats.shell = new ShaderMaterial({
       vertexShader: SHELL_VS, fragmentShader: SHELL_FS, side: DoubleSide, transparent: false,
       polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 2,
@@ -286,7 +286,7 @@ class Instrument {
     if (prof.length > 1) {
       const pairs = [];
       for (const s of [1, -1]) for (let i = 0; i < prof.length - 1; i++) pairs.push(prof[i][0], s * prof[i][1], 0, prof[i + 1][0], s * prof[i + 1][1], 0);
-      this.edge = segLine(pairs, t.contract, 2.0);
+      this.edge = segLine(pairs, this.pencil ? t.graphite : t.contract, 2.0);
       W.add(this.edge);
     }
 
@@ -341,9 +341,14 @@ class Instrument {
     return { 3: 0.034, 4: 0.034, 2: 0.026, 5: 0.028, 7: 0.012, 8: 0.016 }[state] ?? 0.02;
   }
 
+  get pencil() {
+    return !this.scene.signed && (this.scene.kind === "sign" || this.scene.kind === "example");
+  }
+
   ringColors() {
     const t = this.tok;
-    return [t.contract, t.contract, t.contract, t.win, t.loss, t.graphite, t.contract, t.rule, t.amber];
+    const line = this.pencil ? t.graphite : t.contract;
+    return [line, line, line, t.win, t.loss, t.graphite, line, t.rule, t.amber];
   }
 
   dimFrom() {
@@ -555,12 +560,19 @@ class Instrument {
     const w = Math.max(1, this.stage.clientWidth), h = Math.max(1, this.stage.clientHeight);
     let dpr = Math.min(devicePixelRatio || 1, 1.75);
     if (w * h * dpr * dpr > 1.2e6 || innerWidth < 640) dpr = Math.min(dpr, 1.25);
+    // Resizing a WebGL canvas wipes its pixels: skip it when nothing changed, and redraw at once when it did,
+    // so the plate is never left blank behind its labels.
+    if (w === this.w && h === this.h && dpr === this.dpr) return;
     this.dpr = dpr;
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h, false);
     this.w = w; this.h = h;
     for (const l of [this.edge, this.bannerLines, this.thread, this.needle, this.dim, this.nowLine]) if (l) l.material.resolution.set(w, h);
     this.placeCamera();
+    if (this.started && !this.lost) {
+      this.renderer.render(this.world, this.camera);
+      this.plate.chips.place((p) => this.project(p), this.w, this.h);
+    }
   }
 
   placeCamera() {
@@ -714,6 +726,9 @@ class Instrument {
     this.skipIntro();
     if (!this.shell) return Promise.resolve();
     this.mats.shell.uniforms.uCast.value = 0;
+    this.scene.signed = true;
+    this.mats.ring.uniforms.uCol.value = this.ringColors();
+    if (this.edge) this.edge.material.color.copy(this.tok.contract);
     return this.tween(this.opts.reduced ? 0 : 900, (k) => { this.mats.shell.uniforms.uCast.value = easeOut(k); }, "cast");
   }
 
@@ -865,7 +880,7 @@ class Instrument {
     this.mats.ring.uniforms.uSheet.value = t.sheet;
     const su = this.mats.shell.uniforms;
     su.uOut.value = t.enamel; su.uIn.value = t["enamel-in"]; su.uLine.value = t.contract; su.uGround.value = t["enamel-in"];
-    if (this.edge) this.edge.material.color.copy(t.contract);
+    if (this.edge) this.edge.material.color.copy(this.pencil ? t.graphite : t.contract);
     if (this.bannerLines) this.bannerLines.material.color.copy(t.flagsmith);
     for (const l of [this.thread, this.needle, this.dim]) if (l) l.material.color.copy(t.ink);
     if (this.arrows) this.arrows.material.color.copy(t.ink);

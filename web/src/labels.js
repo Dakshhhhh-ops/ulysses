@@ -36,6 +36,13 @@ export class Chips {
   // overlap one already placed is nudged up or down; if it still collides it steps aside.
   place(project, w, h) {
     const placed = [];
+    // the plate's own controls (Inspect / Read, Turn) sit over the stage: chips keep clear of them
+    const stage = this.layer.parentElement;
+    const ctrl = stage?.closest(".plate-stage-wrap")?.querySelector(".plate-controls");
+    if (ctrl && ctrl.offsetParent) {
+      const a = stage.getBoundingClientRect(), b = ctrl.getBoundingClientRect();
+      placed.push({ x: b.left - a.left, y: b.top - a.top, w: b.width, h: b.height });
+    }
     const hit = (r) => placed.some((p) => r.x < p.x + p.w + 4 && r.x + r.w + 4 > p.x && r.y < p.y + p.h + 4 && r.y + r.h + 4 > p.y);
     const items = [...this.items.values()].filter((it) => it.anchor).sort((a, b) => a.prio - b.prio);
     for (const it of items) {

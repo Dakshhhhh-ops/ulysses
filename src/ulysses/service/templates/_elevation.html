@@ -5,7 +5,7 @@
 {%- set b = e.box -%}
 {%- set wire = scene.wire or not scene.signed -%}
 {%- set cur = scene.decision -%}
-<svg class="{{ cls }}" viewBox="{{ b[0] }} {{ b[1] }} {{ b[2] }} {{ b[3] }}" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
+<svg class="{{ cls }}{% if not scene.signed and scene.kind in ('sign', 'example') %} pencil{% endif %}" viewBox="{{ b[0] }} {{ b[1] }} {{ b[2] }} {{ b[3] }}" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
   {%- if not glyph %}
   <path class="banner-fill" d="M{{ e.mast[0] + 0.2 }} {{ -e.banner }} H{{ e.mast[1] - 0.2 }} V{{ e.banner }} H{{ e.mast[0] + 0.2 }} Z"/>
   {%- endif %}

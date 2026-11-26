@@ -455,3 +455,10 @@ pre { margin: 0; background: var(--paper); border: 1px solid var(--hairline); pa
 .two-nums b { font-size: 22px; line-height: 28px; font-weight: 500; }
 .two-nums small { color: var(--graphite); font-size: 12px; }
 .two-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+
+/* the pencil drawing: an unsigned contract is graphite until the signature casts it */
+svg.elevation.pencil .ring, svg.elevation.pencil .ring.s0, svg.elevation.pencil .ring.s6 { stroke: var(--graphite); opacity: 1; }
+svg.elevation.pencil .edge { stroke: var(--graphite); }
+
+.chip { max-width: calc(100% - 12px); }
+@media (max-width: 639px) { .chip { white-space: normal; } }
