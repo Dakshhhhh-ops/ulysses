@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 from ..boundary import chance_to_z
-from ..calibrate.live import LOSE, WIN, _contract, summarise_trace
+from ..calibrate.live import LOSE, WIN, _contract, read_trace, summarise_trace
 from ..calibrate.offline import wilson
 from ..decision import Observation, evaluate
 from . import fmt
@@ -42,8 +42,9 @@ def _alphas(d: dict) -> list[str]:
 
 
 def _ship_rows(first: int, final: int, contract: dict, n: int) -> list[dict]:
-    rows = [_row("banner", "Ship at the first look over 95%", first, n),
-            _row("final", "Ship if over 95% at the planned final look", final, n)]
+    rows = [_row("banner", "Ship at the first look over 95%", first, n)]
+    if final is not None:
+        rows.append(_row("final", "Ship if over 95% at the planned final look", final, n))
     for a in _alphas(contract):
         rows.append(_row("contract", f"Ship only when the signed contract fires (alpha {a})", contract[a], n,
                          level=a))
@@ -51,7 +52,9 @@ def _ship_rows(first: int, final: int, contract: dict, n: int) -> list[dict]:
 
 
 def _any_rows(first: int, final: int, contract: dict, n: int) -> list[dict]:
-    rows = [_row("banner", FIRST, first, n), _row("final", FINAL, final, n)]
+    rows = [_row("banner", FIRST, first, n)]
+    if final is not None:
+        rows.append(_row("final", FINAL, final, n))
     for a in _alphas(contract):
         k, w, l = contract[a]
         rows.append(_row("contract", f"Act only when the signed contract fires (alpha {a})", k, n, level=a,
@@ -80,7 +83,7 @@ def offline_view(run_dir: Path) -> dict | None:
         "label": aa.get("label", ""),
         "facts": [f"{fmt.count(par['runs'])} runs", f"{looks} looks",
                   f"{fmt.count(par['identities_per_arm_per_look'])} per arm per look",
-                  f"base rate {par['base_rate']:.0%}", f"seed {par['seed']}",
+                  f"base rate {par['base_rate']:.0%}", "seed " + (", ".join(str(x) for x in par["seed"]) if isinstance(par["seed"], list) else str(par["seed"])),
                   f"Flagsmith stats.py {stats.get('tag', '?')} sha256 {str(stats.get('sha256', ''))[:12]}"],
         "ship_rows": _ship_rows(aa["banner_every_look"]["winning"], aa["banner_final_look_only"]["winning"],
                                 {k: v["winning"] for k, v in aa["contract"].items()}, n),
@@ -94,30 +97,25 @@ def offline_view(run_dir: Path) -> dict | None:
     }
 
 
-def _newest_trace(run_dir: Path) -> Path | None:
-    traces = sorted(run_dir.glob("live-*.jsonl"), key=lambda p: p.stat().st_mtime)
-    return traces[-1] if traces else None
+def _traces(run_dir: Path) -> list[Path]:
+    return sorted(run_dir.glob("live-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def trace_paths(path: Path, alpha: float = 0.05, per_arm_per_look: int = 100) -> dict:
-    """Per-run paths (z per look) and each run's first banner exit and contract call.
+def trace_paths(path: Path) -> dict:
+    """Per-run paths (z per look) and each run's first exit past 95% / 5% and contract call.
 
-    Same selection and rules as ``summarise_trace``: runs with fewer rows than
-    the last look are left out; a read that errored is a look not taken.
+    Same design and rules as ``summarise_trace``: the design comes from the trace's header, every
+    experiment is kept, and a read that errored is a look not taken.
     """
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    k_max = max(r["look"] for r in rows)
-    contract = _contract(alpha, k_max, k_max * per_arm_per_look)
+    design, rows = read_trace(path)
+    looks, per_arm, alpha = design["looks"], design["per_arm_per_look"], design.get("alpha", 0.05)
+    contract = _contract(alpha, looks, looks * per_arm)
     by_exp: dict[int, list[dict]] = {}
     for r in rows:
         by_exp.setdefault(r["experiment"], []).append(r)
     runs = []
-    dropped = 0
     for eid, rs in sorted(by_exp.items()):
         rs = sorted(rs, key=lambda x: x["look"])
-        if len(rs) < k_max:
-            dropped += 1
-            continue
         prior: list[float] = []
         banner = contract_call = None
         pts = []
@@ -138,37 +136,67 @@ def trace_paths(path: Path, alpha: float = 0.05, per_arm_per_look: int = 100) ->
         runs.append({"experiment": eid, "points": pts, "banner": banner,
                      "contract": contract_call if contract_call and contract_call["outcome"] in ("win", "loss") else None,
                      "horizon": bool(contract_call and contract_call["outcome"] == "horizon")})
-    return {"looks": k_max, "runs": runs, "dropped": dropped,
+    return {"looks": looks, "runs": runs,
             "planned": sc.planned_rows(contract.model_dump()["boundary"]["planned"])}
 
 
-def live_view(run_dir: Path, alpha: float = 0.05) -> dict | None:
-    path = _newest_trace(run_dir)
-    if path is None:
+def live_view(run_dir: Path) -> dict | None:
+    """The newest trace that can be scored under its own signed design; notes for the others."""
+    traces = _traces(run_dir)
+    if not traces:
         return None
-    try:
-        s = summarise_trace(path, alpha=alpha)
-        s10 = summarise_trace(path, alpha=0.1)
-        tp = trace_paths(path, alpha=alpha)
-    except (OSError, ValueError, KeyError) as exc:
-        return {"error": f"{path.name} could not be read ({exc})."}
+    notes: list[str] = []
+    for path in traces:
+        try:
+            design, rows = read_trace(path)
+        except (OSError, ValueError) as exc:
+            notes.append(f"{path.name} could not be read ({exc}).")
+            continue
+        if not design:
+            notes.append(f"{path.name} has no design header, so it is not scored here: score it with the looks and "
+                         f"identities per arm it was started with, `uv run ulysses calibrate summarise "
+                         f".run/calibration/{path.name} --looks <signed looks> --per-arm <signed per arm>`.")
+            continue
+        if not rows:
+            notes.append(f"Batch {design.get('batch', path.stem)} is running: {design.get('experiments', '?')} experiments "
+                         f"x {design['looks']} looks signed, no reads yet.")
+            continue
+        try:
+            return _live_from(path, design, notes)
+        except (OSError, ValueError, KeyError) as exc:
+            notes.append(f"{path.name} could not be scored ({exc}).")
+    return {"empty": True, "notes": notes}
+
+
+def _live_from(path: Path, design: dict, notes: list[str]) -> dict:
+    alpha = design.get("alpha", 0.05)
+    s = summarise_trace(path)
+    s10 = s if alpha == 0.1 else summarise_trace(path, alpha=0.1)
+    tp = trace_paths(path)
     m = s["experiments"]
     bw, bl = s["banner_any_look"]["winning"], s["banner_any_look"]["losing"]
-    fw, fl = s["banner_final_look"]["winning"], s["banner_final_look"]["losing"]
-    cw, cl, ch = s["contract"]["win"], s["contract"]["loss"], s["contract"]["horizon"]
+    final = s.get("banner_final_look")
+    cw, cl = s["contract"]["win"], s["contract"]["loss"]
+    ch, holding = s["contract"].get("horizon", 0), s["contract"].get("holding", 0)
     contract = {"0.1": (s10["contract"]["win"] + s10["contract"]["loss"], s10["contract"]["win"], s10["contract"]["loss"]),
-                str(alpha): (cw + cl, cw, cl)}
+                f"{alpha:g}": (cw + cl, cw, cl)}
+    ship = _ship_rows(bw, final["winning"] if final else None, {k: v[1] for k, v in contract.items()}, m)
+    anyr = _any_rows(bw + bl, (final["winning"] + final["losing"]) if final else None, contract, m)
+    line = f"Contract outcomes: {cw} wins, {cl} losses, {ch} at the horizon with no decision, {holding} still holding"
+    line += f" when the run stopped at look {s['looks_read']} of {s['looks']}." if s.get("truncated") else "."
     return {
         "label": s["label"],
         "batch": s["batch"],
         "trace": path.name,
-        "facts": [f"batch {s['batch']}", f"{m} A/A experiments", f"{s['looks']} looks",
+        "facts": [f"batch {s['batch']}", f"{m} A/A experiments",
+                  f"signed design: {s['looks']} looks, {fmt.count(design['per_arm_per_look'])} per arm per look, alpha {alpha:g}",
                   "every number read from Flagsmith's results endpoint",
-                  f"{s['skipped_reads']} of {m * s['looks']} reads not returned in time"],
-        "ship_rows": _ship_rows(bw, fw, {k: v[1] for k, v in contract.items()}, m),
-        "rows": _any_rows(bw + bl, fw + fl, contract, m),
-        "horizon_line": f"The contract reached the horizon with no decision in {ch} of {m}.",
-        "dropped": tp["dropped"],
+                  f"{s['skipped_reads']} reads not returned in time"],
+        "ship_rows": ship,
+        "rows": anyr,
+        "horizon_line": line,
+        "truncated": s.get("truncated"),
+        "notes": notes,
         "looks": s["looks"],
         "alpha": alpha,
         "planned": tp["planned"],

@@ -56,13 +56,15 @@
   {{ rate_table(active.ship_rows, "False winners shipped: the variation does nothing, and the rule ships it", "Table of false winners shipped") }}
   {{ rate_table(active.rows, "Any false call, winner or loser: a false Losing keeps control and ships nothing, so it is counted separately here", "Table of any false call") }}
   {%- if tab == 'live' %}
-  <p class="facts" style="border-top:1px solid var(--rule)">{{ active.horizon_line }}{% if active.dropped %} {{ active.dropped }} runs did not finish and are not counted.{% endif %}</p>
+  <p class="facts" style="border-top:1px solid var(--rule)">{{ active.horizon_line }}</p>
+  {%- for n in live_notes %}<p class="facts">{{ n }}</p>{% endfor %}
   {%- endif %}
   {%- endif %}
 </section>
 
 {%- if tab == 'live' and not (live and not live.error) %}
-<p class="footnote">No live batch on this machine. <code>uv run ulysses calibrate live --experiments 60 --looks 10</code> (about an hour on the shared lab), then <code>uv run ulysses calibrate summarise .run/calibration/live-&lt;batch&gt;.jsonl</code>.</p>
+{%- for n in live_notes %}<p class="footnote">{{ n }}</p>{% endfor %}
+<p class="footnote">{% if live_notes %}No scored live batch yet.{% else %}No live batch on this machine.{% endif %} <code>uv run ulysses calibrate live --experiments 60 --looks 10</code> (about an hour on the shared lab), then <code>uv run ulysses calibrate summarise .run/calibration/live-&lt;batch&gt;.jsonl</code>.</p>
 {%- endif %}
 
 <div class="after-grid">

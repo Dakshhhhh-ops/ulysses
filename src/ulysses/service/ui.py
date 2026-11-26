@@ -56,8 +56,8 @@ def _fractions(svc, environment: str, experiment_id: int) -> dict[int, dict]:
     out = {}
     for lk in svc.store.looks(environment, experiment_id):
         d = lk["decision"] or {}
-        out[lk["seq"]] = {"fraction": d.get("fraction"), "look_number": d.get("look_number"), "id": lk["id"],
-                          "as_of": fmt.age((lk["snapshot"] or {}).get("as_of"))}
+        out[lk["seq"]] = {"fraction": d.get("fraction"), "look_number": d.get("look_number"), "id": lk["id"], "at": lk["at"],
+                          "age": fmt.results_age((lk["snapshot"] or {}).get("as_of"), lk["at"])}
     return out
 
 
@@ -88,7 +88,7 @@ def card_context(svc, d: dict) -> dict:
     return {
         "scene": scene, "source": src,
         "later": later[-1] if later else None,
-        "as_of": fmt.age(snap.get("as_of")),
+        "results_age": fmt.results_age(snap.get("as_of"), (fr.get(d["look"]["seq"]) or {}).get("at")),
         "lift": fmt.lift((prim or {}).get("lift")),
         "arms_n": snap.get("identities") or {},
         "guardrails": _guardrails(c),
@@ -299,6 +299,9 @@ def register(app, svc, templates) -> None:
     @app.get("/calibration", response_class=HTMLResponse)
     def calibration(request: Request, tab: str | None = None):
         data = calibration_view.calibration_page(calibration_dir(svc))
+        live_notes = (data["live"] or {}).get("notes") or []
+        if data["live"] and data["live"].get("empty"):
+            data["live"] = None
         if tab not in ("lab", "live"):
             tab = "live" if data["live"] and not data["live"].get("error") else "lab"
         active = data["live"] if tab == "live" else data["offline"]
@@ -318,4 +321,4 @@ def register(app, svc, templates) -> None:
             "looks": len(planned),
         }
         return templates.TemplateResponse(request, "calibration.html", {"cal": data, "tab": tab, "scene": scene,
-                                                                        "active": active})
+                                                                        "active": active, "live_notes": live_notes})

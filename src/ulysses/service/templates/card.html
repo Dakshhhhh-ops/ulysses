@@ -146,7 +146,7 @@
     <div>
       <p class="label">Source</p>
       <p class="read-line" style="color:var(--ink)">{{ sc.source.chip }}{% if sc.source.detail %}: {{ sc.source.detail }}{% endif %}</p>
-      {%- if as_of %}<p class="read-line">Flagsmith computed these results<br><span class="mono" style="white-space:nowrap">{{ as_of }}</span></p>{% endif %}
+      {%- if results_age %}<p class="read-line">Flagsmith's results were {{ results_age }}.</p>{% endif %}
       <p class="read-line">SRM: {% if d.flagsmith and d.flagsmith.srm_p_value is not none %}p <span class="mono">{{ '%.4f' | format(d.flagsmith.srm_p_value) }}</span>{% else %}not computed by Flagsmith for this experiment{% endif %}</p>
       {%- if guardrail_rows %}<p class="read-line">Guardrails: {% for g in guardrail_rows %}<span class="mono">{{ g.name }}</span> {{ {'breach': 'breached', 'pass': 'within rule', 'none': 'no reading yet'}[g.state] }}{% if not loop.last %}; {% endif %}{% endfor %}. <a href="#gr-h">Details</a></p>{% endif %}
       {%- if deviations %}<p class="read-line" style="color:var(--loss)">{{ deviations | length }} change{{ 's' if deviations|length != 1 }} outside the contract. <a href="#deviations">See below</a></p>{% endif %}
@@ -182,7 +182,7 @@
     </tbody>
   </table>
   </div>
-  <p class="footnote">Contract <a class="mono" href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a> · {{ s.boundary }} · {{ s.horizon }}.{% if as_of %} Flagsmith computed these results <span class="mono">{{ as_of }}</span>.{% endif %} A loss is called at the mirror image of each boundary.</p>
+  <p class="footnote">Contract <a class="mono" href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a> · {{ s.boundary }} · {{ s.horizon }}.{% if results_age %} Flagsmith's results were {{ results_age }}.{% endif %} A loss is called at the mirror image of each boundary.</p>
 </section>
 
 {% else %}

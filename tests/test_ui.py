@@ -105,8 +105,10 @@ def _trace(tmp_path: Path) -> Path:
         for k, ch in enumerate(chs, start=1):
             rows.append({"batch": "t", "experiment": e, "look": k, "n_control": 100 * k, "n_treatment": 100 * k,
                          "chance_to_win": ch})
+    header = {"design": {"batch": "t", "experiments": 4, "looks": 8, "per_arm_per_look": 100, "horizon": 800,
+                         "alpha": 0.05, "rate": 0.1}}           # traces now open with their signed design
     p = tmp_path / "live-t.jsonl"
-    p.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    p.write_text("\n".join(json.dumps(r) for r in [header, *rows]), encoding="utf-8")
     return p
 
 
@@ -117,7 +119,7 @@ def test_calibration_exit_points_equal_the_table_counts(tmp_path):
     assert banner_points == view["rows"][0]["k"] == view["counts"]["banner"] == 2
     row05 = next(r for r in view["rows"] if r.get("level") == "0.05")
     assert contract_points == row05["k"] == view["counts"]["contract"] == 1
-    assert view["dropped"] == 1
+    assert len(view["paths"]) == 4                 # every experiment is kept, as summarise_trace does
 
 
 def test_calibration_without_files_shows_no_figures(tmp_path):
@@ -182,3 +184,48 @@ def test_built_bundle_is_current():
     h.update(b"elevation_constants.json")
     h.update((ROOT / "src" / "ulysses" / "service" / "elevation_constants.json").read_text(encoding="utf-8").replace("\r\n", "\n").encode())
     assert h.hexdigest() == recorded, "web/ sources changed since the bundle was built: run `npm run build` in web/"
+
+
+# ---- no calendar date or clock time on any page -----------------------------------------------------
+
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}(:\d{2})?\b|\b(January|February|March|April|May|June|July|August|"
+                   r"September|October|November|December)\b|\b(Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.? \d")
+
+
+def test_no_page_renders_a_date_or_time(world, keys, clock, tmp_path, monkeypatch):
+    """Flagsmith's results carry an ISO ``as_of`` and live traces carry them per read; none may reach a page."""
+    from dataclasses import replace
+
+    svc, fs, store = world
+    cal = tmp_path / "cal"
+    cal.mkdir()
+    header = {"design": {"batch": "z", "experiments": 2, "looks": 2, "per_arm_per_look": 100, "horizon": 200,
+                         "alpha": 0.05, "rate": 0.1}}
+    reads = [{"batch": "z", "experiment": e, "look": k, "n_control": 100 * k, "n_treatment": 100 * k,
+              "chance_to_win": ch, "as_of": "2001-02-03T04:05:06.000000Z"}
+             for e, chs in ((1, (0.5, 0.97)), (2, (0.4, 0.3))) for k, ch in enumerate(chs, start=1)]
+    (cal / "live-z.jsonl").write_text("\n".join(json.dumps(r) for r in [header, *reads]), encoding="utf-8")
+    monkeypatch.setenv("ULYSSES_CALIBRATION_DIR", str(cal))
+    client = TestClient(create_app(svc, agent_token="t" * 20))
+
+    unsigned = svc.submit(make_contract(keys, looks=4, n=400, experiment=1))["hash"]
+    pages = ["/", f"/sign/{unsigned}"]
+    sign_as(svc, keys, unsigned)
+    pages.append(f"/sign/{unsigned}")
+    svc.start_under_contract(unsigned)
+    out = None
+    for n, ch in ((100, 0.7), (200, 0.97), (300, 0.99999)):
+        clock.advance(301)
+        fs.set_results(1, n, n, ch, {"refunds": 0.5})
+        fs.results[1] = replace(fs.results[1], as_of="2001-02-03T04:05:06.000000Z")
+        out = svc.look(unsigned)
+        pages.append(f"/card/{out['look_id']}")
+    if out.get("proposal"):
+        pages.append(f"/card/{out['proposal']['id']}")
+    pages += ["/", "/calibration?tab=live", "/calibration?tab=lab", f"/enrol/{svc.enrol_token('maya')}",
+              "/card/L9999-nothing"]
+    for page in pages:
+        html = client.get(page).text
+        body = html.split("<body>", 1)[-1]
+        hit = _DATE.search(body)
+        assert hit is None, f"{page} shows {hit.group(0)!r}"

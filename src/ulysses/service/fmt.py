@@ -133,6 +133,42 @@ def age(value, now: float | None = None) -> str | None:
     return f"{d} day{'s' if d != 1 else ''} ago"
 
 
+def _ts(value) -> float | None:
+    import datetime as _dt
+
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def duration(secs: float | None) -> str | None:
+    """A length of time in words ("42 seconds", "3 minutes", "2 days"); never a date."""
+    if secs is None:
+        return None
+    secs = int(round(abs(secs)))
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if secs >= size:
+            n = secs // size
+            return f"{n} {unit}{'s' if n != 1 else ''}"
+    return f"{secs} second{'s' if secs != 1 else ''}"
+
+
+def results_age(as_of, look_at) -> str | None:
+    """How old Flagsmith's results were when the look read them, as a sentence fragment."""
+    a, b = _ts(as_of), _ts(look_at)
+    if a is None or b is None:
+        return None
+    gap = b - a
+    if gap < 0:
+        return "recomputed just after this look was taken"
+    return f"{duration(gap)} old when this look read them"
+
+
 FILTERS = {
     "age": age,
     "pct": pct,
@@ -143,4 +179,5 @@ FILTERS = {
     "bz": boundary_with_z,
     "count": count,
     "lift": lift,
+    "duration": duration,
 }

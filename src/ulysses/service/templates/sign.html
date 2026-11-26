@@ -69,13 +69,14 @@
         </ul><p>Each runs only after the owner confirms it with one tap.</p></div></div></div>
       <div class="clause{% if 'validity' in changed %} changed{% endif %}"><span class="no">§8</span><div><p class="h">Signers and validity</p>
         <p class="t">Owner <strong>{{ s.owner }}</strong>{% if c.signatures.owner %}, signed{% if not c.signatures.owner.verified %} (signature does not verify){% endif %}{% endif %}. Second signer <strong>{{ s.second_signer }}</strong>, needed for any amendment{% if c.signatures.second_signer %}, signed{% endif %}.
-        Valid for {{ diff('validity', s.expires_after_days ~ ' days', (old.expires_after_days ~ ' days') if old else '') }} from the owner's signature.</p></div></div>
+        {%- set win_days = s.start_within_days or s.expires_after_days %}
+        The experiment must start within {{ diff('validity', win_days ~ ' days', ((old.start_within_days or old.expires_after_days) ~ ' days') if old else '') }} of the owner's signature{% if c.expires_in_hours is not none and c.expires_in_hours > 0 and c.state in ('signed',) %}; {{ (c.expires_in_hours * 3600) | duration }} of that window are left{% endif %}.</p></div></div>
     </article>
 
     <section class="sign-panel" id="sign-panel" data-hash="{{ h }}" aria-labelledby="sign-h">
       <h2 id="sign-h">Sign</h2>
       {%- if c.expired %}
-      <p><span class="state-chip" data-s="expired">expired</span> This contract has expired and can no longer start an experiment. Draft and sign a new one.</p>
+      <p><span class="state-chip" data-s="expired">expired</span> Its start window of {{ s.start_within_days or s.expires_after_days }} days after the owner's signature has passed, so it can no longer start an experiment. Draft and sign a new one.</p>
       {%- elif not needs %}
       <p>This contract has every signature it needs.</p>
       {%- else %}
