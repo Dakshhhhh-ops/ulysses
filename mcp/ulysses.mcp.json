@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "ulysses": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/ulysses", "ulysses", "mcp"],
+      "env": {
+        "ULYSSES_URL": "http://127.0.0.1:8200",
+        "ULYSSES_AGENT_TOKEN": "<the ULYSSES_AGENT_TOKEN from .env>"
+      }
+    },
+    "flagsmith": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/Flagsmith/flagsmith.git@main#subdirectory=mcp", "flagsmith-mcp"],
+      "env": {
+        "TRANSPORT": "stdio",
+        "FLAGSMITH_API_URL": "http://localhost:8000",
+        "FLAGSMITH_API_TOKEN": "<a key for reads; see the README limitation on open-source keys>"
+      }
+    }
+  }
+}
