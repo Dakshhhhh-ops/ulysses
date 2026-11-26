@@ -533,7 +533,7 @@ def cmd_lab_setup(a) -> None:
         return
     secret = os.environ.get("ULYSSES_WEBHOOK_SECRET")
     if not secret:
-        fail("ULYSSES_WEBHOOK_SECRET is empty; the audit webhook must be signed",
+        fail("ULYSSES_WEBHOOK_SECRET is not set; the audit webhook must be signed",
              "run `ulysses init` to generate one, or pass --no-webhook")
     hook_url = os.environ.get("ULYSSES_WEBHOOK_URL", "http://host.docker.internal:8200/webhooks/flagsmith")
     try:
