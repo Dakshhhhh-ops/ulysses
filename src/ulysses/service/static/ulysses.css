@@ -462,3 +462,11 @@ svg.elevation.pencil .edge { stroke: var(--graphite); }
 
 .chip { max-width: calc(100% - 12px); }
 @media (max-width: 639px) { .chip { white-space: normal; } }
+
+/* leader lines from a docked label to the point it names */
+.chips svg.leaders { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; opacity: 0; transition: opacity var(--m-fade) linear; }
+.chips svg.leaders.on { opacity: 1; }
+.chips svg.leaders line { stroke: var(--graphite); stroke-width: 1; }
+.chips svg.leaders circle { fill: var(--sheet); stroke: var(--graphite); stroke-width: 1; }
+.chip.docked { white-space: normal; max-width: min(58%, 420px); }
+.state-chip[data-s="executing"] { color: var(--contract); border-style: dashed; }

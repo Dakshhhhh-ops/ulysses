@@ -717,6 +717,7 @@ class Instrument {
     const chips = this.plate.chips;
     labelScene(this.scene, this.e, chips);
     for (const id of chips.items.keys()) { if (on && id !== "leader") chips.show(id); else chips.hide(id); }
+    chips.leadersOn = on;
     this.chipsOn = on;
     this.invalidate();
   }
@@ -756,7 +757,7 @@ class Instrument {
     const chips = this.plate.chips;
     if (h && h.z !== null && h.z !== undefined) {
       const b = this.e.beads.find((x) => x.seq === seq);
-      const txt = `${h.look_number ? "Look " + h.look_number : "Refresh " + h.seq + " (not a look)"} · ${Number(h.n).toLocaleString("en")} per arm · Flagsmith ${h.ctw}${h.needs ? " · needs " + h.needs + " (z " + h.bz_text + ")" : ""}`;
+      const txt = `${h.look_number ? "Look " + h.look_number : "Refresh " + h.seq + " (not a look)"} · ${Number(h.n).toLocaleString("en")} per arm · Flagsmith ${h.ctw}${h.needs ? " · needs " + h.needs + " (z " + h.bz_text + ")" : ""}`;
       chips.set("leader", txt, [b.x, b.y, 0], { cls: "leader", align: b.y > 0 ? "below" : "above", dy: b.y > 0 ? 8 : -8, prio: 0 });
     } else chips.hide("leader");
     this.placeBeads(this.progress ?? this.threadSegs);
