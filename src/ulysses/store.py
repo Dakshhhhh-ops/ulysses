@@ -361,6 +361,15 @@ class Store:
         sets = ", ".join(f"{k}=?" for k in fields)
         self._exec(f"UPDATE proposals SET {sets}, updated_at=? WHERE id=?", (*fields.values(), now, pid))
 
+    def cas_proposal(self, pid: str, from_states: Iterable[str], now: float, **fields: Any) -> bool:
+        """Update a proposal only while its state is one of ``from_states``; True if it changed."""
+        fs = tuple(from_states)
+        sets = ", ".join(f"{k}=?" for k in fields)
+        q = ",".join("?" * len(fs))
+        cur = self._exec(f"UPDATE proposals SET {sets}, updated_at=? WHERE id=? AND state IN ({q})",
+                         (*fields.values(), now, pid, *fs))
+        return cur.rowcount == 1
+
     # ---- action log, refusals, deviations ----------------------------------------------
 
     def log_action(self, *, environment: str, experiment_id: int, kind: str, contract_hash: str | None,

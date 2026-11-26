@@ -18,7 +18,14 @@ Needs only Docker and uv. It:
 
 Flagsmith refreshes results at most every five minutes; a measured run from a fresh clone took about half an hour.
 
+With ``--agent-in-container`` the agent side (the scripted agent and the Ulysses MCP server) runs in its
+own container instead (``docker-compose.yml``, profile ``agent``): it is given only the contract
+service's URL and the agent token, has no volume and its own network, and cannot read ``.env``, the
+service database, the signer keys or the demo shop's server-side key. The shop and the simulated
+visitors then run here, on the service's side, since they need that key.
+
     uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down]
+                                        [--agent-in-container]
 """
 
 from __future__ import annotations
@@ -109,6 +116,8 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8240, help="contract service port (8200-8299)")
     ap.add_argument("--shop-port", type=int, default=8241)
     ap.add_argument("--down", action="store_true", help="remove the Flagsmith containers at the end")
+    ap.add_argument("--agent-in-container", action="store_true",
+                    help="run the agent and its MCP server in their own container (URL and token only)")
     ap.add_argument("--serve-only", action="store_true",
                     help="after a run: serve the cards and the signing pages again (Ctrl+C to stop)")
     a = ap.parse_args()
@@ -205,14 +214,17 @@ def main() -> None:
                           "ULYSSES_DB": env_vals["ULYSSES_DB"], "ULYSSES_KEY_DIR": env_vals["ULYSSES_KEY_DIR"]})
         procs.append(subprocess.Popen([py, str(ROOT / "scripts/human_stand_in.py"), "--owner", "maya"],
                                       cwd=ROOT, env=human_env))
-        step("running the scripted agent (Ulysses agent token only)")
-        agent_env = {k: v for k, v in os.environ.items()
-                     if not k.startswith(("FLAGSMITH_", "ULYSSES_KEY"))}
-        agent_env.update({"ULYSSES_URL": env_vals["ULYSSES_PUBLIC_URL"],
-                          "ULYSSES_AGENT_TOKEN": env_vals["ULYSSES_AGENT_TOKEN"],
-                          "ULYSSES_DB": env_vals["ULYSSES_DB"], "SHOP_PORT": str(a.shop_port)})
-        rc = subprocess.run([py, str(ROOT / "scripts/agent_session.py"), "--with-traffic",
-                             "--shop-port", str(a.shop_port)], cwd=ROOT, env=agent_env).returncode
+        if a.agent_in_container:
+            rc = run_agent_container(a, env_vals, procs)
+        else:
+            step("running the scripted agent (Ulysses agent token only)")
+            agent_env = {k: v for k, v in os.environ.items()
+                         if not k.startswith(("FLAGSMITH_", "ULYSSES_KEY"))}
+            agent_env.update({"ULYSSES_URL": env_vals["ULYSSES_PUBLIC_URL"],
+                              "ULYSSES_AGENT_TOKEN": env_vals["ULYSSES_AGENT_TOKEN"],
+                              "ULYSSES_DB": env_vals["ULYSSES_DB"], "SHOP_PORT": str(a.shop_port)})
+            rc = subprocess.run([py, str(ROOT / "scripts/agent_session.py"), "--with-traffic",
+                                 "--shop-port", str(a.shop_port)], cwd=ROOT, env=agent_env).returncode
         if rc != 0:
             stop("the agent session did not finish (see above); rerun this command to continue from a fresh setup")
         summarise(time.time() - started, api, a.port)
@@ -221,6 +233,46 @@ def main() -> None:
             p.terminate()
         if a.down and not a.flagsmith:
             subprocess.run(["docker", "compose", "-p", "ulysses", "down", "-v"], cwd=ROOT)
+
+
+def _agent_session_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("agent_session", ROOT / "scripts" / "agent_session.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def run_agent_container(a, env_vals: dict, procs: list) -> int:
+    """The agent in its own container; the shop and visitors (they hold the server-side key) stay here."""
+    agent_session = _agent_session_module()
+    demo = json.loads((RUN / "demo.json").read_text())
+    view = agent_session.agent_view(demo)
+    traffic = argparse.Namespace(shop_port=a.shop_port, visitors_per_minute=90, classic=0.10, bold=0.17,
+                                 refund_classic=0.30, refund_bold=0.30)
+    step("starting the demo shop and simulated visitors on the service's side (they hold the server-side key)")
+    os.environ.update({"ULYSSES_PUBLIC_URL": env_vals["ULYSSES_PUBLIC_URL"], "ULYSSES_DB": env_vals["ULYSSES_DB"]})
+    agent_session.start_traffic(traffic, procs)
+    agent_session.mark_synthetic(view, sorted(view["experiments"]), db=env_vals["ULYSSES_DB"])
+    step("running the scripted agent in its own container (it gets the Ulysses URL and agent token only)")
+    compose_env = {**os.environ, "ULYSSES_AGENT_URL": f"http://host.docker.internal:{a.port}",
+                   "ULYSSES_AGENT_TOKEN": env_vals["ULYSSES_AGENT_TOKEN"]}
+    compose_env = {k: v for k, v in compose_env.items() if not k.startswith("FLAGSMITH_")}
+    cmd = ["docker", "compose", "-p", "ulysses", "-f", str(ROOT / "docker-compose.yml"), "--profile", "agent",
+           "run", "--rm", "--build", "--no-deps", "agent", "--demo", json.dumps(view)]
+    proc = subprocess.Popen(cmd, cwd=ROOT, env=compose_env, stdout=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace")
+    result = None
+    for line in proc.stdout:  # type: ignore[union-attr]
+        if line.startswith("AGENT-RESULT "):
+            result = json.loads(line[len("AGENT-RESULT "):])
+            continue
+        print(line, end="", flush=True)
+    rc = proc.wait()
+    if result is not None:
+        (RUN / "agent-session-result.json").write_text(json.dumps(result, indent=2))
+    return rc
 
 
 def summarise(seconds: float, api: str, port: int) -> None:

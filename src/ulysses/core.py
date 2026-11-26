@@ -933,8 +933,14 @@ class Ulysses:
         except signing.SignatureError as exc:
             self.store.log_refusal("confirm", str(exc), p["contract_hash"], self.clock())
             raise Refused(f"confirmation signature rejected: {exc}") from exc
-        self.store.update_proposal(pid, self.clock(), state="confirmed", confirm_signer=signer,
-                                   confirm_signature=signature)
+        # Only from the state checked above: an execution that finished meanwhile is never set back.
+        if not self.store.cas_proposal(pid, ("pending", "failed"), self.clock(), state="confirmed",
+                                       confirm_signer=signer, confirm_signature=signature):
+            now = self.store.proposal(pid)
+            if now and now["state"] == "executed":
+                return self._proposal_view(now)
+            raise Conflict(f"this proposal became {now['state'] if now else 'missing'} while the confirmation "
+                           "was checked; nothing was changed")
         return self.execute(pid)
 
     def execute(self, pid: str, requested_action: str | None = None) -> dict:
@@ -1152,6 +1158,14 @@ class Ulysses:
 
     # ------------------------------------------------------- deviations and audit
 
+    # Flagsmith writes "Experiment '<name>' <verb> for environment <env>". The name is free text, so it
+    # can itself contain "' completed for": the verb is the one followed only by the environment.
+    _LIFECYCLE_LOG = re.compile(
+        r"^Experiment '(?P<name>.*)' (?P<verb>created|updated|running|paused|completed|deleted) "
+        r"for environment (?P<env>[^']*)$", re.S)
+    _ROLLOUT_LOG = re.compile(r"^Experiment '(?P<name>.*)' rollout set ", re.S | re.I)
+    _LIFECYCLE_KIND = {"created": None, "updated": "update_hypothesis", "running": "start", "paused": "pause",
+                       "completed": "complete", "deleted": "delete"}
     _VERBS = [
         (re.compile(r"' running for"), "start"),
         (re.compile(r"' completed for"), "complete"),
@@ -1166,8 +1180,7 @@ class Ulysses:
         """(kind, governed row) for an audit entry about a governed experiment or its flag."""
         rtype = (entry.related_object_type or "").upper().replace(" ", "_")
         if rtype == "EXPERIMENT":
-            kind = next((k for rx, k in self._VERBS if rx.search(entry.log or "")), None)
-            return kind, self._governed_for_id(entry.related_object_id)
+            return self._experiment_kind(entry.log or ""), self._governed_for_id(entry.related_object_id)
         if rtype in self._FLAG_TYPES:
             for g in self.store.governed_rows():
                 if entry.environment and str(entry.environment) != str(g["environment"]):
@@ -1177,6 +1190,16 @@ class Ulysses:
                 if named or same_feature:
                     return "flag_change", g
         return None, None
+
+    def _experiment_kind(self, log_text: str) -> str | None:
+        m = self._LIFECYCLE_LOG.match(log_text)
+        if m:
+            return self._LIFECYCLE_KIND[m.group("verb")]
+        if self._ROLLOUT_LOG.match(log_text):
+            return "rollout"
+        # Another shape (an environment name with a quote in it): the last verb in the line is Flagsmith's.
+        found = [(m.start(), k) for rx, k in self._VERBS for m in rx.finditer(log_text)]
+        return max(found)[1] if found else None
 
     def _governed_for_id(self, experiment_id: Any) -> dict | None:
         try:
@@ -1348,6 +1371,12 @@ class Ulysses:
         if not kind or not gov:
             self.store.set_audit_verdict(entry.id, "ignored", None)
             return {"audit_id": entry.id, "verdict": "ignored"}
+        if seen and self._overtaken(entry, gov):
+            # A replay (or late retry) of an entry Flagsmith's state did not bear out, sent after the
+            # service's own start or complete changed that state: today's state is evidence of the
+            # service's write, not of this entry, so it stays unverified.
+            return {"audit_id": entry.id, "verdict": "unverified", "duplicate": True,
+                    "reason": "the service changed this experiment after the entry; its state no longer tests it"}
         if self.write_in_flight(gov["environment"], gov["experiment_id"]):
             # Judged once the service's own write returns; a read now would see the old state.
             with self._flight_guard:
@@ -1388,6 +1417,12 @@ class Ulysses:
                                      source="audit webhook", freeze=freeze and kind != "pause")
         self.store.set_audit_verdict(entry.id, "deviation", None, detail={"kind": kind, "contract": h})
         return {"audit_id": entry.id, "verdict": "deviation", "deviation_id": did, "contract": h}
+
+    def _overtaken(self, entry: AuditEntry, gov: dict) -> bool:
+        """Did a lifecycle write of the service's own land after this entry was written?"""
+        t = self._entry_time(entry)
+        return any(ew["kind"] in ("start", "complete") and ew["landed"] == 1 and ew["created_at"] > t
+                   for ew in self.store.expected_writes(gov["environment"], gov["experiment_id"]))
 
     def _audit_entries(self, project: int) -> list[AuditEntry]:
         """Flagsmith's audit log for the project, merged with the entries its webhook delivered.

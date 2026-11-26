@@ -8,7 +8,8 @@ changes the hash.
 
 Floats are written with Python's shortest round-trip representation. To keep
 the canonical form portable, contracts only hold floats that are short decimals
-(alpha, probabilities, fractions rounded to six places).
+(alpha, probabilities, fractions rounded to six places). Negative zero is
+written as zero: it is the same number, so it must give the same hash.
 """
 
 from __future__ import annotations
@@ -20,9 +21,19 @@ from typing import Any
 HASH_PREFIX = "sha256:"
 
 
+def _plain(value: Any) -> Any:
+    if isinstance(value, float) and value == 0.0:
+        return 0.0  # -0.0 and 0.0 are one number
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
 def canonical_bytes(value: Any) -> bytes:
     return json.dumps(
-        value,
+        _plain(value),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
