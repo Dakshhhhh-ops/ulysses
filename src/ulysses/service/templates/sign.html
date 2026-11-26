@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "_elevation.html" import plate, legend_key, icon %}
 {% from "_parts.html" import deviation_record, signer_block %}
+{% from "_curves.html" import curves %}
 {% set s = c.summary %}
 {% set nav = "home" %}
 {% block title %}{% if s.amendment %}Amendment{% else %}Sign contract{% endif %} {{ h | short }} · Ulysses{% endblock %}
@@ -28,7 +29,7 @@
   <div class="col-7">
     <article class="doc" aria-label="The contract">
       <div class="clause"><span class="no">§1</span><div><p class="h">Experiment and flag</p>
-        <p class="t">Experiment {{ s.experiment }} runs on flag <code>{{ s.flag }}</code>: <code>{{ s.arms[0] }}</code> against <code>{{ s.arms[1] }}</code>.
+        <p class="t">Experiment {{ s.experiment }} runs on flag <code>{{ s.flag }}</code>: <code>{{ s.arms[0] }}</code> against {% for a in s.arms[1:] %}<code>{{ a }}</code>{% if not loop.last %}{{ ' and ' if loop.revindex == 2 else ', ' }}{% endif %}{% endfor %}{% if s.arms | length > 2 %}, each compared with <code>{{ s.arms[0] }}</code>{% endif %}.
         <span class="state-chip" data-s="{{ c.state }}">{{ c.state | state_word }}</span>{% if c.expired %} <span class="state-chip" data-s="expired">expired</span>{% endif %}</p></div></div>
       <div class="clause"><span class="no">§2</span><div><p class="h">Hypothesis</p><p class="t">{{ s.hypothesis }}</p></div></div>
       <div class="clause{% if 'primary_metric' in changed %} changed{% endif %}"><span class="no">§3</span><div><p class="h">Primary metric and direction</p>
@@ -40,7 +41,7 @@
       <div class="clause{% if 'horizon' in changed %} changed{% endif %}"><span class="no">§5</span><div><p class="h">Horizon and looks</p>
         <p class="t">{{ diff('horizon', s.horizon, old.horizon if old else '') }}. A refresh counts as a look only when the smaller arm reaches the next planned count; refreshes in between change nothing.</p></div></div>
       <div class="clause{% if 'boundary' in changed %} changed{% endif %}"><span class="no">§6</span><div><p class="h">Stop rule</p>
-        <p class="t">{{ s.boundary }}.
+        <p class="t">{{ s.boundary }}.{% if s.multiplicity %} {{ s.multiplicity }}; the table below is each comparison's boundary.{% endif %}
         {%- if s.first_reachable_look %} The earliest possible stop is look {{ s.first_reachable_look.look }} ({{ s.first_reachable_look.identities_per_arm | count }} per arm), needing a Flagsmith chance to win of {{ s.first_reachable_look.chance_to_win | bchance(s.first_reachable_look.z) }} (z&nbsp;{{ s.first_reachable_look.z | zval }}).{% endif %}
         At the final look it needs {{ s.final_look.chance_to_win | bchance(s.final_look.z) }} (z&nbsp;{{ s.final_look.z | zval }}). A loss is called at the mirror image.</p>
         <div class="table-wrap sticky-first" role="region" aria-label="Boundary for each look" tabindex="0" style="margin-top:16px">
@@ -61,7 +62,7 @@
       </div></div>
       <div class="clause{% if 'actions' in changed %} changed{% endif %}"><span class="no">§7</span><div><p class="h">Pre-signed actions</p>
         <div class="t"><ul>
-          <li>If it wins: {{ s.on_win | replace('_', ' ') }}{% if s.on_win == 'ship_treatment' %} (serve <code>{{ s.arms[1] }}</code> to everyone){% endif %}.</li>
+          <li>If it wins: {{ s.on_win | replace('_', ' ') }}{% if s.on_win == 'ship_treatment' %}{% if s.arms | length > 2 %} (serve the winning treatment, the crossing one with the largest z, to everyone){% else %} (serve <code>{{ s.arms[1] }}</code> to everyone){% endif %}{% endif %}.</li>
           <li>If it loses: {{ s.on_loss | replace('_', ' ') }}.</li>
           <li>Horizon with no decision: {{ s.on_horizon | replace('_', ' ') }}.</li>
           <li>Guardrail breach: {{ s.on_guardrail_breach | replace('_', ' ') }}.</li>
@@ -71,7 +72,10 @@
         <p class="t">Owner <strong>{{ s.owner }}</strong>{% if c.signatures.owner %}, signed{% if not c.signatures.owner.verified %} (signature does not verify){% endif %}{% endif %}. Second signer <strong>{{ s.second_signer }}</strong>, needed for any amendment{% if c.signatures.second_signer %}, signed{% endif %}.
         {%- set win_days = s.start_within_days or s.expires_after_days %}
         The experiment must start within {{ diff('validity', win_days ~ ' days', ((old.start_within_days or old.expires_after_days) ~ ' days') if old else '') }} of the owner's signature{% if c.expires_in_hours is not none and c.expires_in_hours > 0 and c.state in ('signed',) %}; {{ (c.expires_in_hours * 3600) | duration }} of that window are left{% endif %}.</p></div></div>
+      <div class="clause"><span class="no">§9</span><div><p class="h">Traffic split</p>
+        <p class="t">{% if s.sample_ratio %}{{ s.sample_ratio.text }}. A broken split never ships; at the horizon it means no decision.{% else %}No split is signed: a win can ship even if Flagsmith's exposure counts show the arms did not get the traffic they were meant to.{% endif %}</p></div></div>
     </article>
+    {{ curves(oc_curves) }}
 
     <section class="sign-panel" id="sign-panel" data-hash="{{ h }}" aria-labelledby="sign-h">
       <h2 id="sign-h">Sign</h2>

@@ -34,7 +34,7 @@
     <tbody>
     {%- for g in rows %}
       <tr>
-        <td><code>{{ g.name }}</code><span class="sub" style="display:block;color:var(--graphite);font-size:13px">should {{ g.direction }}</span></td>
+        <td><code>{{ g.label or g.name }}</code><span class="sub" style="display:block;color:var(--graphite);font-size:13px">should {{ g.direction }}</span></td>
         <td style="font-size:13px">{{ g.rule }}</td>
         <td class="num">{% if g.worse %}{{ g.worse }}{% if g.worse_z %} <span class="cell-z">z {{ g.worse_z }}</span>{% endif %}{% else %}<span class="muted">no result yet</span>{% endif %}</td>
         <td class="num">{% if g.stop_at %}{{ g.stop_at }}{% else %}<span class="muted">–</span>{% endif %}</td>

@@ -31,6 +31,11 @@ REFRESH_FLOOR_MINUTES = 5
 # experiments at 100 identities per arm per look, because Flagsmith's relative-lift z is skewed at low
 # counts; at 0.01 it was 4.2% (not_increase 0.1%).
 GUARDRAIL_ALPHA = 0.01  # Flagsmith allows one results refresh per experiment every five minutes
+# Sample-ratio mismatch: Flagsmith's own stats.py docstring calls p < 0.001 a broken split, and it skips the
+# test below 100 identities in all arms (SRM_MIN_TOTAL_IDENTITIES in api/experimentation/constants.py).
+SRM_P_THRESHOLD = 0.001
+SRM_MIN_TOTAL = 100
+MAX_TREATMENTS = 5
 
 Action = Literal["ship_treatment", "keep_control"]
 
@@ -55,13 +60,32 @@ class ExperimentRef(_Model):
     experiment: int = Field(description="Flagsmith experiment id")
     flag: str = Field(description="Feature (flag) name the experiment runs on")
     control: str = Field("control", description="Variation key of the control arm (Flagsmith reserves 'control')")
-    treatment: str = Field(description="Variation key of the treatment arm")
+    treatment: str = Field(description="Variation key of the treatment arm (the first, if there are several)")
+    more_treatments: list[str] | None = Field(
+        None, description="Further treatment arms, each compared with control. Absent for a two-arm experiment. "
+        "With more than one treatment the boundary splits alpha across the comparisons (boundary.multiplicity).")
 
     @model_validator(mode="after")
     def _arms_differ(self) -> "ExperimentRef":
         if self.control == self.treatment:
             raise ValueError("control and treatment must be different variations")
+        if self.more_treatments is not None:
+            if not self.more_treatments:
+                raise ValueError("more_treatments must list at least one arm, or be left out")
+            arms = [self.control, *self.treatments]
+            if len(set(arms)) != len(arms):
+                raise ValueError("every arm must be a different variation")
+            if len(self.treatments) > MAX_TREATMENTS:
+                raise ValueError(f"at most {MAX_TREATMENTS} treatments against one control")
         return self
+
+    @property
+    def treatments(self) -> list[str]:
+        return [self.treatment, *(self.more_treatments or [])]
+
+    @property
+    def arms(self) -> list[str]:
+        return [self.control, *self.treatments]
 
 
 class Metric(_Model):
@@ -130,6 +154,10 @@ class Boundary(_Model):
     spending: Literal["lan_demets_obrien_fleming"] = SPENDING
     alpha: float = Field(0.05, description="Two-sided nominal level: alpha/2 for a false win, alpha/2 for a false loss")
     sides: Literal["two_sided"] = "two_sided"
+    multiplicity: Literal["bonferroni"] | None = Field(
+        None, description="How alpha is split across several treatment-vs-control comparisons. 'bonferroni': each "
+        "comparison runs its own boundary at alpha / (number of treatments), so the chance of shipping any "
+        "do-nothing treatment stays at most alpha/2 whatever the other arms do. Absent for two arms.")
     planned: list[PlannedLook] = Field(default_factory=list)
 
     @field_validator("alpha")
@@ -138,6 +166,55 @@ class Boundary(_Model):
         if not (0.0 < v <= 0.2):
             raise ValueError("alpha must be in (0, 0.2]")
         return v
+
+
+class SampleRatio(_Model):
+    """The signed traffic split and the sample-ratio-mismatch test that guards a win."""
+
+    split: dict[str, float] = Field(
+        description="Percent of enrolled identities per variation key, control included (sums to 100). It must "
+        "match the experiment's rollout weights in Flagsmith when the contract is submitted.")
+    p_threshold: float = Field(
+        SRM_P_THRESHOLD, description="A win is held while the chi-square p-value of Flagsmith's exposure counts "
+        "against the split is below this")
+    min_total: int = Field(SRM_MIN_TOTAL, description="Below this many identities in all arms the test is not run")
+
+    @field_validator("split")
+    @classmethod
+    def _split(cls, v: dict[str, float]) -> dict[str, float]:
+        if len(v) < 2:
+            raise ValueError("a split needs at least two arms")
+        if any(not (0 < x < 100) for x in v.values()):
+            raise ValueError("each arm's share must be between 0 and 100 percent")
+        if abs(sum(v.values()) - 100) > 0.05:
+            raise ValueError(f"the split must sum to 100 percent, got {sum(v.values())}")
+        return v
+
+    @field_validator("p_threshold")
+    @classmethod
+    def _p(cls, v: float) -> float:
+        if not (1e-6 <= v <= 0.05):
+            raise ValueError("p_threshold must be between 0.000001 and 0.05")
+        return v
+
+    @field_validator("min_total")
+    @classmethod
+    def _min(cls, v: int) -> int:
+        if v < 20:
+            raise ValueError("min_total must be at least 20 (the chi-square approximation needs counts)")
+        return v
+
+    def shares(self, arms: list[str]) -> list[float]:
+        total = sum(self.split[a] for a in arms)
+        return [self.split[a] / total for a in arms]
+
+
+def equal_split(arms: list[str]) -> dict[str, float]:
+    """An even split in percent, rounded so the canonical form stays short; the last arm takes the rest."""
+    each = round(100 / len(arms), 4)
+    out = {a: each for a in arms[:-1]}
+    out[arms[-1]] = round(100 - each * (len(arms) - 1), 4)
+    return out
 
 
 class Actions(_Model):
@@ -225,6 +302,9 @@ class Contract(_Model):
         True, description="A win does not ship while Flagsmith has no result for a guardrail (collecting data)")
     design: Design | None = None
     amendment: Amendment | None = None
+    sample_ratio: SampleRatio | None = Field(
+        None, description="Signed traffic split and mismatch test. Absent in contracts signed before the check "
+        "existed; those can ship without it.")
 
     @field_validator("ulysses_contract")
     @classmethod
@@ -249,7 +329,15 @@ class Contract(_Model):
             raise ValueError("guardrail names must be unique")
         if self.primary_metric.name in names:
             raise ValueError("the primary metric cannot also be a guardrail")
-        expected = planned_table(self.horizon, self.boundary.alpha)
+        m = len(self.experiment.treatments)
+        if m > 1 and self.boundary.multiplicity is None:
+            raise ValueError("several treatments need boundary.multiplicity (bonferroni) to split alpha across them")
+        if m == 1 and self.boundary.multiplicity is not None:
+            raise ValueError("boundary.multiplicity applies only with more than one treatment")
+        if self.sample_ratio is not None and set(self.sample_ratio.split) != set(self.experiment.arms):
+            raise ValueError(f"sample_ratio.split must name exactly the arms {self.experiment.arms}, "
+                             f"not {sorted(self.sample_ratio.split)}")
+        expected = planned_table(self.horizon, self.comparison_alpha)
         if len(self.boundary.planned) != len(expected):
             raise ValueError("boundary.planned must have one row per look; regenerate it with `ulysses contract fix`")
         for got, want in zip(self.boundary.planned, expected):
@@ -263,6 +351,16 @@ class Contract(_Model):
                 )
         return self
 
+    @property
+    def comparisons(self) -> int:
+        """Treatment-vs-control comparisons the boundary covers."""
+        return len(self.experiment.treatments)
+
+    @property
+    def comparison_alpha(self) -> float:
+        """Two-sided level each comparison's boundary is built at (alpha split by Bonferroni)."""
+        return comparison_alpha(self.boundary.alpha, self.comparisons)
+
     # ---- identity -------------------------------------------------------
 
     def canonical(self) -> dict[str, Any]:
@@ -271,6 +369,10 @@ class Contract(_Model):
     @property
     def hash(self) -> str:
         return content_hash(self.canonical())
+
+
+def comparison_alpha(alpha: float, comparisons: int) -> float:
+    return alpha / comparisons if comparisons > 1 else alpha
 
 
 @functools.lru_cache(maxsize=256)
@@ -312,8 +414,15 @@ def draft(
     amendment: Amendment | None = None,
     design: Design | None = None,
     require_guardrail_results_to_ship: bool = True,
+    sample_ratio: "SampleRatio | None | Literal['equal']" = "equal",
 ) -> Contract:
+    """Build a contract. ``sample_ratio="equal"`` signs an even split at the default threshold; pass a
+    ``SampleRatio`` for Flagsmith's actual weights, or None to sign no sample-ratio check."""
+    m = len(experiment.treatments)
+    if sample_ratio == "equal":
+        sample_ratio = SampleRatio(split=equal_split(experiment.arms))
     return Contract(
+        sample_ratio=sample_ratio,
         design=design,
         require_guardrail_results_to_ship=require_guardrail_results_to_ship,
         experiment=experiment,
@@ -321,7 +430,8 @@ def draft(
         primary_metric=primary_metric,
         guardrails=guardrails or [],
         horizon=horizon,
-        boundary=Boundary(alpha=alpha, planned=planned_table(horizon, alpha)),
+        boundary=Boundary(alpha=alpha, multiplicity="bonferroni" if m > 1 else None,
+                          planned=planned_table(horizon, comparison_alpha(alpha, m))),
         actions=actions or Actions(),
         owner=owner,
         second_signer=second_signer,
@@ -367,6 +477,12 @@ def with_regenerated_table(data: dict[str, Any]) -> Contract:
     """Rebuild ``boundary.planned`` from the horizon and alpha (for hand-edited drafts)."""
     horizon = Horizon.model_validate(data["horizon"])
     b = dict(data.get("boundary", {}))
-    b["planned"] = [p.model_dump(mode="json", exclude_none=True) for p in planned_table(horizon, b.get("alpha", 0.05))]
+    m = 1 + len((data.get("experiment") or {}).get("more_treatments") or [])
+    if m > 1:
+        b["multiplicity"] = "bonferroni"
+    else:
+        b.pop("multiplicity", None)
+    b["planned"] = [p.model_dump(mode="json", exclude_none=True)
+                    for p in planned_table(horizon, comparison_alpha(b.get("alpha", 0.05), m))]
     data = {**data, "boundary": b}
     return Contract.model_validate(data)

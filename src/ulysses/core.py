@@ -123,6 +123,28 @@ def _rollout_of(exp: ExperimentInfo) -> dict | None:
     return json.loads(json.dumps(out, sort_keys=True, default=str))  # the same shape it has after storage
 
 
+def flagsmith_split(exp: ExperimentInfo) -> dict[str, float] | None:
+    """The split Flagsmith's experiment rollout serves, in percent per variation key, control included.
+
+    Each multivariate option carries its ``percentage_allocation`` of the enrolled identities and
+    control takes the remainder (field guide 3.4). None when the rollout cannot be read.
+    """
+    r = (exp.raw or {}).get("experiment_rollout")
+    if not isinstance(r, dict):
+        return None
+    by_id = {v.option_id: v.key for v in exp.variations if v.option_id is not None}
+    out: dict[str, float] = {}
+    for m in r.get("multivariate_feature_state_values") or []:
+        key = by_id.get(m.get("multivariate_feature_option"))
+        if key is None:
+            return None
+        out[key] = float(m.get("percentage_allocation") or 0)
+    if not out or sum(out.values()) > 100:
+        return None
+    out[CONTROL_KEY] = 100.0 - sum(out.values())
+    return out
+
+
 class Ulysses:
     def __init__(
         self,
@@ -221,11 +243,27 @@ class Ulysses:
             raise Invalid(f"experiment {exp.id} runs on flag {exp.flag!r}, the contract says {ref.flag!r}")
         if ref.control != CONTROL_KEY:
             raise Invalid("Flagsmith's control variation is always keyed 'control'")
-        if exp.variation(ref.treatment) is None:
-            raise Invalid(f"flag {exp.flag!r} has no variation keyed {ref.treatment!r}")
-        others = [v.key for v in exp.variations if v.key not in (CONTROL_KEY, ref.treatment)]
+        for t in ref.treatments:
+            if exp.variation(t) is None:
+                raise Invalid(f"flag {exp.flag!r} has no variation keyed {t!r}")
+        others = [v.key for v in exp.variations if v.key not in (CONTROL_KEY, *ref.treatments)]
         if others:
-            raise Invalid(f"contracts govern two-arm experiments; this flag also has {others}")
+            raise Invalid(f"this flag also has {others}; a contract must name every treatment arm "
+                          "(experiment.more_treatments), so the error is split across all of them")
+        if c.sample_ratio is not None:
+            if set(c.sample_ratio.split) != set(ref.arms):
+                raise Invalid(f"sample_ratio.split must name exactly the arms {ref.arms}")
+            live = flagsmith_split(exp)
+            if live is not None:
+                weighted = {k: v for k, v in live.items() if v > 0}
+                if set(weighted) != set(ref.arms):
+                    raise Invalid(f"Flagsmith's rollout gives traffic to {sorted(weighted)}; the contract's arms "
+                                  f"are {ref.arms}")
+                for k in ref.arms:
+                    if abs(live[k] - c.sample_ratio.split[k]) > 0.05:
+                        raise Invalid(
+                            f"the signed split gives {k} {c.sample_ratio.split[k]}%, but Flagsmith's rollout "
+                            f"gives it {live[k]}%. The sample-ratio check would test against the wrong split.")
         m = exp.metric(c.primary_metric.name)
         if m is None:
             raise Invalid(f"primary metric {c.primary_metric.name!r} is not attached to experiment {exp.id}")
@@ -259,7 +297,8 @@ class Ulysses:
         if d and d.baseline_rate and d.min_relative_lift:
             try:
                 hp = horizon_plan(min_relative_lift=d.min_relative_lift, baseline_rate=d.baseline_rate,
-                                  alpha=c.boundary.alpha, power=d.power or 0.8, looks=c.horizon.looks)
+                                  alpha=c.boundary.alpha, power=d.power or 0.8, looks=c.horizon.looks,
+                                  comparisons=c.comparisons)
                 if c.horizon.identities_per_arm < hp.identities_per_arm:
                     problems.append(
                         f"horizon {c.horizon.identities_per_arm} per arm is below the {hp.identities_per_arm} "
@@ -276,6 +315,9 @@ class Ulysses:
         elif c.design is None or not c.design.baseline_rate:
             warnings.append("No baseline was recorded, so the service cannot check the horizon against the "
                             "smallest lift you care about.")
+        if c.sample_ratio is None:
+            warnings.append("No traffic split is signed, so a win can ship even if Flagsmith's exposure counts "
+                            "show the split is broken (sample-ratio mismatch).")
         return problems, warnings
 
     def submit(self, contract: ct.Contract | dict | str) -> dict:
@@ -341,8 +383,11 @@ class Ulysses:
         """Draft a contract from the experiment as Flagsmith describes it, and store it."""
         exp = self._fs.get_experiment(environment, experiment_id)
         treatments = [v.key for v in exp.variations if v.key != CONTROL_KEY]
-        if len(treatments) != 1:
-            raise Invalid(f"contracts govern two-arm experiments; flag {exp.flag!r} has treatments {treatments}")
+        if not treatments:
+            raise Invalid(f"flag {exp.flag!r} has no treatment variation")
+        if len(treatments) > ct.MAX_TREATMENTS:
+            raise Invalid(f"flag {exp.flag!r} has {len(treatments)} treatments; a contract covers at most "
+                          f"{ct.MAX_TREATMENTS}")
         goals = [m for m in exp.metrics if not m.is_guardrail]
         if primary_metric:
             pm = exp.metric(primary_metric)
@@ -366,6 +411,7 @@ class Ulysses:
             hp = horizon_plan(
                 min_relative_lift=min_relative_lift, baseline_rate=baseline_rate, baseline_mean=baseline_mean,
                 baseline_sd=baseline_sd, alpha=alpha, power=power, looks=looks, exposure_rate_per_hour=rate,
+                comparisons=len(treatments),
             )
         except ValueError as exc:
             raise Invalid(str(exc)) from exc
@@ -377,6 +423,7 @@ class Ulysses:
                 experiment=experiment_id,
                 flag=exp.flag,
                 treatment=treatments[0],
+                more_treatments=treatments[1:] or None,
             ),
             hypothesis=hypothesis or exp.hypothesis.split(MARK)[0].strip() or f"{treatments[0]} beats control on {pm.name}",
             primary_metric=ct.Metric(name=pm.name, direction=pm.expected_direction),
@@ -393,6 +440,7 @@ class Ulysses:
             validity=ct.Validity(start_within_days=start_within_days),
             design=ct.Design(baseline_rate=baseline_rate, min_relative_lift=min_relative_lift, power=power,
                              override_reason=override_reason),
+            sample_ratio=_signed_split(exp, [CONTROL_KEY, *treatments]),
         )
         out = self.submit(c)
         out["horizon_plan"] = hp.to_dict()
@@ -823,8 +871,9 @@ class Ulysses:
         snap_view = None if snap is None else {
             "as_of": snap.as_of,
             "identities": snap.identities,
+            # Per-treatment entries ("<metric>@<arm>") are kept: a several-treatment card reads its arm's lift.
             "metrics": {k: {"chance_to_win": m.chance_to_win, "lift": m.lift, "direction": m.direction}
-                        for k, m in snap.metrics.items() if "@" not in k},
+                        for k, m in snap.metrics.items()},
             "srm_p_value": snap.srm_p_value,
         }
         out: dict[str, Any] = {"hash": h, "refreshed": refreshed, "note": note, "decision": d.to_dict(),
@@ -1008,12 +1057,23 @@ class Ulysses:
             raise Refused("the confirmation signature does not verify")
         if self._authorised_action(c, p["outcome"]) != p["action"]:
             raise Refused("this action is not the one the contract assigns to the outcome")
+        lk = None
         if p["look_id"]:
             lk = self.store.look(p["look_id"])
             if not lk or lk["outcome"] != p["outcome"] or lk["contract_hash"] != h:
                 raise Refused("the look behind this proposal does not show this outcome")
         ref = c.experiment
-        ship = ref.treatment if p["action"] == "ship_treatment" else None
+        ship = None
+        if p["action"] == "ship_treatment":
+            winner = (lk or {}).get("decision", {}).get("winner") if lk else None
+            if c.comparisons > 1:
+                # Several treatments: ship exactly the one the look found crossing its boundary.
+                if winner not in ref.treatments:
+                    raise Refused("this contract has several treatments and the look behind the proposal names "
+                                  "no winning treatment, so there is nothing it can ship")
+                ship = winner
+            else:
+                ship = ref.treatment
         exp = self._fs.get_experiment(ref.environment, ref.experiment)
         earlier = [ew for ew in self.store.expected_writes(ref.environment, ref.experiment)
                    if ew["kind"] == "complete" and ew["proposal_id"] == pid]
@@ -1121,6 +1181,9 @@ class Ulysses:
                 raise Conflict(f"contract is deviated and the experiment is {exp.status}; nothing left to govern")
         if not reason.strip():
             raise Invalid("an amendment needs a reason; it is written on the experiment")
+        if action_now == "ship_treatment" and old.comparisons > 1:
+            raise Invalid("this contract has several treatments; an amendment cannot say which one to ship now. "
+                          "Only a look whose boundary crossing names the winner can ship a treatment.")
         bad = set(changes) - self.AMENDABLE
         if bad:
             raise Invalid(f"these fields cannot be amended: {sorted(bad)}")
@@ -1632,6 +1695,14 @@ def _sort_key(v: Any) -> tuple:
         return (1, str(v))
 
 
+def _signed_split(exp: ExperimentInfo, arms: list[str]) -> ct.SampleRatio:
+    """The split to sign: Flagsmith's rollout weights when they cover exactly these arms, else even."""
+    live = flagsmith_split(exp)
+    if live is not None and {k for k, v in live.items() if v > 0} == set(arms):
+        return ct.SampleRatio(split={k: round(live[k], 4) for k in arms})
+    return ct.SampleRatio(split=ct.equal_split(arms))
+
+
 def _errors(exc: ValidationError) -> list[dict]:
     return [{"loc": ".".join(str(x) for x in e["loc"]), "msg": e["msg"]} for e in exc.errors()]
 
@@ -1642,7 +1713,21 @@ def summarise(c: ct.Contract) -> dict:
         "experiment": c.experiment.experiment,
         "environment": c.experiment.environment,
         "flag": c.experiment.flag,
-        "arms": [c.experiment.control, c.experiment.treatment],
+        "arms": c.experiment.arms,
+        "treatments": c.experiment.treatments,
+        "comparisons": c.comparisons,
+        "comparison_alpha": c.comparison_alpha,
+        "multiplicity": (None if c.comparisons == 1 else
+                         f"Bonferroni over {c.comparisons} treatment-vs-control comparisons: each has its own "
+                         f"boundary at alpha {c.comparison_alpha:.4g}, so the chance of shipping any treatment "
+                         f"that does nothing stays at most {c.boundary.alpha / 2:g}"),
+        "sample_ratio": None if c.sample_ratio is None else {
+            "split": c.sample_ratio.split, "p_threshold": c.sample_ratio.p_threshold,
+            "min_total": c.sample_ratio.min_total,
+            "text": ("A win is held while the chi-square test of Flagsmith's exposure counts against the split "
+                     + ", ".join(f"{k} {v:g}%" for k, v in c.sample_ratio.split.items())
+                     + f" gives p below {c.sample_ratio.p_threshold:g} (checked from "
+                     f"{c.sample_ratio.min_total} identities)")},
         "hypothesis": c.hypothesis,
         "primary_metric": f"{c.primary_metric.name} should {c.primary_metric.direction}",
         "guardrails": [f"{g.name} {g.direction.replace('_', ' ')} (stop on a {g.alpha:.0%} one-sided "

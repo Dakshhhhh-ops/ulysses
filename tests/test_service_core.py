@@ -112,6 +112,7 @@ def test_contract_must_match_the_flagsmith_experiment(world, keys):
     c = make_contract(keys)
     data = c.canonical()
     data["experiment"]["treatment"] = "nonexistent"
+    data["sample_ratio"]["split"] = {"control": 50.0, "nonexistent": 50.0}  # the split names the contract's arms
     with pytest.raises(Invalid, match="no variation keyed"):
         svc.submit(ct.from_canonical(data))
     data = c.canonical()

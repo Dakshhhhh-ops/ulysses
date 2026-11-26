@@ -65,11 +65,19 @@ class FakeFlagsmith:
         guardrails=(("refunds", "not_increase", "down"),),
         project: int = 1,
         environment: str = "env-key",
+        more_treatments: tuple[str, ...] = (),
+        weights: dict[str, float] | None = None,
     ) -> ExperimentInfo:
+        """``more_treatments`` adds further treatment arms; ``weights`` are the rollout percentages per
+        treatment key (control takes the rest). By default every arm gets an equal share."""
         metrics = [MetricInfo(id=1, name=primary, direction="up", expected_direction="increase")]
         for i, (name, exp_dir, polarity) in enumerate(guardrails, start=2):
             metrics.append(MetricInfo(id=i, name=name, direction=polarity, expected_direction=exp_dir))
         option = 500 + experiment_id
+        keys = [treatment, *more_treatments]
+        options = {k: option + 100 * i for i, k in enumerate(keys)}
+        if weights is None:
+            weights = {k: (50.0 if len(keys) == 1 else round(100 / (len(keys) + 1), 4)) for k in keys}
         info = ExperimentInfo(
             id=experiment_id,
             name=f"exp-{experiment_id}",
@@ -78,14 +86,15 @@ class FakeFlagsmith:
             environment=environment,
             flag=flag,
             feature_id=100 + experiment_id,
-            variations=[Variation(CONTROL_KEY, None), Variation(treatment, option)],
+            variations=[Variation(CONTROL_KEY, None), *(Variation(k, options[k]) for k in keys)],
             metrics=metrics,
             project=project,
             raw={"experiment_rollout": {
                 "enabled": False, "rollout_percentage": 100.0,
                 "feature_state_value": {"type": "string", "value": "classic"},
                 "multivariate_feature_state_values": [
-                    {"multivariate_feature_option": option, "percentage_allocation": 50.0}]}},
+                    {"multivariate_feature_option": options[k], "percentage_allocation": weights[k]}
+                    for k in keys]}},
         )
         self.experiments[experiment_id] = info
         return info
@@ -118,6 +127,28 @@ class FakeFlagsmith:
             metrics=metrics,
             as_of=as_of,
         )
+
+    def set_arm_results(
+        self,
+        experiment_id: int,
+        identities: dict[str, int],
+        chances: dict[str, float | None],
+        guardrails: dict[str, dict[str, float | None]] | None = None,
+        as_of: str | None = None,
+        lifts: dict[str, float | None] | None = None,
+    ) -> None:
+        """Several treatments: Flagsmith's chance_to_win per treatment key, keyed ``metric@arm`` as
+        ``rest.parse_results`` keys each treatment's inference. Like ``parse_results``, the unsuffixed
+        ``metric`` key also carries the first treatment's inference. ``lifts`` sets the primary lift per arm."""
+        info = self.experiments[experiment_id]
+        metrics: dict[str, MetricResult] = {}
+        for arm, chance in chances.items():
+            for m in info.metrics:
+                ctw = ((guardrails or {}).get(arm) or {}).get(m.name, 0.5) if m.is_guardrail else chance
+                lift = None if m.is_guardrail else (lifts or {}).get(arm)
+                metrics[f"{m.name}@{arm}"] = MetricResult(m.name, m.direction, ctw, lift)
+                metrics.setdefault(m.name, MetricResult(m.name, m.direction, ctw, lift))
+        self.results[experiment_id] = ResultsSnapshot(identities=dict(identities), metrics=metrics, as_of=as_of)
 
     # ---- gateway ---------------------------------------------------------
 
