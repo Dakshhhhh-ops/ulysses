@@ -247,19 +247,43 @@ def _judge():
 
 def test_judge_demo_llm_prefers_gemini_then_claude_then_the_scripted_agent():
     jd = _judge()
-    assert jd.pick_agent(True, {"GEMINI_API_KEY": "x", "ANTHROPIC_API_KEY": "y"})[0] == "gemini"
-    assert jd.pick_agent(True, {"ANTHROPIC_API_KEY": "y"})[0] == "anthropic"
-    kind, why = jd.pick_agent(True, {})
-    assert kind == "scripted" and "neither" in why
-    assert jd.pick_agent(False, {"GEMINI_API_KEY": "x"})[0] == "scripted"
-    assert jd.agent_command("gemini", "py", 1)[1].endswith("run_gemini.py")
+    both = {"GEMINI_API_KEY": "AIza-secret", "ANTHROPIC_API_KEY": "sk-ant-secret"}
+    mode, line = jd.choose_agent(True, both, True, True)
+    assert mode == "gemini" and "Google Gen AI SDK" in line and "AIza-secret" not in line
+    assert jd.choose_agent(True, {"ANTHROPIC_API_KEY": "y"}, True, True)[0] == "llm"
+    mode, line = jd.choose_agent(True, both, True, False)  # Gemini SDK missing: falls to Claude, says nothing secret
+    assert mode == "llm" and "sk-ant-secret" not in line
+    mode, line = jd.choose_agent(True, {"GEMINI_API_KEY": "x"}, True, False)
+    assert mode == "scripted" and "--extra gemini" in line
+    mode, line = jd.choose_agent(True, {}, True, True)
+    assert mode == "scripted" and "GEMINI_API_KEY is not set" in line and "ANTHROPIC_API_KEY is not set" in line
+    assert jd.choose_agent(False, both, True, True)[0] == "scripted"
+    assert jd.agent_command("gemini", "py", 1)[1:5] == [str(ROOT / "examples/llm_agent/run.py"), "live",
+                                                         "--model", "gemini"]
+    assert jd.agent_command("llm", "py", 1)[4] == "anthropic"
     assert jd.agent_command("scripted", "py", 1)[1].endswith("agent_session.py")
-    # The key is never on the command line.
-    assert not any("KEY" in part for part in jd.agent_command("gemini", "py", 1))
+    # No key ever goes on the command line.
+    assert not any("KEY" in part for m in ("gemini", "llm") for part in jd.agent_command(m, "py", 1))
 
 
-def test_the_lab_lock_is_written_while_held_and_waits_for_others(tmp_path):
-    from examples.llm_agent.run_gemini import LabLock
+def test_runner_offers_gemini_and_names_each_clients_model(monkeypatch):
+    from examples.llm_agent import run
+
+    class M:
+        def __init__(self, label, model_id=None):
+            self.label, self.model_id = label, model_id
+
+    assert run.model_name(M("gemini", "gemini-x")) == "gemini-x"
+    assert run.model_name(M("anthropic")) == run.MODEL_ID
+    assert run.model_name(M("mock")).startswith("none: scripted mock")
+    assert run.export_target(run.EXPORT_DIR, "gemini") == run.EXPORT_DIR
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-0000")
+    monkeypatch.setattr(gm, "GeminiModel", lambda model: M("gemini", model))
+    assert run.choose_model("auto", "early-96", {}).label == "gemini"
+
+
+def test_the_lab_lock_is_written_while_held_and_released(tmp_path):
+    from examples.llm_agent.run import LabLock
 
     lock = tmp_path / "LAB-LOCK"
     with LabLock(str(lock)):

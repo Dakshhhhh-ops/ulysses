@@ -25,6 +25,9 @@ ulysses = "ulysses.cli:main"
 flagsmith-ulysses = "ulysses.cli:main"
 
 [project.optional-dependencies]
+llm = [
+    "anthropic>=2.14.0",
+]
 gemini = [
     "google-genai>=3.6",
 ]

@@ -1,4 +1,4 @@
-"""The four MCP tools against the service (in-process), and the boundary they inherit."""
+"""The MCP tools against the service (in-process), and the boundary they inherit."""
 
 import json
 from statistics import NormalDist
@@ -50,11 +50,11 @@ def tools(world):
     return call, server, svc, fs
 
 
-def test_four_action_tools_and_one_read_tool(tools):
+def test_five_action_tools_and_one_read_tool(tools):
     _, server, _, _ = tools
     listed = anyio.run(server.list_tools)
     names = sorted(t.name for t in listed)
-    assert names == ["execute", "look", "read_experiment", "sign_contract", "start_under_contract"]
+    assert names == ["execute", "look", "read_experiment", "request_amendment", "sign_contract", "start_under_contract"]
     sign = next(t for t in listed if t.name == "sign_contract")
     # The agent does not choose how strict the rule is.
     assert not {"alpha", "looks", "identities_per_arm", "power"} & set((getattr(sign, "input_schema", None) or sign.inputSchema)["properties"])
@@ -145,3 +145,23 @@ def test_read_proxy_is_get_only(tools):
     assert c.get("/api/flagsmith/experiments/env-key/1").status_code == 200
     for method in ("post", "put", "patch", "delete"):
         assert getattr(c, method)("/api/flagsmith/experiments/env-key/1").status_code == 405
+
+
+def test_amendment_tool_drafts_only_and_execute_names_the_missing_signer(tools, keys):
+    call, _, svc, fs = tools
+    drafted = call("sign_contract", environment="env-key", experiment_id=1, owner="maya", second_signer="sam",
+                   min_relative_lift=0.3, baseline_rate=0.1)
+    h = drafted["hash"]
+    svc.sign(h, "owner", "maya", keys["maya"].sign(signing.contract_message(h, "owner")))
+    assert call("start_under_contract", contract_hash=h)["ok"]
+    amend = call("request_amendment", contract_hash=h, reason="ship now", action_now="ship_treatment")
+    assert amend["ok"] and set(amend["sign_urls"]) == {"owner", "second_signer"}
+    a = amend["hash"]
+    svc.sign(a, "owner", "maya", keys["maya"].sign(signing.contract_message(a, "owner")))
+    refused = call("execute", contract_hash=a, action="ship_treatment")
+    assert refused["status"] == 403 and refused["needs"] == ["second_signer"]
+    assert call("start_under_contract", contract_hash=a)["status"] == 403
+    assert svc.store.contract_row(h)["state"] == "active"  # the signed contract still governs
+    assert not [w for w in fs.writes if w[0] == "complete"]
+    svc.sign(a, "second_signer", "sam", keys["sam"].sign(signing.contract_message(a, "second_signer")))
+    assert svc.store.contract_row(h)["state"] == "superseded"
