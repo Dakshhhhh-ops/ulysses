@@ -184,8 +184,17 @@ def export_store(db_path: str | Path, *, title: str, flagsmith: str, note: str |
     for p in props:
         ev = {"event": "proposal", "hash": p["contract_hash"], "proposal_id": p["id"], "look_id": p["look_id"],
               "outcome": p["outcome"], "action": p["action"]}
+        autonomous = p.get("authorised_by") == "autonomy"
+        if autonomous:
+            ev["authorised_by"] = "signed_autonomy"
         events.append((p["created_at"], 7, ev))
-        if p["confirm_signature"]:
+        if autonomous and p["state"] in ("executed", "failed"):
+            # No tap: the agent's execute call ran it under the contract's signed autonomy clause.
+            result = json.loads(p["result"]) if p["result"] else None
+            events.append((p["updated_at"], 8, {"event": "autonomous_execute", "proposal_id": p["id"],
+                                                "hash": p["contract_hash"], "action": p["action"],
+                                                "recorded_state": p["state"], "recorded_result": result}))
+        elif p["confirm_signature"]:
             result = json.loads(p["result"]) if p["result"] else None
             events.append((p["updated_at"], 8, {"event": "confirm", "proposal_id": p["id"], "hash": p["contract_hash"],
                                                 "signer": p["confirm_signer"], "signature": p["confirm_signature"],
@@ -194,11 +203,14 @@ def export_store(db_path: str | Path, *, title: str, flagsmith: str, note: str |
     # Proposals are made by the look that fires; keep them right after it in the file.
     out_events = [{"t": t(at), **ev} for at, _, ev in events]
     span = out_events[-1]["t"] if out_events else 0.0
+    counts = {k: sum(1 for e in out_events if e["event"] == k)
+              for k in ("signer", "experiment", "contract", "signature", "start", "look", "attempt", "confirm")}
+    if any(e["event"] == "autonomous_execute" for e in out_events):
+        counts["autonomous_execute"] = sum(1 for e in out_events if e["event"] == "autonomous_execute")
     header = {
         "format": FORMAT, "version": VERSION, "title": title, "flagsmith": flagsmith,
         "recorded_span_s": span,
-        "counts": {k: sum(1 for e in out_events if e["event"] == k)
-                   for k in ("signer", "experiment", "contract", "signature", "start", "look", "attempt", "confirm")},
+        "counts": counts,
         "not_replayed": {"deviations": len(deviations), "service_faults": len(faults),
                          "refusal_notes": sum(1 for e in out_events if e["event"] == "refusal_note")},
         "note": note,
@@ -477,9 +489,22 @@ class Replayer:
             return Step(t, k, text, ok=ok, detail={"decision": got, "card": out.get("card_url")})
         if k == "proposal":
             p = self.store.proposal(ev["proposal_id"])
-            ok = bool(p) and p["outcome"] == ev["outcome"] and p["action"] == ev["action"]
-            return Step(t, k, f"contract fired: {ev['outcome']} -> pre-signed action {ev['action']} waits for the "
-                        "owner's tap" + ("" if ok else " (NOT reproduced by the service)"), ok=ok)
+            want_auto = ev.get("authorised_by") == "signed_autonomy"
+            ok = (bool(p) and p["outcome"] == ev["outcome"] and p["action"] == ev["action"]
+                  and (p.get("authorised_by") == "autonomy") == want_auto)
+            how = ("is authorised in advance by the signed autonomy clause (no tap)" if want_auto
+                   else "waits for the owner's tap")
+            return Step(t, k, f"contract fired: {ev['outcome']} -> pre-signed action {ev['action']} {how}"
+                        + ("" if ok else " (NOT reproduced by the service)"), ok=ok)
+        if k == "autonomous_execute":
+            out = svc.execute(ev["proposal_id"], requested_action=ev["action"])
+            rec = ev.get("recorded_result") or {}
+            got = out.get("result") or {}
+            ok = (out["state"] == ev["recorded_state"] and got.get("serving") == rec.get("serving")
+                  and out.get("authorised_by") == "signed_autonomy")
+            return Step(t, k, f"agent executes {out['action']} under the signed autonomy clause, no tap -> "
+                        f"flag {got.get('flag')} serves {got.get('serving')}"
+                        + ("" if ok else f" (recorded: {rec.get('serving')}, {ev['recorded_state']})"), ok=ok)
         if k == "confirm":
             out = svc.confirm(ev["proposal_id"], ev["signer"], ev["signature"])
             rec = ev.get("recorded_result") or {}

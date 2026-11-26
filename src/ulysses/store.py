@@ -173,6 +173,9 @@ MIGRATIONS = [
     ("audit_seen", "detail", "ALTER TABLE audit_seen ADD COLUMN detail TEXT"),
     # A token row without an expiry (made before expiries existed) never validates.
     ("enrol_tokens", "expires_at", "ALTER TABLE enrol_tokens ADD COLUMN expires_at REAL"),
+    # NULL: the action waits for (or ran after) the owner's signed tap. 'autonomy': the contract's signed
+    # autonomy clause authorised it in advance, so it runs without a tap.
+    ("proposals", "authorised_by", "ALTER TABLE proposals ADD COLUMN authorised_by TEXT"),
 ]
 
 
@@ -442,12 +445,12 @@ class Store:
     # ---- proposals -------------------------------------------------------------------
 
     def add_proposal(self, *, contract_hash: str, look_id: str | None, outcome: str, action: str,
-                     state: str, now: float) -> str:
+                     state: str, now: float, authorised_by: str | None = None) -> str:
         pid = "P-" + uuid.uuid4().hex[:12]
         self._exec(
-            "INSERT INTO proposals(id, contract_hash, look_id, outcome, action, state, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (pid, contract_hash, look_id, outcome, action, state, now, now),
+            "INSERT INTO proposals(id, contract_hash, look_id, outcome, action, state, created_at, updated_at, "
+            "authorised_by) VALUES (?,?,?,?,?,?,?,?,?)",
+            (pid, contract_hash, look_id, outcome, action, state, now, now, authorised_by),
         )
         return pid
 

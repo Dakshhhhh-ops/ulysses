@@ -84,6 +84,25 @@ container check needs Docker: `ULYSSES_LIVE_DOCKER=1 uv run pytest -q tests/test
 |---|---|---|
 | A route returns the Flagsmith key or the webhook secret in its body | Defence in depth only: `SecretGuard` matches the secrets' exact bytes, so an encoded, escaped or split copy passes it. The defence that counts is that no route returns either. A whole response (every JSON route) is checked before anything is sent and withheld with a 500; a streamed response streams, holding back one secret's length of each chunk, and is cut where a secret appears, even across chunks | `test_guard_withholds_a_response_that_would_leak_the_key` (`tests/test_service_http.py`), `test_secret_guard_still_withholds_a_whole_response`, `test_secret_guard_lets_a_streaming_response_stream`, `test_secret_guard_cuts_a_stream_carrying_a_secret_even_split_across_chunks` (**fixed**: a streamed response was held in memory until it ended) |
 
+### Signed autonomy
+
+The owner decides, inside the signed contract, which pre-assigned actions the agent may carry out without a
+tap: `[autonomy] without_confirmation = ["keep_control"]`. A look that fires an outcome whose action is listed
+(a guardrail breach, a loss, the horizon) creates its proposal already authorised ("authorised in advance by
+clause autonomy, signed by <owner>"), and `execute` runs it with no confirm signature, so a harmful experiment
+stops at once, at night, without waking anyone. Shipping is never autonomous. Absent, the clause is empty and
+every action waits for the tap; existing contracts keep their hashes. Tests in `tests/test_autonomy.py`.
+
+| Attack | Defence | Test |
+|---|---|---|
+| The agent drafts, or amends, a contract that lists `ship_treatment` in `without_confirmation`, to ship without a tap | Contract validation refuses it with "ship_treatment can never run without the owner's tap"; an amendment that adds it does not validate, so it never reaches a signature | `test_ship_treatment_can_never_be_autonomous`, `test_amendment_adding_ship_treatment_to_autonomy_is_refused` |
+| An unknown or unassigned action in the clause, an empty list, a repeated action | Refused at validation | `test_unknown_or_empty_autonomy_is_refused` |
+| An autonomy clause on an unsigned contract starts the experiment, or lets the agent act | The clause is part of the hashed contract; nothing starts or executes without the owner's signature over that hash | `test_autonomy_clause_on_an_unsigned_contract_cannot_start` |
+| The agent adds keep-control autonomy to a running contract by itself | `autonomy` is amendable like any other field, so the change is a draft that governs nothing until both the owner and the second signer sign it | `test_adding_autonomy_needs_both_signers` |
+| A win under a contract with keep-control autonomy ships without a tap, or the agent asks for the wrong action | A win's proposal still waits for the owner's tap; a request for an action other than the assigned one is refused and logged | `test_win_still_waits_for_the_tap_under_autonomy`, `test_wrong_action_is_refused_under_autonomy` |
+| A store edit marks a proposal autonomous for an action the signed clause does not list (or for an amendment's action) | `execute` re-checks the proposal against the signed clause at the moment of execution and refuses | `test_store_edit_marking_a_ship_autonomous_is_refused` |
+| An exporter marks an executed outcome `signed_autonomy` to skip the tap check | `ulysses verify` checks it against the contract's `[autonomy]` clause and fails it unless it is a look-fired action the clause lists | `test_verify_fails_an_autonomous_execution_the_clause_does_not_list` (`tests/test_autonomy.py`) |
+
 ### Races
 
 | Attack | Defence | Test |

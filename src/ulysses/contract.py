@@ -283,6 +283,37 @@ class Health(_Model):
         "existed; those ship without the check.")
 
 
+class Autonomy(_Model):
+    """Which pre-assigned actions the agent may carry out without the owner's one-tap confirmation.
+
+    The owner signs this clause with the rest of the contract, so it is the owner's decision made in advance,
+    not the agent's. Only ``keep_control`` may be listed: shipping a variation to everyone always waits for the
+    owner's signed tap. Absent (the default) means every action waits for the tap; contracts signed before the
+    clause existed keep their hash.
+    """
+
+    without_confirmation: list[str] = Field(
+        description="Actions the agent may run on its own when a look fires an outcome the contract assigns them "
+        "to. Only 'keep_control' is allowed.")
+
+    @field_validator("without_confirmation")
+    @classmethod
+    def _actions(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("autonomy.without_confirmation must list at least one action, or leave [autonomy] out")
+        if len(set(v)) != len(v):
+            raise ValueError("autonomy.without_confirmation lists an action twice")
+        for a in v:
+            if a == "ship_treatment":
+                raise ValueError("ship_treatment can never run without the owner's tap: shipping a variation to "
+                                 "everyone always waits for the owner's signed confirmation. Only keep_control "
+                                 "may be listed in autonomy.without_confirmation")
+            if a != "keep_control":
+                raise ValueError(f"unknown action {a!r} in autonomy.without_confirmation; only keep_control may "
+                                 "be listed")
+        return v
+
+
 class Amendment(_Model):
     supersedes: str = Field(description="Hash of the contract this one replaces")
     reason: str
@@ -317,6 +348,9 @@ class Contract(_Model):
         "existed; those can ship without it.")
     health: Health | None = Field(
         None, description="Feature Health rule. Absent in contracts signed before it existed.")
+    autonomy: Autonomy | None = Field(
+        None, description="Actions the agent may carry out without the owner's tap. Absent: every action waits "
+        "for the tap.")
 
     @field_validator("ulysses_contract")
     @classmethod
@@ -349,6 +383,12 @@ class Contract(_Model):
         if self.sample_ratio is not None and set(self.sample_ratio.split) != set(self.experiment.arms):
             raise ValueError(f"sample_ratio.split must name exactly the arms {self.experiment.arms}, "
                              f"not {sorted(self.sample_ratio.split)}")
+        if self.autonomy is not None:
+            assigned = {self.actions.win, self.actions.loss, self.actions.horizon, self.actions.guardrail_breach}
+            for a in self.autonomy.without_confirmation:
+                if a not in assigned:
+                    raise ValueError(f"autonomy.without_confirmation lists {a!r}, which the contract assigns to "
+                                     "no outcome")
         expected = planned_table(self.horizon, self.comparison_alpha)
         if len(self.boundary.planned) != len(expected):
             raise ValueError("boundary.planned must have one row per look; regenerate it with `ulysses contract fix`")
@@ -362,6 +402,16 @@ class Contract(_Model):
                     "computed with other settings"
                 )
         return self
+
+    def autonomous(self, action: str) -> bool:
+        """True when the signed autonomy clause lets the agent run ``action`` without the owner's tap."""
+        return (self.autonomy is not None and action != "ship_treatment"
+                and action in self.autonomy.without_confirmation)
+
+    def autonomous_outcomes(self) -> list[str]:
+        """Outcomes a look can fire whose assigned action runs without the owner's tap, in a fixed order."""
+        return [o for o in ("guardrail_breach", "loss", "horizon", "win")
+                if self.autonomous(getattr(self.actions, o))]
 
     @property
     def comparisons(self) -> int:
@@ -428,6 +478,7 @@ def draft(
     require_guardrail_results_to_ship: bool = True,
     sample_ratio: "SampleRatio | None | Literal['equal']" = "equal",
     health: "Health | None | Literal['default']" = "default",
+    autonomy: Autonomy | None = None,
 ) -> Contract:
     """Build a contract. ``sample_ratio="equal"`` signs an even split at the default threshold; pass a
     ``SampleRatio`` for Flagsmith's actual weights, or None to sign no sample-ratio check. ``health="default"``
@@ -454,6 +505,7 @@ def draft(
         second_signer=second_signer,
         validity=validity or Validity(),
         amendment=amendment,
+        autonomy=autonomy,
     )
 
 

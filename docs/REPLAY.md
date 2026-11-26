@@ -54,7 +54,8 @@ Then one event per line, in recorded order, each with `t` and `event`:
 | `signature` | `hash`, `role`, `signer`, `signature` | `sign(...)`; must verify against the key in the contract |
 | `start` | `hash` | `start_under_contract(hash)`; the contract must become active |
 | `look` | `hash`, `look_id`, `refreshed`, `flagsmith` (`as_of_t`, `identities`, `metrics` with `chance_to_win`, `lift`, `direction`, `srm_p_value`), `decision` | the stand-in returns these numbers (and refuses the refresh if `refreshed` is false, as Flagsmith's five-minute floor did); `look(hash)` must give the same decision |
-| `proposal` | `hash`, `proposal_id`, `look_id`, `outcome`, `action` | checks that the look that fired made this proposal |
+| `proposal` | `hash`, `proposal_id`, `look_id`, `outcome`, `action`, `authorised_by` (only `"signed_autonomy"`, when the contract's autonomy clause authorised it) | checks that the look that fired made this proposal, authorised the same way |
+| `autonomous_execute` | `proposal_id`, `hash`, `action`, `recorded_state`, `recorded_result` | the agent's `execute` of a proposal the signed autonomy clause authorised (no tap); the served variation must match |
 | `confirm` | `proposal_id`, `hash`, `signer`, `signature`, `recorded_state`, `recorded_result` | `confirm(...)` with the owner's recorded signature; the stand-in completes the experiment, and the served variation must match |
 
 Look and proposal ids are kept from the recorded run, because the owner's confirmation signature covers
