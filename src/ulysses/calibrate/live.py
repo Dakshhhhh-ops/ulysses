@@ -140,7 +140,9 @@ def run(
         environment_key=cal["server_key"], api_url=cfg.api_url + "/api/v1/",
         enable_local_evaluation=True, environment_refresh_interval_seconds=30,
         enable_events=True,
-        event_processor_config=EventProcessorConfig(events_api_url=cfg.api_url + "/api/", flush_interval_seconds=1.0),
+        # A large buffer, so a send that timed out and is kept for retry cannot push events out.
+        event_processor_config=EventProcessorConfig(events_api_url=cfg.api_url + "/api/", flush_interval_seconds=1.0,
+                                                    max_buffer_items=50_000),
     )
     time.sleep(2)
 
@@ -173,7 +175,8 @@ def run(
             t0 = time.time()
             for s in states:
                 send_until(s, per_arm_per_look * k)
-            sdk.flush_events()
+            for _ in range(3):  # a batch kept after a timed-out send goes out on the next flush
+                sdk.flush_events()
             time.sleep(10)  # let the last event batch land before Flagsmith recomputes
             progress(f"look {k}: traffic sent in {time.time() - t0:.0f}s")
             wait = last_refresh + REFRESH_GAP - time.time()
