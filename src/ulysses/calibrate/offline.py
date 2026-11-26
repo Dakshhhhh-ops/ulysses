@@ -1,0 +1,369 @@
+"""Offline engine calibration: Flagsmith's unmodified statistics code on simulated experiments.
+
+Each simulated experiment has two arms. At every look, ``per_arm_per_look`` more synthetic identities
+arrive in each arm; their 0/1 conversions are summed into Flagsmith's ``VariantStats`` and passed to
+Flagsmith's own ``compare_to_control`` (loaded from ``stats.py`` by hash, see ``flagsmith_source.py``).
+Flagsmith's own "collecting data" floors (from its ``constants.py``) decide whether a result is shown.
+
+Rules scored on the same chance-to-win values:
+
+* first look over 95% or under 5%: stop the first time the chance to beat control is over 95%
+  (Flagsmith's docs call that Winning) or under 5% (Losing). This is a two-sided 10%-level rule;
+* the same thresholds read once, at the final look (its single-look error rate);
+* the Ulysses contract (``decision.evaluate``) at alpha 0.05 and at alpha 0.10. Alpha 0.10 is the
+  like-for-like comparison with the 95%/5% thresholds.
+
+A false Winning is the costly error: shipping a variation that does nothing. A false Losing keeps
+control. Guardrails are simulated as a second, independent 0/1 metric with no effect, scored under
+the old fixed rule (stop when the chance worse reaches 97.5% at any refresh) and the signed one-sided
+spending boundary the contract now uses.
+
+Simulated synthetic units, not user traffic.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from .. import boundary as bd
+from .. import contract as ct
+from ..decision import Observation, evaluate
+from ..horizon import plan as horizon_plan
+from ..signing import Keypair
+from . import flagsmith_source
+
+WIN, LOSE = 0.95, 0.05  # the levels Flagsmith's docs call Winning and Losing
+OLD_GUARDRAIL_RULE = 0.975  # the fixed per-refresh threshold the first version used
+DEFAULT_SEEDS = (62944, 101, 202, 303, 404)
+
+
+@dataclass
+class RuleCount:
+    runs: int = 0
+    winning: int = 0
+    losing: int = 0
+    stop_looks: list[int] = field(default_factory=list)
+    used: list[int] = field(default_factory=list)  # identities per arm used, no-call runs at the horizon
+
+    @property
+    def any_call(self) -> int:
+        return self.winning + self.losing
+
+    def rate(self, n: int) -> float:
+        return n / self.runs if self.runs else float("nan")
+
+    def merge(self, o: "RuleCount") -> None:
+        self.runs += o.runs
+        self.winning += o.winning
+        self.losing += o.losing
+        self.stop_looks += o.stop_looks
+        self.used += o.used
+
+    def summary(self) -> dict:
+        return {
+            "runs": self.runs, "winning": self.winning, "losing": self.losing, "any_call": self.any_call,
+            "winning_rate": round(self.rate(self.winning), 4), "losing_rate": round(self.rate(self.losing), 4),
+            "any_call_rate": round(self.rate(self.any_call), 4),
+            "mean_stop_look": round(float(np.mean(self.stop_looks)), 2) if self.stop_looks else None,
+            "mean_identities_per_arm_used": round(float(np.mean(self.used)), 1) if self.used else None,
+        }
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n == 0:
+        return (float("nan"), float("nan"))
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (max(0.0, c - h), min(1.0, c + h))
+
+
+def _contract(alpha: float, looks: int, horizon: int, guardrail: str | None = None) -> ct.Contract:
+    a, b = Keypair.generate(), Keypair.generate()
+    return ct.draft(
+        experiment=ct.ExperimentRef(project=0, environment="simulation", experiment=0, flag="aa", treatment="b"),
+        hypothesis="calibration (simulated synthetic units)",
+        primary_metric=ct.Metric(name="conversion", direction="increase"),
+        guardrails=[ct.Guardrail(name="guard", direction=guardrail)] if guardrail else [],
+        horizon=ct.Horizon(identities_per_arm=horizon, looks=looks),
+        owner=ct.Signer(name="calibration-owner", public_key=a.public),
+        second_signer=ct.Signer(name="calibration-second", public_key=b.public),
+        alpha=alpha,
+    )
+
+
+def _chances(stats, consts, conv_c, conv_t, per_arm: int, looks: int) -> list[float | None]:
+    out: list[float | None] = []
+    for k in range(looks):
+        n = per_arm * (k + 1)
+        sc, st = float(conv_c[k]), float(conv_t[k])
+        if n < consts.RESULTS_MIN_IDENTITIES_PER_VARIANT or sc < consts.RESULTS_MIN_CONVERSIONS_PER_VARIANT \
+                or st < consts.RESULTS_MIN_CONVERSIONS_PER_VARIANT:
+            out.append(None)
+            continue
+        inf = stats.compare_to_control(stats.VariantStats(n=n, sum=sc, sum_squares=sc),
+                                       stats.VariantStats(n=n, sum=st, sum_squares=st))
+        out.append(None if inf is None else inf.chance_to_win)
+    return out
+
+
+def simulate(
+    *,
+    runs: int = 2000,
+    looks: int = 30,
+    per_arm_per_look: int = 100,
+    base_rate: float = 0.10,
+    relative_lift: float = 0.0,
+    alphas: tuple[float, ...] = (0.05, 0.10),
+    seed: int = 62944,
+    guardrail_rate: float | None = 0.10,
+    flagsmith_src: str | None = None,
+) -> dict:
+    stats, consts, provenance = flagsmith_source.load(flagsmith_src)
+    rng = np.random.default_rng(seed)
+    horizon = looks * per_arm_per_look
+    contracts = {a: _contract(a, looks, horizon) for a in alphas}
+    guard_contracts = {d: _contract(0.05, looks, horizon, d) for d in ("not_increase", "not_decrease")}
+    banner_any, banner_final = RuleCount(runs), RuleCount(runs)
+    rule = {a: RuleCount(runs) for a in alphas}
+    g_old = {d: 0 for d in guard_contracts}
+    g_new = {d: 0 for d in guard_contracts}
+    p_c, p_t = base_rate, base_rate * (1 + relative_lift)
+    t0 = time.time()
+    for _ in range(runs):
+        chances = _chances(stats, consts, rng.binomial(per_arm_per_look, p_c, size=looks).cumsum(),
+                           rng.binomial(per_arm_per_look, p_t, size=looks).cumsum(), per_arm_per_look, looks)
+        for k, ch in enumerate(chances):
+            if ch is not None and (ch > WIN or ch < LOSE):
+                if ch > WIN:
+                    banner_any.winning += 1
+                else:
+                    banner_any.losing += 1
+                banner_any.stop_looks.append(k + 1)
+                banner_any.used.append(per_arm_per_look * (k + 1))
+                break
+        else:
+            banner_any.used.append(horizon)
+        last = chances[-1]
+        if last is not None and last > WIN:
+            banner_final.winning += 1
+        elif last is not None and last < LOSE:
+            banner_final.losing += 1
+        for a, c in contracts.items():
+            prior: list[float] = []
+            stopped = False
+            for k, ch in enumerate(chances):
+                n = per_arm_per_look * (k + 1)
+                d = evaluate(c, prior, Observation(n, n, ch))
+                if d.counted:
+                    prior.append(d.fraction)
+                if d.outcome in ("win", "loss"):
+                    if d.outcome == "win":
+                        rule[a].winning += 1
+                    else:
+                        rule[a].losing += 1
+                    rule[a].stop_looks.append(k + 1)
+                    rule[a].used.append(n)
+                    stopped = True
+                    break
+                if d.outcome == "horizon":
+                    break
+            if not stopped:
+                rule[a].used.append(horizon)
+        if guardrail_rate is not None:
+            # A guardrail metric with no effect: both arms at the same rate, independent of the primary.
+            g = _chances(stats, consts, rng.binomial(per_arm_per_look, guardrail_rate, size=looks).cumsum(),
+                         rng.binomial(per_arm_per_look, guardrail_rate, size=looks).cumsum(), per_arm_per_look, looks)
+            for d_name, gc in guard_contracts.items():
+                worse = [None if x is None else (x if d_name == "not_increase" else 1 - x) for x in g]
+                if any(w is not None and w >= OLD_GUARDRAIL_RULE for w in worse):
+                    g_old[d_name] += 1
+                prior = []
+                for k, w in enumerate(worse):
+                    n = per_arm_per_look * (k + 1)
+                    d = evaluate(gc, prior, Observation(n, n, 0.5, {"guard": w}))
+                    if d.counted:
+                        prior.append(d.fraction)
+                    if d.outcome == "guardrail_breach":
+                        g_new[d_name] += 1
+                        break
+                    if d.outcome == "horizon":
+                        break
+    return {
+        "label": "Offline engine calibration on simulated synthetic units (not user traffic)",
+        "engine": provenance,
+        "parameters": {
+            "runs": runs, "looks": looks, "identities_per_arm_per_look": per_arm_per_look,
+            "base_rate": base_rate, "relative_lift": relative_lift, "seed": seed, "guardrail_rate": guardrail_rate,
+            "floors": {"min_identities_per_variant": consts.RESULTS_MIN_IDENTITIES_PER_VARIANT,
+                       "min_conversions_per_variant": consts.RESULTS_MIN_CONVERSIONS_PER_VARIANT},
+            "banner_thresholds": {"winning_over": WIN, "losing_under": LOSE},
+        },
+        "banner_every_look": banner_any.summary(),
+        "banner_final_look_only": banner_final.summary(),
+        "contract": {str(a): rule[a].summary() for a in alphas},
+        "guardrail_false_stops": None if guardrail_rate is None else {
+            d: {"old_fixed_97_5_every_look": g_old[d], "signed_pocock": g_new[d], "guardrail_alpha": ct.GUARDRAIL_ALPHA, "runs": runs}
+            for d in g_old},
+        "seconds": round(time.time() - t0, 1),
+        "_counts": {"banner_any": banner_any, "banner_final": banner_final, "rule": rule,
+                    "g_old": g_old, "g_new": g_new},
+    }
+
+
+def pooled(seeds: tuple[int, ...], **kw) -> dict:
+    """The same design over several seeds, counts added up."""
+    parts = [simulate(seed=s, **kw) for s in seeds]
+    first = parts[0]
+    ba, bf = RuleCount(), RuleCount()
+    rule = {a: RuleCount() for a in first["_counts"]["rule"]}
+    g_old = {d: 0 for d in first["_counts"]["g_old"]}
+    g_new = {d: 0 for d in first["_counts"]["g_new"]}
+    for p in parts:
+        c = p["_counts"]
+        ba.merge(c["banner_any"])
+        bf.merge(c["banner_final"])
+        for a in rule:
+            rule[a].merge(c["rule"][a])
+        for d in g_old:
+            g_old[d] += c["g_old"][d]
+            g_new[d] += c["g_new"][d]
+    n = sum(p["parameters"]["runs"] for p in parts)
+    out = {k: v for k, v in first.items() if k != "_counts"}
+    out["parameters"] = {**first["parameters"], "runs": n, "seed": list(seeds)}
+    out["banner_every_look"] = ba.summary()
+    out["banner_final_look_only"] = bf.summary()
+    out["contract"] = {str(a): rule[a].summary() for a in rule}
+    out["guardrail_false_stops"] = None if first["parameters"]["guardrail_rate"] is None else {
+        d: {"old_fixed_97_5_every_look": g_old[d], "signed_pocock": g_new[d], "guardrail_alpha": ct.GUARDRAIL_ALPHA, "runs": n} for d in g_old}
+    out["seconds"] = round(sum(p["seconds"] for p in parts), 1)
+    return out
+
+
+def _pct(k: int, n: int) -> str:
+    lo, hi = wilson(k, n)
+    return f"{100 * k / n:.1f}% ({100 * lo:.1f}-{100 * hi:.1f})"
+
+
+def markdown(r: dict) -> str:
+    aa, pw = r["aa"], r["power"]
+    p = aa["parameters"]
+    n = p["runs"]
+    c05, c10 = aa["contract"]["0.05"], aa["contract"]["0.1"]
+    lines = [
+        f"Flagsmith `stats.py` ({aa['engine']['stats.py']['tag']}, sha256 `{aa['engine']['stats.py']['sha256'][:12]}`) "
+        f"on {n} simulated A/A experiments ({len(p['seed'])} seeds pooled: {', '.join(map(str, p['seed']))}), "
+        f"{p['looks']} looks of {p['identities_per_arm_per_look']} synthetic identities per arm, base rate "
+        f"{p['base_rate']:.0%}. Simulated units, not user traffic. 95% Wilson intervals.",
+        "",
+        "False ships: how often a variation that does nothing would be shipped.",
+        "",
+        "| Rule | Level | Ships a do-nothing variation (false Winning) |",
+        "|---|---|---|",
+        f"| Read once at the final look (95%/5%) | 10% two-sided | {_pct(aa['banner_final_look_only']['winning'], n)} |",
+        f"| Stop at the first look over 95% or under 5% | 10% two-sided, read {p['looks']} times | {_pct(aa['banner_every_look']['winning'], n)} |",
+        f"| Ulysses contract, alpha 0.10 | 10% two-sided | {_pct(c10['winning'], n)} |",
+        f"| Ulysses contract, alpha 0.05 (default) | 5% two-sided | {_pct(c05['winning'], n)} |",
+        "",
+        "Any false call, counting false Losing too (a false Losing keeps control, so it ships nothing):",
+        "",
+        "| Rule | False Winning | False Losing | Any false call |",
+        "|---|---|---|---|",
+    ]
+    for name, s in (("Read once at the final look", aa["banner_final_look_only"]),
+                    ("Stop at the first look over 95% or under 5%", aa["banner_every_look"]),
+                    ("Ulysses contract, alpha 0.10", c10), ("Ulysses contract, alpha 0.05", c05)):
+        lines.append(f"| {name} | {_pct(s['winning'], n)} | {_pct(s['losing'], n)} | {_pct(s['any_call'], n)} |")
+    pp = pw["parameters"]
+    m = pp["runs"]
+    sv = r["savings"]
+    lines += [
+        "",
+        f"Same design with a true relative lift of {pp['relative_lift']:+.0%} ({pp['base_rate']:.0%} to "
+        f"{pp['base_rate'] * (1 + pp['relative_lift']):.1%}), {m} runs:",
+        "",
+        "| Rule | Calls the win | Wrong-way call | Mean look of the first call | Mean identities per arm used (all runs) |",
+        "|---|---|---|---|---|",
+    ]
+    for name, s in (("Stop at the first look over 95% or under 5%", pw["banner_every_look"]),
+                    ("Ulysses contract, alpha 0.10", pw["contract"]["0.1"]),
+                    ("Ulysses contract, alpha 0.05", pw["contract"]["0.05"])):
+        lines.append(f"| {name} | {_pct(s['winning'], m)} | {_pct(s['losing'], m)} | {s['mean_stop_look']} | "
+                     f"{s['mean_identities_per_arm_used']} |")
+    lines += [
+        "",
+        f"Against a fixed-horizon test with the same false-ship level and the same power "
+        f"({sv['power']:.1%}): that test needs {sv['fixed_horizon_identities_per_arm']} identities per arm "
+        f"(the contract's horizon {sv['contract_horizon']} divided by the sequential inflation "
+        f"{sv['inflation']}). The contract at alpha 0.05 used {sv['contract_mean_used']} on average, "
+        f"{sv['saving_pct']}% fewer.",
+        "",
+        "Design sensitivity, contract at alpha 0.05, A/A (the guarantee holds for false Winning; false Losing "
+        "runs over its nominal 2.5% when conversions are few):",
+        "",
+        "| Base rate | Identities per arm per look x looks | Expected conversions per arm at the horizon | False Winning | False Losing |",
+        "|---|---|---|---|---|",
+    ]
+    for row in r["base_rates"]:
+        q = row["parameters"]
+        k = q["runs"]
+        s = row["contract"]["0.05"]
+        lines.append(f"| {q['base_rate']:.0%} | {q['identities_per_arm_per_look']} x {q['looks']} | "
+                     f"{q['base_rate'] * q['identities_per_arm_per_look'] * q['looks']:.0f} | "
+                     f"{_pct(s['winning'], k)} | {_pct(s['losing'], k)} |")
+    g = aa["guardrail_false_stops"]
+    lines += [
+        "",
+        f"Guardrails in A/A (a guardrail metric at {p['guardrail_rate']:.0%} in both arms, no effect), share of "
+        "experiments stopped for a guardrail breach that is not there:",
+        "",
+        f"| Guardrail direction | Old rule: 97.5% chance worse at any look | Signed rule: one-sided Pocock-type spending, alpha {ct.GUARDRAIL_ALPHA}, counted looks |",
+        "|---|---|---|",
+    ]
+    for d, v in g.items():
+        lines.append(f"| {d.replace('_', ' ')} | {_pct(v['old_fixed_97_5_every_look'], v['runs'])} | "
+                     f"{_pct(v['signed_pocock'], v['runs'])} |")
+    return "\n".join(lines) + "\n"
+
+
+def run(out_dir: str | Path = ".run/calibration", runs: int = 2000, flagsmith_src: str | None = None,
+        power_lift: float = 0.25, looks: int = 30, per_arm_per_look: int = 100,
+        seeds: tuple[int, ...] = DEFAULT_SEEDS, base_rate_runs: int = 2000) -> dict:
+    kw = dict(runs=runs, looks=looks, per_arm_per_look=per_arm_per_look, flagsmith_src=flagsmith_src)
+    aa = pooled(seeds, **kw)
+    pw = pooled(tuple(s + 1 for s in seeds), relative_lift=power_lift, guardrail_rate=None, **kw)
+    # Sizing: the contract's horizon against a fixed-horizon test with the same level and the same power.
+    power = pw["contract"]["0.05"]["winning_rate"]
+    horizon = looks * per_arm_per_look
+    infl = bd.inflation_factor(looks, 0.05, power)
+    fixed = math.ceil(horizon / infl)
+    used = pw["contract"]["0.05"]["mean_identities_per_arm_used"]
+    savings = {"power": power, "inflation": round(infl, 4), "contract_horizon": horizon,
+               "fixed_horizon_identities_per_arm": fixed, "contract_mean_used": used,
+               "saving_pct": round(100 * (1 - used / fixed), 1)}
+    base_rows = []
+    for base in (0.02, 0.05, 0.10):
+        base_rows.append(simulate(runs=base_rate_runs, looks=looks, per_arm_per_look=per_arm_per_look,
+                                  base_rate=base, alphas=(0.05,), seed=7000 + int(base * 1000),
+                                  guardrail_rate=None, flagsmith_src=flagsmith_src))
+    hp = horizon_plan(min_relative_lift=0.25, baseline_rate=0.02, alpha=0.05, power=0.8, looks=looks)
+    sized = simulate(runs=base_rate_runs, looks=looks, per_arm_per_look=math.ceil(hp.identities_per_arm / looks),
+                     base_rate=0.02, alphas=(0.05,), seed=7777, guardrail_rate=None, flagsmith_src=flagsmith_src)
+    sized["parameters"]["note"] = "horizon from `ulysses horizon` for 2% and a 25% lift"
+    base_rows.append(sized)
+    for row in base_rows:
+        row.pop("_counts", None)
+    result = {"aa": aa, "power": pw, "savings": savings, "base_rates": base_rows}
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "offline.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    md = markdown(result)
+    (out / "offline.md").write_text(md, encoding="utf-8")
+    return {**result, "markdown": md, "paths": [str(out / "offline.json"), str(out / "offline.md")]}
