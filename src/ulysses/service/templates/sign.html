@@ -29,7 +29,7 @@
     <article class="doc" aria-label="The contract">
       <div class="clause"><span class="no">§1</span><div><p class="h">Experiment and flag</p>
         <p class="t">Experiment {{ s.experiment }} runs on flag <code>{{ s.flag }}</code>: <code>{{ s.arms[0] }}</code> against <code>{{ s.arms[1] }}</code>.
-        <span class="state-chip" data-s="{{ c.state }}">{{ c.state }}</span>{% if c.expired %} <span class="state-chip" data-s="expired">expired</span>{% endif %}</p></div></div>
+        <span class="state-chip" data-s="{{ c.state }}">{{ c.state | state_word }}</span>{% if c.expired %} <span class="state-chip" data-s="expired">expired</span>{% endif %}</p></div></div>
       <div class="clause"><span class="no">§2</span><div><p class="h">Hypothesis</p><p class="t">{{ s.hypothesis }}</p></div></div>
       <div class="clause{% if 'primary_metric' in changed %} changed{% endif %}"><span class="no">§3</span><div><p class="h">Primary metric and direction</p>
         <p class="t">{{ diff('primary_metric', s.primary_metric, old.primary_metric if old else '') }}. Flagsmith's chance to win on this metric is the only number the stop rule reads.</p></div></div>
@@ -75,7 +75,9 @@
 
     <section class="sign-panel" id="sign-panel" data-hash="{{ h }}" aria-labelledby="sign-h">
       <h2 id="sign-h">Sign</h2>
-      {%- if c.expired %}
+      {%- if c.state == 'executing' %}
+      <p><span class="state-chip" data-s="executing">sending to Flagsmith</span> The service is carrying out this contract's pre-signed action. It cannot be signed or amended until that finishes.</p>
+      {%- elif c.expired %}
       <p><span class="state-chip" data-s="expired">expired</span> Its start window of {{ s.start_within_days or s.expires_after_days }} days after the owner's signature has passed, so it can no longer start an experiment. Draft and sign a new one.</p>
       {%- elif not needs %}
       <p>This contract has every signature it needs.</p>

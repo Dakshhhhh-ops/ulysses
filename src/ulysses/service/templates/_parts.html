@@ -10,9 +10,10 @@
   <ol class="dev-list">
     {%- for d in devs %}
     <li>
-      <span class="state-chip" data-s="deviated">deviation</span>
+      <span class="state-chip" data-s="deviated">{{ (d.kind | replace('_', ' ')) if d.kind else 'deviation' }}</span>
       <span class="dev-what">{{ d.log }}</span>
-      <span class="dev-meta">by {% if d.author %}<span class="mono">{{ d.author }}</span>{% else %}an API key (Flagsmith records no user for API-key changes){% endif %} · {{ d.when }}{% if d.audit_id %} · audit entry <span class="mono">{{ d.audit_id }}</span>{% endif %}</span>
+      <span class="dev-meta">by {% if d.author %}<span class="mono">{{ d.author }}</span>{% else %}an API key (Flagsmith records no user for API-key changes){% endif %} · {{ d.when }}{% if d.audit_id %} · audit entry <span class="mono">{{ d.audit_id }}</span>{% endif %}{% if d.source %} · found by {{ 'the service reading the experiment back' if d.source == 'state check' else ("Flagsmith's " ~ d.source) }}{% endif %}</span>
+      {%- if d.note %}<span class="dev-meta">Line written on the experiment{% if d.note_state and d.note_state not in ('written', 'n/a') %} ({{ d.note_state | replace('_', ' ') }}){% endif %}: <q>{{ d.note }}</q></span>{% endif %}
     </li>
     {%- endfor %}
   </ol>

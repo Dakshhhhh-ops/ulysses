@@ -22,7 +22,7 @@ from ..flagsmith.gateway import MetricResult, ResultsSnapshot
 from . import calibration_view, fmt, sources
 from . import scene as sc
 
-_ORDER = {"decided": 0, "active": 1, "signed": 2, "draft": 3, "executed": 4, "deviated": 5, "superseded": 6, "void": 7}
+_ORDER = {"executing": 0, "decided": 0, "active": 1, "signed": 2, "draft": 3, "executed": 4, "deviated": 5, "superseded": 6, "void": 7}
 
 
 def setup(templates) -> None:
@@ -35,7 +35,16 @@ def setup(templates) -> None:
     env.globals["aria_label"] = sc.aria_label
     env.globals["WORDS"] = sc.WORDS
     env.globals["SHORT"] = sc.SHORT
+    env.filters["state_word"] = state_word
     env.globals["fan_flat"] = sc.fan_flat
+
+
+STATE_WORDS = {"executing": "sending to Flagsmith"}
+
+
+def state_word(state: str | None) -> str:
+    """How a contract or proposal state reads on a page."""
+    return STATE_WORDS.get(state or "", state or "")
 
 
 def _api_host() -> str:
@@ -161,7 +170,8 @@ def deviations(svc, environment: str, experiment_id: int, c: ct.Contract | None 
             k = (last["decision"] or {}).get("look_number") or (counted[-1]["decision"] or {}).get("look_number") if counted else None
             when = f"after refresh {last['seq']}" + (f" (look {k} of {c.horizon.looks})" if k and c else "")
         out.append({"log": dv["log"], "author": dv.get("author"), "audit_id": dv.get("audit_id"), "when": when,
-                    "contract": dv.get("contract_hash")})
+                    "contract": dv.get("contract_hash"), "kind": dv.get("kind"), "source": dv.get("source"),
+                    "note": dv.get("note"), "note_state": dv.get("note_state")})
     return out
 
 
@@ -253,7 +263,7 @@ def index_context(svc, rows: list[dict]) -> dict:
             },
             "glyph": sc.elevation(mini),
         })
-    items.sort(key=lambda i: (0 if (i["look"] and i["state"] == "decided") else _ORDER.get(i["state"], 9) + 1,
+    items.sort(key=lambda i: (0 if (i["look"] and i["state"] in ("decided", "executing")) else _ORDER.get(i["state"], 9) + 1,
                               -((i["look"] or {}).get("at") or 0)))
     hero = None
     readable = [i for i in items if not i["error"]]

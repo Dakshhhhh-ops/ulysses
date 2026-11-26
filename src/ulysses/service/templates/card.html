@@ -12,7 +12,7 @@
 <section class="action" id="confirm-panel" data-proposal="{{ p.id }}" aria-labelledby="action-h">
   <div class="action-head">
     <h2 id="action-h">Pre-signed action</h2>
-    <span class="state-chip" data-s="{{ p.state }}">{{ p.state }}</span>
+    <span class="state-chip" data-s="{{ p.state }}">{{ p.state | state_word }}</span>
   </div>
   <p class="action-text">{% if p.action == 'ship_treatment' %}Complete experiment {{ s.experiment }} and serve <code>{{ arm_t }}</code> to everyone on <code>{{ s.flag }}</code>.{% else %}Complete experiment {{ s.experiment }} and keep serving <code>{{ arm_c }}</code> on <code>{{ s.flag }}</code>.{% endif %}</p>
   {%- if p.result %}
@@ -29,6 +29,8 @@
   </div>
   <details open><summary>The exact text your key signs</summary><pre class="mono" id="confirm-text">{{ d.confirm_message }}</pre></details>
   <details><summary>Confirm from the command line</summary><p class="cmd"><code>ulysses confirm {{ p.id }} --as {{ d.contract.owner }}</code></p></details>
+  {%- elif p.state == 'executing' %}
+  <p class="key-note" role="status">Sending the pre-signed action to Flagsmith. The flag change is shown here only once Flagsmith confirms it; reload in a moment.</p>
   {%- elif p.state == 'failed' %}
   <p class="key-note">The Flagsmith call failed; the agent may retry the same pre-signed action.</p>
   {%- endif %}
@@ -185,6 +187,19 @@
   <p class="footnote">Contract <a class="mono" href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a> · {{ s.boundary }} · {{ s.horizon }}.{% if results_age %} Flagsmith's results were {{ results_age }}.{% endif %} A loss is called at the mirror image of each boundary.</p>
 </section>
 
+{% elif d.origin == 'look' %}
+{#- a proposal card for an action the contract fired at a look: the look's own card carries the decision -#}
+<section class="verdict" data-outcome="{{ p.outcome }}" aria-labelledby="verdict-word">
+  <div class="verdict-top">
+    <div>
+      <p class="label">Experiment {{ s.experiment }} · <span class="mono">{{ s.flag }}</span></p>
+      <h1 class="verdict-word" id="verdict-word">{{ WORDS.get(p.outcome, p.outcome | upper) }}</h1>
+    </div>
+    <div class="verdict-meta"><span>CONTRACT <a href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a></span></div>
+  </div>
+  <p class="verdict-sentence">The pre-signed action the contract fired at a look.{% if p.look_id %} <a href="/card/{{ p.look_id }}">Open that look's decision card</a>.{% endif %}</p>
+</section>
+{{ action_panel(p) }}
 {% else %}
 {#- a proposal card: an amendment that authorises an action now -#}
 <section class="verdict" data-outcome="amendment" aria-labelledby="verdict-word">
