@@ -93,3 +93,55 @@ def test_agent_session_through_the_tools(tools, keys):
     assert done["ok"] and done["state"] == "executed"
     assert fs.served["checkout_button"] == "big_cta"
     assert all(FS_KEY not in json.dumps(x) for x in (drafted, refused, hold, fire, early, wrong, done))
+
+
+def _servers(path):
+    return json.loads(path.read_text(encoding="utf-8"))["mcpServers"]
+
+
+def _no_flagsmith_key(servers: dict) -> None:
+    assert list(servers) == ["ulysses"], servers
+    assert set(servers["ulysses"]["env"]) == {"ULYSSES_URL", "ULYSSES_AGENT_TOKEN"}
+    assert "flagsmith-mcp" not in json.dumps(servers)
+
+
+def test_shipped_and_generated_mcp_configs_hold_no_flagsmith_key(tmp_path):
+    """Findings 2 and 21: the agent's config names only the Ulysses server and its token."""
+    from argparse import Namespace
+    from pathlib import Path
+
+    from ulysses import cli
+
+    shipped = Path(__file__).resolve().parents[1] / "mcp" / "ulysses.mcp.json"
+    _no_flagsmith_key(_servers(shipped))
+    cli.cmd_init(Namespace(dir=str(tmp_path), flagsmith_url="http://localhost:8000", port=8200,
+                           with_flagsmith_mcp=False, uvx=False))
+    _no_flagsmith_key(_servers(tmp_path / "ulysses.mcp.json"))
+
+
+def test_agent_process_drops_the_flagsmith_key_even_from_a_project_env(tmp_path, monkeypatch):
+    import os
+    from argparse import Namespace
+
+    from ulysses import cli, mcp_server
+
+    (tmp_path / ".env").write_text("FLAGSMITH_ADMIN_KEY=ser.secret-admin-key\nULYSSES_AGENT_TOKEN=t" + "x" * 20
+                                   + "\nULYSSES_URL=http://127.0.0.1:8200\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FLAGSMITH_API_TOKEN", "inherited-from-the-shell")
+    monkeypatch.delenv("ULYSSES_AGENT_TOKEN", raising=False)
+    seen: dict = {}
+    monkeypatch.setattr(mcp_server, "main", lambda: seen.update(os.environ))
+    cli.cmd_mcp(Namespace())
+    assert seen["ULYSSES_AGENT_TOKEN"].startswith("t")
+    assert not [k for k in seen if k.startswith("FLAGSMITH_")]
+    assert "secret-admin-key" not in json.dumps(seen)
+
+
+def test_read_proxy_is_get_only(tools):
+    _, _, svc, _ = tools
+    c = TestClient(create_app(svc, agent_token=TOKEN, protected_secrets=[FS_KEY]),
+                   headers={"Authorization": f"Bearer {TOKEN}"})
+    assert c.get("/api/flagsmith/experiments/env-key/1").status_code == 200
+    for method in ("post", "put", "patch", "delete"):
+        assert getattr(c, method)("/api/flagsmith/experiments/env-key/1").status_code == 405
