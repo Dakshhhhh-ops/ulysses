@@ -1,6 +1,6 @@
 # What the contract guarantees, and what it does not
 
-Every figure here was printed by `uv run ulysses calibrate offline` (Flagsmith's own `stats.py`, pinned by SHA-256, on simulated synthetic units), by `uv run ulysses horizon` / `uv run ulysses boundary`, or by `uv run python scripts/stats_depth.py --flagsmith-src <Flagsmith checkout> --runs 2000` (the Monte Carlo checks, several treatments, the sample-ratio check and the power curves; fixed seeds, writes `.run/stats-depth.md`). None of it is user traffic.
+Every figure here was printed by `uv run ulysses calibrate offline` (Flagsmith's own `stats.py`, pinned by SHA-256, on simulated synthetic units), by `uv run ulysses horizon` / `uv run ulysses boundary`, by `uv run python scripts/stats_depth.py --flagsmith-src <Flagsmith checkout> --runs 2000` (the Monte Carlo checks, several treatments, the sample-ratio check and the power curves; fixed seeds, writes `.run/stats-depth.md`), or by `tests/test_look_integrity.py` (look timing, the alpha ledger, amendments and overruns; the command is given with each figure). None of it is user traffic.
 
 ## The number Ulysses thresholds
 
@@ -25,6 +25,8 @@ a(t) = 2 - 2 Phi( z_{1 - alpha/4} / sqrt(t) )      per side, t = information fra
 ```
 
 At each look the boundary b_k solves P(first crossing at look k | no effect) = spent(t_k) - spent(t_{k-1}), using the canonical joint distribution of sequential Wald statistics (independent increments on the score scale), computed by numerical integration. A look that lands late gets the boundary for the fraction it actually has; only the look at the horizon spends what is left. Win if z >= b_k, loss if z <= -b_k, no decision if the horizon arrives first.
+
+The integration runs forward through the boundaries the earlier looks actually applied, read from the alpha ledger (below), not through boundaries re-derived from the contract as it stands now. Without an amendment the two are the same numbers; after one they are not.
 
 Checks in `tests/test_boundary.py`:
 
@@ -60,7 +62,60 @@ With a true relative lift of +25% (10% to 12.5%), 10,000 runs: the first-95% rul
 
 ## What it guarantees
 
-If the z values Ulysses reads behave like the sequential Wald statistics they are (asymptotically normal, independent increments, information proportional to identities), then across all looks the chance of declaring a winner when there is no effect is at most alpha/2. This holds however often the agent looks, because refreshes between the planned looks are not analyses: they show Flagsmith's number and spend nothing.
+If the z values Ulysses reads behave like the sequential Wald statistics they are (asymptotically normal, independent increments, information proportional to identities), and the times of the analyses do not depend on the z values, then across all looks the chance of declaring a winner when there is no effect is at most alpha/2.
+
+The second condition is the one an agent could break, and the service now enforces it rather than assuming it.
+
+## When a read is a look
+
+An agent that can see z between looks, and decides when to call `look`, chooses its own analysis times from the data: it waits, reads, and looks only when z is above the boundary it would get right then. Earlier versions allowed this. `read_experiment` returned Flagsmith's chance to win at any time without counting anything, the between-looks ("watch") reply carried it too, and a look counted only when the agent called `look`. So the earlier claim here, that the guarantee held however often the agent looked, was wrong.
+
+Measured through the service itself (contract, store, fake Flagsmith; only the z paths come from numpy): Flagsmith's results refresh at 25 evenly spaced counts up to the horizon; from the first planned count on (21 refreshes), an agent polls `read_experiment` at each and calls `look` only when the z it saw is at or above the boundary it would get by looking then. Contract alpha 0.05, 5 looks, no effect, seed 20311, 4,000 paths (`ULYSSES_PEEK_RUNS=4000 uv run pytest -q -s tests/test_look_integrity.py -k peeking`; the "before" row is the same test run against the code before this change):
+
+| | Ships a do-nothing variation | Same paths, an agent looking at the planned counts | Paths where the two differ |
+|---|---|---|---|
+| Before | 142/4000 = 3.55% | 102/4000 = 2.55% | 40 |
+| Now | 102/4000 = 2.55% | 102/4000 = 2.55% | 0 |
+
+What the service does now, on an experiment a contract governs:
+
+- **The first read at the planned count is the look, whoever makes it.** Every path that reads Flagsmith's results for a governed experiment goes through the same step: `look` (from MCP, the CLI's `ulysses look` or HTTP), `read_experiment` (MCP or HTTP), and the service's own poller. When the smaller arm has reached the next planned count, that read is recorded as the counted look (and may fire). Whether a read counts depends on identities alone, never on z. A later call at the same count is between looks.
+- **Between looks the numbers are withheld.** Until the contract decides, `read_experiment` returns identities per arm, the sample-ratio p-value and `next_look_at_identities`, with `chance_to_win` and `lift` set to null and `redacted: true`; the watch reply, its card and the experiment's look list carry no chance to win, z, lift, guardrail number or per-arm number either. A counted look shows everything, since its alpha is spent. Once the contract has decided, or the experiment is completed, `read_experiment` shows Flagsmith's numbers again.
+- **The service can keep the schedule itself.** `ulysses serve --poll [SECONDS]` takes a look on every active contract every SECONDS (default 60), subject to each contract's refresh floor, so looks need not wait for an agent at all.
+
+With this, the same strategic agent ends with exactly the outcome of an agent that looks at the planned counts on every one of the paths above; `tests/test_look_integrity.py::test_strategic_peeking_agent_cannot_raise_false_wins` checks it on 250 paths in the regular suite.
+
+What this does not cover. The agent still decides when to ask Flagsmith for a refresh. Between looks it decides blind to the current z. It does see z at each counted look, and could delay the next refresh because of it, so the next look lands later; spacing chosen from earlier results is outside the alpha-spending guarantee (it is not measured here). `ulysses serve --poll` takes that choice away from the agent. A read that reaches the planned count while Flagsmith shows no result for the primary metric yet ("collecting data") is not counted; the next read that has one is. Anyone who sees Flagsmith's own numbers another way (the Flagsmith dashboard, or an agent also given Flagsmith's MCP server with an admin key, which `ulysses init --with-flagsmith-mcp` can configure) can still time requests on them; the service cannot withhold what Flagsmith itself shows.
+
+## The alpha ledger
+
+Each counted look stores, in its recorded decision (`decision.ledger`), the boundary it applied at full precision (`boundary_applied`, per comparison), the fraction it was analysed at (`fraction_landed`), and the alpha spent once it is analysed (`alpha_spent`, both sides, all comparisons; `comparison_alpha_spent` per comparison), against the signed alpha (`alpha_signed`). Each guardrail row stores its own `boundary_applied`. The look card carries `alpha.spent`, `alpha.signed` and the line "Alpha spent so far: x of the signed y"; between looks the watch reply carries the alpha spent so far.
+
+Every new boundary integrates forward from the ledger's applied boundaries and spends only what is left: the spending function's value at this fraction less what the earlier looks spent, or everything left at the horizon. If the earlier looks have already spent more than the spending function allows at this fraction (a horizon amended upwards), no stop is possible at this look. `ulysses verify` rebuilds the same ledger from the bundle's own numbers and does not trust the stored one.
+
+Two service processes on one database cannot count the same planned look twice: the counted looks a decision rests on are read again and the look inserted inside one write transaction (SQLite WAL mode with a busy timeout), and a look's sequence number is unique per experiment. A database written before that constraint, holding a repeated sequence number, still opens, with a non-unique index; its numbers are not rewritten, because the owner's confirmation signs a hash chain over them.
+
+## Amendments and the horizon
+
+An amendment may not move the horizon to, or below, the largest count at which a look was already counted. The service refuses it when it is drafted (`400 Invalid`: "the horizon cannot be amended to N identities per arm: the contract already counted a look at M identities per arm ...", which the CLI prints with the hint to amend to more than M), and again when the second signature arrives if a look was counted in between (`409`). Earlier, such an amendment froze the contract for good: the counted look sat at or past the new horizon, so no later read could be scheduled. The engine no longer depends on the rule for that; a contract amended that way before the rule existed treats its next read past the last counted look as the final one.
+
+An amendment that raises the horizon changes the fractions of the looks still to come, not the alpha already spent. Before the ledger, the engine re-derived the whole spending history from the new horizon, as if it had always applied. Contract alpha 0.05, 5 looks at a horizon of 1,000 per arm, counted looks at 200, 400 and 600, then the horizon doubled to 2,000 and looks at 800, 1,200, 1,600 and 2,000, by integration of the boundaries the service applied (`uv run pytest -q -s tests/test_look_integrity.py -k amended_horizon`):
+
+| | Chance of a false win | Chance of a false loss |
+|---|---|---|
+| Before (re-derived history) | 2.718% | 2.718% |
+| Now (ledger) | 2.500% | 2.500% |
+
+## Looks that land late, and a final read past the horizon
+
+A final read that lands past the horizon was analysed as if it had landed on it: the earlier looks kept their fractions of the horizon, so the final look was treated as adding less information than it did. It is now analysed on the fractions as they landed (each earlier look's count divided by this read's count, the final look at 1), spending exactly the alpha that is left after the boundaries already applied. Contract alpha 0.05, 5 looks at a horizon of 1,000 per arm, looks at 200, 400, 600 and 800, then the final read at 1.5 or 10 times the horizon, by integration (`uv run pytest -q -s tests/test_look_integrity.py -k past_the_horizon`):
+
+| Final read at | False win before | False win now | False loss now |
+|---|---|---|---|
+| 1.5 x horizon | 2.830% | 2.500% | 2.500% |
+| 10 x horizon | 3.224% | 2.500% | 2.500% |
+
+The shipped replay trace (`data/replay-judge-demo.jsonl`) has one such final read, at 1,123 identities per arm against a horizon of 1,088, recorded under the earlier rule: its boundary was z 2.0358 and is now z 2.0457, and the outcome (no decision) is the same. The replay labels that one difference instead of hiding it.
 
 The measured false-win rate stayed at or below alpha/2 in every design tested, including the low-count ones below.
 
@@ -96,7 +151,7 @@ A guardrail stop only ever keeps control, so it cannot raise the false-ship rate
 - Flagsmith calls chance_to_win a Bayesian posterior. Under a flat prior it is one, and a posterior read at a fixed time is well calibrated. Ulysses does not dispute that. It adds a frequentist property for the case the docs invite: acting the first time the number crosses 95%.
 - One primary metric. Several goal metrics would need a correction the contract does not apply; a contract names one, and other goal metrics attached in Flagsmith are not read. Several treatments are covered (below).
 - It does not fix bad data beyond the split. Quarantined identities and event loss are Flagsmith's to detect; the sample-ratio check below catches arms that got the wrong share of identities, not events lost in both arms alike.
-- An amendment that changes the horizon after looking at the data is a data-dependent change. The second signature and the line written on the experiment make it visible; they do not make it statistically free.
+- An amendment that changes the horizon after looking at the data is a data-dependent change. The ledger stops the alpha already spent from being spent again (2.500% above holds for a horizon change fixed in advance of the remaining data); the second signature and the line written on the experiment make the change visible; none of that makes choosing the new horizon from the data statistically free.
 - The live calibration on a running Flagsmith is a small sample (tens of experiments) and confirms the direction of the offline result; the offline table carries the large-sample claim.
 
 ## Horizon helper

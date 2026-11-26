@@ -7,11 +7,20 @@ z = Phi^-1(chance to win), which inverts Flagsmith's own
 ``chance_to_win = Phi(lift / SE)``.
 
 Scheduling: the contract plans ``looks`` analyses at equal steps of
-identities per arm. A refresh only counts as an analysis when the smaller arm
-has reached the next planned step; refreshes in between are shown as "watch"
-and spend nothing. Because the boundary comes from an alpha-spending function,
-an analysis that lands a little after its planned step simply gets the
-boundary for the fraction it actually has.
+identities per arm. A read only counts as an analysis when the smaller arm
+has reached the next planned step; whether it counts depends on identities
+alone, never on z. Reads in between are "watch": they spend nothing and they
+carry no chance to win, z or guardrail number, so a caller cannot see z first
+and then choose to look. Because the boundary comes from an alpha-spending
+function, an analysis that lands after its planned step gets the boundary for
+the fraction it actually has.
+
+The alpha ledger: earlier counted looks are passed as ``CountedLook`` entries
+(identities and the boundaries they applied). Each new boundary integrates
+forward from those applied boundaries and spends the spending function's value
+now less what they spent, so an amended horizon or level never re-spends alpha.
+A final read past the horizon is analysed on the fractions as they landed
+(each earlier look's identities over this read's), spending exactly what is left.
 
 Guardrails are judged only at counted looks, each against its own signed
 one-sided boundary (Lan-DeMets Pocock-type spending at the guardrail's alpha),
@@ -95,6 +104,9 @@ class LookDecision:
     """Per treatment: Flagsmith's chance to win, its z and where it stands against the boundary."""
     sample_ratio: dict | None = None
     """The sample-ratio check at this read (``srm.SampleRatioCheck.to_dict``), when the contract signs one."""
+    ledger: dict | None = None
+    """The alpha ledger at this read: on a counted look the boundary it applied (full precision, per
+    comparison) and the alpha spent once it is analysed; between looks the alpha spent so far."""
 
     @property
     def fires(self) -> bool:
@@ -104,6 +116,57 @@ class LookDecision:
         d = asdict(self)
         d["fires"] = self.fires
         return d
+
+
+@dataclass(frozen=True)
+class CountedLook:
+    """One earlier counted look, as the alpha ledger keeps it."""
+
+    identities: float
+    """Identities in the smaller arm at that look (absolute, so it survives an amended horizon)."""
+    boundary: float | None
+    """The primary boundary that look applied, per comparison (None: no stop was possible there)."""
+    guardrails: dict[str, float | None] = field(default_factory=dict)
+    """The one-sided boundary each guardrail applied, keyed ``name`` (or ``name@arm`` with several treatments)."""
+
+
+def counted_look(decision: dict) -> CountedLook:
+    """The ledger entry of a counted look's stored decision (``LookDecision.to_dict``).
+
+    Decisions recorded before the ledger existed carry only the rounded ``boundary_z``; it is used then.
+    """
+    led = decision.get("ledger") or {}
+    b = led["boundary_applied"] if "boundary_applied" in led else decision.get("boundary_z")
+    gs: dict[str, float | None] = {}
+    for r in decision.get("guardrails") or []:
+        key = f"{r['name']}@{r['arm']}" if r.get("arm") else r["name"]
+        gs[key] = r["boundary_applied"] if "boundary_applied" in r else r.get("boundary_z")
+    return CountedLook(float(decision["identities_per_arm"]), b, gs)
+
+
+def _guard_key(name: str, arm: str, multi: bool) -> str:
+    return f"{name}@{arm}" if multi else name
+
+
+def _history(contract: Contract, prior: list) -> list[CountedLook]:
+    """Earlier counted looks. A plain list of fractions (of this contract's horizon) is read as looks that
+    applied this contract's own boundaries at those fractions, which is what they were when the horizon was
+    never amended."""
+    if not prior or isinstance(prior[0], CountedLook):
+        return list(prior)
+    h = contract.horizon
+    ts = [float(t) for t in prior]
+    scale = max(1.0, ts[-1])  # fractions past the horizon (an amended contract) are rescaled to derive them
+    fr = [t / scale for t in ts]
+    bs = bd.spending_boundaries(fr, contract.comparison_alpha, final_spends_all=False)
+    multi = contract.comparisons > 1
+    gb = {}
+    for g in contract.guardrails:
+        one = bd.one_sided_boundaries(fr, g.alpha / contract.comparisons, final_spends_all=False)
+        for arm in contract.experiment.treatments:
+            gb[_guard_key(g.name, arm, multi)] = one
+    return [CountedLook(t * h.identities_per_arm, bs[i], {k: v[i] for k, v in gb.items()})
+            for i, t in enumerate(ts)]
 
 
 def _round_t(t: float) -> float:
@@ -161,20 +224,26 @@ def _worse(contract: Contract, obs: Observation) -> dict[str, dict[str, float | 
     return {ref.treatment: dict(obs.guardrail_chance_worse)}
 
 
-def _guardrail_rows(contract: Contract, worse: dict[str, dict[str, float | None]], prior: list[float], t: float,
-                    final: bool, counted: bool) -> list[dict]:
+def _guardrail_rows(contract: Contract, worse: dict[str, dict[str, float | None]], hist: list[CountedLook],
+                    fr: list[float], t: float, final: bool, counted: bool) -> list[dict]:
     rows = []
     multi = contract.comparisons > 1
     for arm in contract.experiment.treatments:
         for g in contract.guardrails:
             w = worse.get(arm, {}).get(g.name)
-            z = None if w is None else round(bd.chance_to_z(w), 4)
             a = g.alpha / contract.comparisons
-            b = guardrail_boundary(a, prior, t, final) if counted else None
-            if w is None:
+            b = None
+            if counted:
+                key = _guard_key(g.name, arm, multi)
+                b = bd.next_one_sided(fr, [x.guardrails.get(key) for x in hist], t, a, final).boundary
+            if not counted:
+                # Between looks the guardrail's number is not shown: it is not an analysis.
+                w = None
+            z = None if w is None else round(bd.chance_to_z(w), 4)
+            if not counted:
+                state = "no_result" if worse.get(arm, {}).get(g.name) is None else "watch"
+            elif w is None:
                 state = "no_result"
-            elif not counted:
-                state = "watch"
             elif b is not None and z is not None and z >= b:
                 state = "breach"
             else:
@@ -184,6 +253,8 @@ def _guardrail_rows(contract: Contract, worse: dict[str, dict[str, float | None]
                 "boundary_z": None if b is None else round(b, 4),
                 "boundary_chance": bd.z_to_chance(b), "state": state,
             }
+            if counted:
+                row["boundary_applied"] = b
             if multi:
                 row["arm"] = arm
                 row["alpha_per_arm"] = a
@@ -198,25 +269,60 @@ def _srm_note(s: srm.SampleRatioCheck) -> str:
             f"{s.p_value:.2g}, below the signed threshold {s.threshold:g}")
 
 
-def evaluate(contract: Contract, prior_fractions: list[float], obs: Observation) -> LookDecision:
+def _ledger(contract: Contract, k: int | None, n: int, t: float | None, b: float | None, spent: float) -> dict:
+    """What the look card shows of the alpha budget: the boundary applied and alpha spent so far."""
+    m = contract.comparisons
+    signed = contract.boundary.alpha
+    total = spent * m
+    out = {
+        "look_number": k, "identities": n, "fraction_landed": t, "boundary_applied": b,
+        "comparisons": m, "comparison_alpha": contract.comparison_alpha, "comparison_alpha_spent": spent,
+        "alpha_spent": total, "alpha_signed": signed, "alpha_left": max(signed - total, 0.0),
+        "text": f"Alpha spent so far: {total:.4g} of the signed {signed:g}"
+                + (f" ({m} comparisons at {contract.comparison_alpha:.4g} each)" if m > 1 else ""),
+    }
+    if k is None:
+        del out["boundary_applied"], out["fraction_landed"]
+    return out
+
+
+def evaluate(contract: Contract, prior_fractions: list, obs: Observation) -> LookDecision:
+    """Analyse one read.
+
+    ``prior_fractions`` are the earlier counted looks: either :class:`CountedLook` entries (the ledger: the
+    identities and the boundaries each look actually applied, which is what the service passes), or plain
+    information fractions of this contract's horizon, read as looks that applied this contract's own
+    boundaries there.
+    """
     h = contract.horizon
     ref = contract.experiment
     multi = contract.comparisons > 1
+    hist = _history(contract, prior_fractions)
     counts = _counts(contract, obs)
     chances = _chances(contract, obs)
     n = min(counts.values())
-    t = _round_t(n / h.identities_per_arm)
-    last = prior_fractions[-1] if prior_fractions else 0.0
+    big_n = h.identities_per_arm
+    t = _round_t(n / big_n)
+    last_n = hist[-1].identities if hist else 0.0
+    # Not capped at 1: a look counted past an (amended) horizon still orders the looks after it.
+    last = round(last_n / big_n, 6)
     nxt = next_planned_fraction(h.looks, last)
-    next_n = int(math.ceil(nxt * h.identities_per_arm - 1e-9))
-    k = len(prior_fractions) + 1
-    final = n >= h.identities_per_arm
+    next_n = int(math.ceil(nxt * big_n - 1e-9))
+    k = len(hist) + 1
+    final = n >= big_n
     if final:
         t = 1.0
-    scheduled = (final or n >= next_n) and t > last
+    scheduled = (final or n >= next_n) and round(n / big_n, 6) > last
     have_all = all(c is not None for c in chances.values())
     counted = scheduled and (have_all or final)
-    grows = _guardrail_rows(contract, _worse(contract, obs), prior_fractions, t, final, counted)
+    # Information fractions for the boundary: of the horizon, or, for a final read at or past it, of this
+    # read's own count, so the earlier looks sit where they actually landed and the final look at 1.
+    # Fractions of the horizon keep the six places they always had; past the horizon finer ones are kept,
+    # so a large overrun does not round two earlier looks onto one fraction.
+    overrun = n > big_n
+    fr = [round(x.identities / (n if overrun else big_n), 12 if overrun else 6) for x in hist]
+    t_b = t
+    grows = _guardrail_rows(contract, _worse(contract, obs), hist, fr, t_b, final, counted)
     sr = None
     if contract.sample_ratio is not None:
         s = contract.sample_ratio
@@ -226,7 +332,7 @@ def evaluate(contract: Contract, prior_fractions: list[float], obs: Observation)
     # The headline arm: the only treatment, or the one with the largest z.
     lead = ref.treatment if not multi else max(
         (a for a in ref.treatments if zs[a] is not None), key=lambda a: zs[a], default=ref.treatment)
-    lead_chance = chances.get(lead)
+    lead_chance = chances.get(lead) if counted else None  # between looks the number is not shown
     base = dict(
         looks_planned=h.looks,
         fraction=t,
@@ -253,21 +359,30 @@ def evaluate(contract: Contract, prior_fractions: list[float], obs: Observation)
                 state = "below"
             else:
                 state = "within"
+            if not counted:
+                out.append({"arm": a, "chance_to_win": None, "z": None,
+                            "state": "no_result" if z is None else "watch", "identities": counts.get(a)})
+                continue
             out.append({"arm": a, "chance_to_win": chances[a], "z": zs[a], "state": state,
                         "identities": counts.get(a)})
         return out
 
+    def spent_so_far() -> float:
+        top = max(float(big_n), last_n) or 1.0
+        return bd.spent_two_sided([round(x.identities / top, 9) for x in hist], [x.boundary for x in hist])
+
     if not scheduled:
         return LookDecision(
-            outcome="watch", action=None, counted=False, look_number=None, z=z_now,
+            outcome="watch", action=None, counted=False, look_number=None, z=None,
             boundary_z=None, boundary_chance=None, next_look_at_identities=next_n, guardrail=None,
             arms=arm_rows(None) if multi else [],
             reason=(
                 f"Between looks: {n} identities in the smaller arm; the next analysis is at {next_n} "
-                f"(look {k} of {h.looks}). Flagsmith's chance to win is {_pct(lead_chance)}"
-                + (f" ({lead}, the leading treatment)" if multi else "")
-                + "; the contract does not act on it, or on guardrails, until then."
+                f"(look {k} of {h.looks}). Until then the contract does not show Flagsmith's chance to win or "
+                "the guardrails' numbers, and does not act on them: the first read at the planned count is "
+                "the look, whoever makes it."
             ),
+            ledger=_ledger(contract, None, n, None, None, spent_so_far()),
             **base,
         )
 
@@ -282,10 +397,16 @@ def evaluate(contract: Contract, prior_fractions: list[float], obs: Observation)
                 + (f"for {', '.join(missing)} " if multi else "")
                 + "(it waits for its minimum sample). This refresh is not counted as a look."
             ),
+            ledger=_ledger(contract, None, n, None, None, spent_so_far()),
             **base,
         )
 
-    # A counted look. Guardrails first: a breach stops and keeps control.
+    # A counted look. The primary boundary integrates forward from the boundaries the earlier looks
+    # applied and spends what the spending function allows now, less what they spent.
+    nb = bd.next_two_sided(fr, [x.boundary for x in hist], t_b, contract.comparison_alpha, final)
+    unanalysed = _ledger(contract, k, n, t_b, None, nb.spent_before)
+
+    # Guardrails first: a breach stops and keeps control.
     breach = next((r for r in grows if r["state"] == "breach"), None)
     if breach is not None:
         where = f" on {breach['arm']}" if multi else ""
@@ -299,6 +420,7 @@ def evaluate(contract: Contract, prior_fractions: list[float], obs: Observation)
                 f"this look is {_pct(breach['boundary_chance'])}. "
                 f"Pre-signed action: {contract.actions.guardrail_breach.replace('_', ' ')}."
             ),
+            ledger=unanalysed,
             **base,
         )
 
@@ -311,16 +433,17 @@ def evaluate(contract: Contract, prior_fractions: list[float], obs: Observation)
                 "Horizon reached and Flagsmith still shows no result for the primary metric. "
                 f"No decision; pre-signed action: {contract.actions.horizon.replace('_', ' ')}."
             ),
+            ledger=unanalysed,
             **base,
         )
 
-    b = boundary_at(contract, prior_fractions, t, final)
+    b = nb.boundary
     b_ch = bd.z_to_chance(b)
     rows = arm_rows(b)
     common = dict(
         counted=True, look_number=k, z=None if z_now is None else round(z_now, 4),
         boundary_z=None if b is None else round(b, 4), boundary_chance=b_ch, guardrail=None,
-        arms=rows if multi else [], **base,
+        arms=rows if multi else [], ledger=_ledger(contract, k, n, t_b, b, nb.spent_after), **base,
     )
     needs = (
         "no stop is possible at this look"

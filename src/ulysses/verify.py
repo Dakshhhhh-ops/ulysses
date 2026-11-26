@@ -55,7 +55,7 @@ from . import __version__
 from . import contract as ct
 from . import signing
 from .canonical import short_hash
-from .decision import FIRES, _pct, evaluate, observation_from_snapshot
+from .decision import FIRES, CountedLook, _pct, counted_look, evaluate, observation_from_snapshot
 from .flagsmith.gateway import CONTROL_KEY, FlagsmithGateway, MetricResult, ResultsSnapshot
 
 BUNDLE_VERSION = 1
@@ -594,7 +594,9 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
     # ---- looks -----------------------------------------------------------------------------
     looks = sorted(bundle.get("looks") or [], key=lambda lk: lk["seq"])
     recomputed: dict[str, dict] = {}
-    counted_n: list[int] = []  # identities per arm at each counted look, as recomputed
+    # The alpha ledger as recomputed here: identities and the boundaries each counted look applied, under
+    # whichever contract counted it (an amendment integrates forward from them, as the service does).
+    counted: list[CountedLook] = []
     first_fire: dict[str, dict] = {}  # contract hash -> the first look that fired under it
     for lk in looks:
         lid = lk["id"]
@@ -604,16 +606,11 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
         if c is None:
             add("FAIL", name, f"recorded under {h}, which is not a verified contract in this bundle")
             continue
-        prior: list[float] = []
-        for n in counted_n:
-            t = round(min(n / c.horizon.identities_per_arm, 1.0), 6)
-            if not prior or t > prior[-1]:
-                prior.append(t)
         obs = observation_from_snapshot(c, _snapshot(lk.get("flagsmith")))
-        d = evaluate(c, prior, obs)
+        d = evaluate(c, list(counted), obs)
         recomputed[lid] = {"outcome": d.outcome, "action": d.action, "contract": h, "seq": lk["seq"]}
         if d.counted:
-            counted_n.append(d.identities_per_arm)
+            counted.append(counted_look(d.to_dict()))
         rec = lk["recorded"]
         diffs = []
         if h in first_fire and d.counted:

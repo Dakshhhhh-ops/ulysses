@@ -39,7 +39,7 @@ from . import capability
 from . import contract as ct
 from . import signing
 from .canonical import content_hash, short_hash
-from .decision import FIRES, LookDecision, evaluate, observation_from_snapshot
+from .decision import FIRES, CountedLook, LookDecision, counted_look, evaluate, observation_from_snapshot
 from .flagsmith.gateway import (
     CONTROL_KEY,
     AuditEntry,
@@ -185,6 +185,7 @@ class Ulysses:
         self._repairing = threading.local()
         self.health = FeatureHealth(store, gateway, webhook_url=self.settings.health_webhook_url,
                                     public_url=self.settings.public_url, clock=clock, sleep=sleep)
+        self._parsed: dict[str, ct.Contract] = {}  # contract hash -> the contract parsed from that text
 
     # ================================================================ signers
 
@@ -318,12 +319,16 @@ class Ulysses:
                 expected=h,
                 actual=recomputed,
             )
+        known = self._parsed.get(h)
+        if known is not None:  # same hash, so the same text that was parsed and checked before
+            return known, row
         try:
             c = ct.from_canonical(row["canonical"])
         except ValidationError as exc:
             raise Refused(f"stored contract no longer validates: {exc.errors()[0]['msg']}") from exc
         if c.hash != h:
             raise Refused("stored contract does not round-trip to its hash")
+        self._parsed[h] = c
         return c, row
 
     def _check_signers_registered(self, c: ct.Contract) -> None:
@@ -890,14 +895,107 @@ class Ulysses:
 
     # ------------------------------------------------------------------ looks
 
-    def _prior_fractions(self, c: ct.Contract, ref) -> list[float]:
-        out: list[float] = []
+    def _history(self, ref) -> list[CountedLook]:
+        """The alpha ledger: every counted look on the experiment, under whichever contract counted it, with
+        the identities it landed at and the boundaries it actually applied."""
+        out: list[CountedLook] = []
         for lk in self.store.looks(ref.environment, ref.experiment):
             if not lk["counted"]:
                 continue
-            t = round(min(lk["identities_per_arm"] / c.horizon.identities_per_arm, 1.0), 6)
-            if not out or t > out[-1]:
-                out.append(t)
+            entry = counted_look({**lk["decision"], "identities_per_arm": lk["identities_per_arm"]})
+            if not out or entry.identities > out[-1].identities:
+                out.append(entry)
+        return out
+
+    def _max_counted(self, ref) -> int | None:
+        ns = [lk["identities_per_arm"] for lk in self.store.looks(ref.environment, ref.experiment) if lk["counted"]]
+        return max(ns) if ns else None
+
+    @staticmethod
+    def _snap_view(snap: ResultsSnapshot | None) -> dict | None:
+        return None if snap is None else {
+            "as_of": snap.as_of,
+            "identities": snap.identities,
+            # Per-treatment entries ("<metric>@<arm>") are kept: a several-treatment card reads its arm's lift.
+            "metrics": {k: {"chance_to_win": m.chance_to_win, "lift": m.lift, "direction": m.direction}
+                        for k, m in snap.metrics.items()},
+            "srm_p_value": snap.srm_p_value,
+        }
+
+    def _analyse(self, c: ct.Contract, h: str, snap: ResultsSnapshot | None, *, refreshed: bool,
+                 record_watch: bool) -> tuple[LookDecision, str | None, str | None] | None:
+        """Decide one read and, when it is a look, record it, in one transaction.
+
+        The counted looks the decision rests on are read again, and the look inserted, under one write lock on
+        the database, so two service processes refreshing at the same planned count record it once: the second
+        sees the first's look and reads as between looks. Whether a read counts depends on identities only,
+        never on z.
+        Returns None when the contract stopped being active meanwhile.
+        """
+        ref = c.experiment
+        obs = observation_from_snapshot(c, snap)
+        # Decide outside the write lock (the boundary integration can take a moment), then confirm inside it
+        # that no look was counted meanwhile; if one was, decide again against the ledger as it now stands.
+        hist = self._history(ref)
+        d = evaluate(c, hist, obs)
+        with self.store.transaction():
+            if self.store.contract_state(h) != "active":
+                return None
+            fresh = self._history(ref)
+            if fresh != hist:
+                d = evaluate(c, fresh, obs)
+            if not d.counted and not record_watch:
+                return d, None, None
+            look_id = self.store.add_look(
+                contract_hash=h, environment=ref.environment, experiment_id=ref.experiment, counted=d.counted,
+                identities_per_arm=d.identities_per_arm, outcome=d.outcome, decision=d.to_dict(),
+                snapshot=self._snap_view(snap), refreshed=refreshed, now=self.clock(),
+            )
+            pid = None
+            if d.fires and self.store.cas_contract_state(h, ("active",), "decided"):
+                pid = self.store.add_proposal(contract_hash=h, look_id=look_id, outcome=d.outcome,
+                                              action=d.action or "keep_control", state="pending", now=self.clock())
+        return d, look_id, pid
+
+    def _after_look(self, h: str, d: LookDecision, look_id: str, pid: str | None, out: dict) -> None:
+        out["look_id"] = look_id
+        out["card_url"] = self.link(f"/card/{look_id}", h)
+        c, _ = self._load(h)
+        if health := self.health.after_look(c, h, look_id, d.to_dict()):
+            out["feature_health"] = health
+        if pid:
+            out["proposal"] = self._proposal_view(self.store.proposal(pid))
+            self._emit("fired", {"hash": h, "outcome": d.outcome, "action": d.action, "reason": d.reason,
+                                 "card_url": out["card_url"]})
+
+    def _hides_numbers(self, environment: str, experiment_id: int, status: str | None = None) -> bool:
+        """While a contract governs an experiment and has not decided, Flagsmith's numbers are shown only at
+        counted looks. Otherwise an agent could read z between looks and call ``look`` only when it is high."""
+        if status == "completed":
+            return False
+        return any(r["state"] in ("starting", "active", "deviated")
+                   for r in self.store.contract_states(environment, experiment_id))
+
+    @staticmethod
+    def _redact_snapshot(view: dict | None) -> dict | None:
+        if view is None:
+            return None
+        return {**view, "redacted": True,
+                "metrics": {k: {"chance_to_win": None, "lift": None, "direction": m.get("direction")}
+                            for k, m in (view.get("metrics") or {}).items()}}
+
+    @staticmethod
+    def _redact_decision(dec: dict) -> dict:
+        """A between-looks decision recorded before redaction existed carries Flagsmith's number; drop it."""
+        if dec.get("counted"):
+            return dec
+        out = {**dec, "chance_to_win": None, "z": None,
+               "guardrails": [{**g, "chance_worse": None, "z": None} for g in dec.get("guardrails") or []],
+               "guardrail_chance_worse": {k: None for k in dec.get("guardrail_chance_worse") or {}},
+               "arms": [{**a, "chance_to_win": None, "z": None} for a in dec.get("arms") or []]}
+        if dec.get("chance_to_win") is not None:
+            out["reason"] = (f"Between looks at {dec.get('identities_per_arm')} identities in the smaller arm; the "
+                             "contract does not show Flagsmith's numbers until the next planned look.")
         return out
 
     def _refresh_and_read(self, ref, prev_as_of: str | None) -> tuple[ResultsSnapshot | None, bool, str]:
@@ -963,36 +1061,35 @@ class Ulysses:
             # Flagsmith did not answer: no look is recorded and nothing is spent.
             return {"hash": h, "state": "active", "look_not_taken": True, "retry_after_seconds": 60,
                     "detail": f"Flagsmith did not answer ({exc}); no look was recorded. Try again shortly."}
-        obs = observation_from_snapshot(c, snap)
-        d = evaluate(c, self._prior_fractions(c, ref), obs)
-        snap_view = None if snap is None else {
-            "as_of": snap.as_of,
-            "identities": snap.identities,
-            # Per-treatment entries ("<metric>@<arm>") are kept: a several-treatment card reads its arm's lift.
-            "metrics": {k: {"chance_to_win": m.chance_to_win, "lift": m.lift, "direction": m.direction}
-                        for k, m in snap.metrics.items()},
-            "srm_p_value": snap.srm_p_value,
-        }
+        got = self._analyse(c, h, snap, refreshed=refreshed, record_watch=True)
+        if got is None:
+            # Another service process decided this contract while this one was reading Flagsmith.
+            _, row = self._load(h)
+            fired = [p for p in self.store.proposals_for(h) if p["state"] != "void"]
+            return {"hash": h, "state": row["state"], "already_decided": True,
+                    "proposals": [self._proposal_view(p) for p in fired]}
+        d, look_id, pid = got
+        view = self._snap_view(snap)
         out: dict[str, Any] = {"hash": h, "refreshed": refreshed, "note": note, "decision": d.to_dict(),
-                               "flagsmith": snap_view}
-        with self.store.transaction():
-            look_id = self.store.add_look(
-                contract_hash=h, environment=ref.environment, experiment_id=ref.experiment, counted=d.counted,
-                identities_per_arm=d.identities_per_arm, outcome=d.outcome, decision=d.to_dict(), snapshot=snap_view,
-                refreshed=refreshed, now=self.clock(),
-            )
-            pid = None
-            if d.fires and self.store.cas_contract_state(h, ("active",), "decided"):
-                pid = self.store.add_proposal(contract_hash=h, look_id=look_id, outcome=d.outcome,
-                                              action=d.action or "keep_control", state="pending", now=self.clock())
-        out["look_id"] = look_id
-        out["card_url"] = self.link(f"/card/{look_id}", h)
-        if health := self.health.after_look(c, h, look_id, d.to_dict()):
-            out["feature_health"] = health
-        if pid:
-            out["proposal"] = self._proposal_view(self.store.proposal(pid))
-            self._emit("fired", {"hash": h, "outcome": d.outcome, "action": d.action, "reason": d.reason,
-                                 "card_url": out["card_url"]})
+                               "flagsmith": view if d.counted else self._redact_snapshot(view)}
+        self._after_look(h, d, look_id, pid, out)  # type: ignore[arg-type]
+        return out
+
+    def poll_once(self) -> list[dict]:
+        """One round of the service's own schedule (``ulysses serve --poll``): a look on every active contract.
+
+        ``look`` keeps the contract's refresh floor, so calling this more often than that only returns
+        ``too_soon``. With the poller on, when looks land depends on the clock and the traffic alone, not on
+        when an agent chooses to ask.
+        """
+        out = []
+        for r in self.store.all_contracts():
+            if r["state"] != "active":
+                continue
+            try:
+                out.append(self.look(r["hash"]))
+            except (UlyssesError, FlagsmithError) as exc:
+                log.warning("scheduled look on %s failed: %s", short_hash(r["hash"]), exc)
         return out
 
     def _state_check(self, c: ct.Contract, h: str) -> dict | None:
@@ -1314,6 +1411,7 @@ class Ulysses:
             new = ct.with_regenerated_table(data)
         except ValidationError as exc:
             raise Invalid("amended contract does not validate", errors=_errors(exc)) from exc
+        self._check_horizon_past_counted(old, new, Invalid)
         out = self.submit(new)
         out["sign_urls"] = {
             "owner": self.link(f"/sign/{new.hash}?role=owner", new.hash),
@@ -1321,10 +1419,28 @@ class Ulysses:
         }
         return out
 
+    def _check_horizon_past_counted(self, old: ct.Contract, new: ct.Contract, error: type[UlyssesError]) -> None:
+        """An amended horizon must lie beyond every look already counted.
+
+        A horizon moved to or below a counted look would put that look at or past the end of the new
+        contract: nothing after it could be scheduled, and its alpha was spent against a horizon that no
+        longer exists. An amendment that leaves the horizon as it was is not affected.
+        """
+        n = new.horizon.identities_per_arm
+        if n == old.horizon.identities_per_arm:
+            return
+        top = self._max_counted(new.experiment)
+        if top is not None and n <= top:
+            raise error(f"the horizon cannot be amended to {n} identities per arm: the contract already counted a "
+                        f"look at {top} identities per arm, so the new horizon must be larger than {top}",
+                        next=f"amend the horizon to more than {top} identities per arm")
+
     def _activate_amendment(self, new: ct.Contract, h: str) -> None:
         old_h = new.amendment.supersedes  # type: ignore[union-attr]
         with self.store.transaction():
-            _, old_row = self._load(old_h)
+            old_c, old_row = self._load(old_h)
+            # Looks may have been counted between drafting the amendment and its second signature.
+            self._check_horizon_past_counted(old_c, new, Conflict)
             if old_row["state"] in ("superseded", "executed", "void"):
                 raise Conflict(f"contract {short_hash(old_h)} is already {old_row['state']}; "
                                "this amendment stays a draft")
@@ -1716,7 +1832,14 @@ class Ulysses:
     # ------------------------------------------------------------------ agent reads
 
     def read_experiment(self, environment: str, experiment_id: int) -> dict:
-        """Flagsmith's own view of an experiment for the agent: reads only, no key, no write paths."""
+        """Flagsmith's own view of an experiment for the agent: no key, no Flagsmith write.
+
+        On an experiment a contract governs this read is one of the paths a look can be taken on: when the
+        smaller arm has reached the next planned count, this read is that look (recorded, and it may fire),
+        exactly as if ``look`` had been called. Otherwise, while the contract has not decided, the results
+        come back without Flagsmith's chance to win and lift: identities, the sample-ratio p-value and the
+        count of the next look only.
+        """
         exp = self._fs.get_experiment(environment, experiment_id)
         try:
             snap = self._fs.get_results(environment, experiment_id)
@@ -1726,22 +1849,88 @@ class Ulysses:
             rate = self._fs.exposure_rate_per_hour(environment, experiment_id)
         except FlagsmithError:
             rate = None
-        return {
+        look = self._look_from_read(environment, experiment_id, exp, snap)
+        results = None if snap is None else {
+            "as_of": snap.as_of, "identities": snap.identities, "srm_p_value": snap.srm_p_value,
+            "metrics": {k: {"chance_to_win": m.chance_to_win, "lift": m.lift, "direction": m.direction}
+                        for k, m in snap.metrics.items() if "@" not in k},
+        }
+        counted = bool(look and look["decision"]["counted"])
+        if results is not None and not counted and self._hides_numbers(environment, experiment_id, exp.status):
+            results = self._redact_snapshot(results)
+            results["next_look_at_identities"] = None if not look else look["decision"]["next_look_at_identities"]
+            results["note"] = ("A contract governs this experiment: Flagsmith's chance to win and lift are shown "
+                               "only at counted looks. The first read at the next planned count is the look.")
+        out = {
             "source": "Flagsmith REST API, read by the contract service",
             "experiment": {"id": exp.id, "name": exp.name, "status": exp.status, "hypothesis": exp.hypothesis,
                            "flag": exp.flag, "variations": [v.key for v in exp.variations],
                            "metrics": [{"name": m.name, "direction": m.direction,
                                         "expected_direction": m.expected_direction} for m in exp.metrics],
                            "rollout": _rollout_of(exp)},
-            "results": None if snap is None else {
-                "as_of": snap.as_of, "identities": snap.identities, "srm_p_value": snap.srm_p_value,
-                "metrics": {k: {"chance_to_win": m.chance_to_win, "lift": m.lift, "direction": m.direction}
-                            for k, m in snap.metrics.items() if "@" not in k},
-            },
+            "results": results,
             "exposure_rate_per_arm_per_hour": rate,
         }
+        if counted:
+            out["look"] = look
+        return out
+
+    def _look_from_read(self, environment: str, experiment_id: int, exp: ExperimentInfo,
+                        snap: ResultsSnapshot | None) -> dict | None:
+        """Count a look on a plain read when the read reaches the next planned count (see read_experiment).
+
+        Returns the look (``look_id``, ``card_url``, ``decision``, ``proposal``) when one was counted, the
+        between-looks decision (not recorded) when not, or None when no active contract governs."""
+        active = [r for r in self.store.contract_states(environment, experiment_id) if r["state"] == "active"]
+        if not active or snap is None or exp.status not in ("running", "paused"):
+            return None
+        gov = active[-1]
+        c, _ = self._load(gov["hash"])
+        lock = self._lock_for(c.experiment)
+        if not lock.acquire(blocking=False):
+            return None  # a look is being taken right now; it does the counting
+        try:
+            got = self._analyse(c, gov["hash"], snap, refreshed=False, record_watch=False)
+        finally:
+            lock.release()
+        if got is None:
+            return None
+        d, look_id, pid = got
+        if not look_id:
+            return {"hash": gov["hash"], "decision": {"counted": False,
+                                                      "next_look_at_identities": d.next_look_at_identities}}
+        out: dict[str, Any] = {"hash": gov["hash"], "decision": d.to_dict()}
+        self._after_look(gov["hash"], d, look_id, pid, out)
+        return out
 
     # ------------------------------------------------------------------ views
+
+    def _looks_for_view(self, environment: str, experiment_id: int) -> list[dict]:
+        """Stored looks, with between-looks numbers dropped while a contract has not decided."""
+        looks = self.store.looks(environment, experiment_id)
+        if self._hides_numbers(environment, experiment_id):
+            looks = [lk if lk["counted"] else {**lk, "decision": self._redact_decision(lk["decision"]),
+                                                "snapshot": self._redact_snapshot(lk["snapshot"])}
+                     for lk in looks]
+        return looks
+
+    def alpha_ledger(self, environment: str, experiment_id: int, up_to_seq: int | None = None) -> dict:
+        """Alpha spent so far against the signed alpha, with the boundary each counted look applied."""
+        rows = []
+        spent = 0.0
+        for lk in self.store.looks(environment, experiment_id):
+            if up_to_seq is not None and lk["seq"] > up_to_seq:
+                break
+            if not lk["counted"]:
+                continue
+            led = lk["decision"].get("ledger") or {}
+            rows.append({"seq": lk["seq"], "look_number": lk["decision"].get("look_number"),
+                         "contract": lk["contract_hash"], "identities": lk["identities_per_arm"],
+                         "boundary_applied": led.get("boundary_applied", lk["decision"].get("boundary_z")),
+                         "alpha_spent": led.get("alpha_spent")})
+            if led.get("alpha_spent") is not None:
+                spent = led["alpha_spent"]
+        return {"looks": rows, "spent": spent}
 
     def experiment_view(self, environment: str, experiment_id: int) -> dict:
         rows = self.store.contracts_for(environment, experiment_id)
@@ -1751,7 +1940,7 @@ class Ulysses:
                        "look_number": lk["decision"].get("look_number"),
                        "identities_per_arm": lk["identities_per_arm"], "reason": lk["decision"]["reason"],
                        "guardrails": lk["decision"].get("guardrails", [])}
-                      for lk in self.store.looks(environment, experiment_id)],
+                      for lk in self._looks_for_view(environment, experiment_id)],
             "deviations": self.store.deviations(environment, experiment_id),
         }
 
@@ -1759,6 +1948,9 @@ class Ulysses:
         lk = self.store.look(look_id)
         if not lk:
             raise NotFound(f"no look {look_id}")
+        if not lk["counted"] and self._hides_numbers(lk["environment"], lk["experiment_id"]):
+            lk = {**lk, "decision": self._redact_decision(lk["decision"]),
+                  "snapshot": self._redact_snapshot(lk["snapshot"])}
         c, row = self._load(lk["contract_hash"])
         props = [p for p in self.store.proposals_for(lk["contract_hash"]) if p["look_id"] == look_id]
         history = [
@@ -1767,9 +1959,15 @@ class Ulysses:
              "identities_per_arm": x["identities_per_arm"], "chance_to_win": x["decision"]["chance_to_win"],
              "boundary_chance": x["decision"]["boundary_chance"], "z": x["decision"]["z"],
              "boundary_z": x["decision"]["boundary_z"], "guardrails": x["decision"].get("guardrails", [])}
-            for x in self.store.looks(lk["environment"], lk["experiment_id"])
+            for x in self._looks_for_view(lk["environment"], lk["experiment_id"])
         ]
+        ledger = self.alpha_ledger(lk["environment"], lk["experiment_id"], up_to_seq=lk["seq"])
+        alpha = {"spent": ledger["spent"], "signed": c.boundary.alpha,
+                 "left": max(c.boundary.alpha - ledger["spent"], 0.0),
+                 "text": f"Alpha spent so far: {ledger['spent']:.4g} of the signed {c.boundary.alpha:g}",
+                 "looks": ledger["looks"]}
         return {
+            "alpha": alpha,
             "look": {k: lk[k] for k in ("id", "seq", "counted", "outcome", "identities_per_arm", "refreshed")},
             "decision": lk["decision"],
             "flagsmith": lk["snapshot"],

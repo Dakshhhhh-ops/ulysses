@@ -456,13 +456,24 @@ class Replayer:
             got = out.get("decision") or {}
             rec = ev["decision"]
             diff = {f: (rec.get(f), got.get(f)) for f in DECISION_FIELDS if rec.get(f) != got.get(f)}
-            ok = not diff and out.get("look_id") == ev["look_id"]
+            # A final read past the horizon now gets its boundary on the fractions as they landed
+            # (docs/STATISTICS.md, "Looks that land late"). A recording made under the earlier rule differs in
+            # that boundary alone; it is labelled, not hidden, and counts as reproduced only if the outcome
+            # is the same.
+            overrun = (set(diff) == {"boundary_z"} and got.get("counted") and got.get("fraction") == 1.0
+                       and (got.get("identities_per_arm") or 0) > c.horizon.identities_per_arm)
+            ok = (not diff or overrun) and out.get("look_id") == ev["look_id"]
             ctw = got.get("chance_to_win")
+            same = "; same decision as recorded"
+            if overrun:
+                same = (f"; same outcome as recorded. This final read landed past the horizon, so its boundary is "
+                        f"now computed on the fractions as they landed: z {diff['boundary_z'][1]}, where the "
+                        f"recording, made under the earlier rule, has z {diff['boundary_z'][0]}")
             text = (f"look {out.get('look_id')}: Flagsmith chance to win "
                     f"{'n/a' if ctw is None else f'{ctw * 100:.2f}%'} at {got.get('identities_per_arm')} per arm -> "
                     f"{str(got.get('outcome')).upper()}"
                     + (f" (z {got['z']}, contract boundary z {got['boundary_z']})" if got.get("boundary_z") else "")
-                    + ("; same decision as recorded" if ok else f"; DIFFERS from the recording: {diff}"))
+                    + (same if ok else f"; DIFFERS from the recording: {diff}"))
             return Step(t, k, text, ok=ok, detail={"decision": got, "card": out.get("card_url")})
         if k == "proposal":
             p = self.store.proposal(ev["proposal_id"])
