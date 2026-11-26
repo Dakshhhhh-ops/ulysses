@@ -387,12 +387,22 @@ def test_doctored_boundary_reading_is_refused(keys):
         ct.from_toml(text.replace(f"z = {last.z},", f"z = {round(last.z + 0.0004, 4)},"))
 
 
+def _rename_treatment(d, new):
+    """Rename the treatment arm everywhere the contract names it, so the contract stays valid."""
+    old = d["experiment"]["treatment"]
+    out = {**d, "experiment": {**d["experiment"], "treatment": new}}
+    if out.get("sample_ratio"):
+        split = {(new if k == old else k): v for k, v in out["sample_ratio"]["split"].items()}
+        out["sample_ratio"] = {**out["sample_ratio"], "split": split}
+    return out
+
+
 @pytest.mark.parametrize("change", [
     lambda d: {**d, "hypothesis": d["hypothesis"] + "."},
     lambda d: {**d, "boundary": {**d["boundary"], "alpha": 0.04}},
     lambda d: {**d, "actions": {**d["actions"], "horizon": "ship_treatment"}},
     lambda d: {**d, "horizon": {**d["horizon"], "identities_per_arm": 1001}},
-    lambda d: {**d, "experiment": {**d["experiment"], "treatment": "big_cta2"}},
+    lambda d: _rename_treatment(d, "big_cta2"),
     lambda d: {**d, "validity": {"start_within_days": 29}},
 ])
 def test_any_change_in_meaning_changes_the_hash(keys, change):
