@@ -254,6 +254,11 @@ class ReplayFlagsmith(FakeFlagsmith):
             environment=ev["environment"], flag=ev["flag"], feature_id=ev.get("feature_id"),
             variations=[Variation(CONTROL_KEY, None), Variation(ev["treatment"], ev.get("treatment_option_id"))],
             metrics=metrics, project=ev.get("project"), raw=raw)
+        # Feature Health: a recorded ship was made while Flagsmith reported the flag healthy (the service
+        # refuses otherwise), so the stand-in answers with no health events. The trace carries no
+        # environment name, so the key stands in for it.
+        if ev["environment"] not in self.environments:
+            self.add_environment(ev["environment"], name=ev["environment"], project=ev.get("project") or 0)
 
     def set_recorded(self, experiment_id: int, view: dict | None, base: float) -> None:
         if view is None:

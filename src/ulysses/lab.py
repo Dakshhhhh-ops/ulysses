@@ -223,6 +223,42 @@ def ensure_audit_webhook(cfg: LabConfig, url: str, secret: str | None) -> dict:
     return {"id": hook["id"], "url": hook["url"], "enabled": hook.get("enabled")}
 
 
+def ensure_health_provider(cfg: LabConfig, project_id: int | None = None) -> dict:
+    """Flagsmith's Feature Health "Webhook" provider for the project, created if it is missing.
+
+    One provider of each name per project (``unique_together`` in ``features/feature_health/models.py``,
+    with no serializer check, so a second POST is a database error): list first, create only if absent.
+    The returned ``webhook_url`` is a signed path and works without any key; treat it as a secret.
+    """
+    a = Admin(cfg)
+    pid = project_id or a.project()
+    path = f"/api/v1/projects/{pid}/feature-health/providers/"
+    rows = results_list(a.call("GET", path))
+    prov = next((r for r in rows if r.get("name") == "Webhook"), None)
+    created = prov is None
+    if created:
+        prov = a.call("POST", path, json={"name": "Webhook"})
+    return {"project_id": pid, "name": prov["name"], "webhook_url": prov["webhook_url"], "created": created}
+
+
+def set_env_value(path: str | Path, key: str, value: str) -> None:
+    """Set ``key=value`` in a KEY=VALUE env file (created if missing), keeping every other line."""
+    p = Path(path)
+    lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+    out, done = [], False
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            if not done:
+                out.append(f"{key}={value}")
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(f"{key}={value}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def load_state() -> dict:
     return json.loads(STATE_PATH.read_text()) if STATE_PATH.exists() else {}
 

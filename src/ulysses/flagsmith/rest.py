@@ -11,6 +11,10 @@ Paths, verified against the Flagsmith source (``api/environments/urls.py`` and
     GET    /api/v1/environments/<env>/experiments/<id>/exposures/  get_experiment_exposures (MCP)
     POST   /api/v1/environments/<env>/experiments/<id>/complete/   {"rollout_decision": "variant"|"control", "rollout_variant": <option id>}
     GET    /api/v1/audit/?project=<id>
+    GET    /api/v1/environments/<env>/                             id, name and project of the environment
+    GET    /api/v1/projects/<p>/feature-health/providers/          Feature Health (see ``health.py``)
+    POST   /api/v1/projects/<p>/feature-health/providers/          {"name": "Webhook"}
+    GET    /api/v1/projects/<p>/feature-health/events/
 
 Start, refresh and complete are deliberately not exposed by Flagsmith's MCP
 server; only the contract service, which holds the write key, calls them.
@@ -23,6 +27,7 @@ from typing import Any
 
 import httpx
 
+from . import health as fh
 from .gateway import (
     CONTROL_KEY,
     AuditEntry,
@@ -108,6 +113,23 @@ class RestFlagsmith:
             nxt = data.get("next") if isinstance(data, dict) else None
             url = nxt.split("/api/v1", 1)[1] if nxt and "/api/v1" in nxt else None
         return out
+
+    # ---- Feature Health ------------------------------------------------------
+
+    def environment_info(self, environment: str) -> fh.EnvironmentInfo:
+        return fh.parse_environment(self._request("GET", f"/environments/{environment}/"))
+
+    def health_providers(self, project: int) -> list[fh.HealthProvider]:
+        data = self._request("GET", f"/projects/{int(project)}/feature-health/providers/")
+        rows = data.get("results", data) if isinstance(data, dict) else data
+        return [fh.parse_provider(r) for r in rows or []]
+
+    def create_health_provider(self, project: int, name: str = fh.WEBHOOK_PROVIDER) -> fh.HealthProvider:
+        data = self._request("POST", f"/projects/{int(project)}/feature-health/providers/", json={"name": name})
+        return fh.parse_provider(data)
+
+    def health_events(self, project: int) -> list[fh.HealthEvent]:
+        return fh.parse_events(self._request("GET", f"/projects/{int(project)}/feature-health/events/"))
 
     # ---- writes (only the contract service calls these) --------------------
 

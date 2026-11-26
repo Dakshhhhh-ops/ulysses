@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import time
+import json
 from dataclasses import replace
 
+from . import health as fh
 from .gateway import (
     CONTROL_KEY,
     AuditEntry,
@@ -52,6 +54,14 @@ class FakeFlagsmith:
         self.fail_start_after_applying = False
         self.fail_hypothesis = 0  # number of update_hypothesis calls that will fail before applying
         self.down = False  # every call fails as if Flagsmith were unreachable
+        # Feature Health, as api/features/feature_health/ models it.
+        self.environments: dict[str, fh.EnvironmentInfo] = {}
+        self.features: dict[tuple[int, str], int] = {}  # (project, flag name) -> feature id
+        self.health_providers_by_project: dict[int, list[fh.HealthProvider]] = {}
+        self._webhooks: dict[str, tuple[int, str]] = {}  # webhook url -> (project, provider name)
+        self.health_history: list[dict] = []  # every stored event, oldest first
+        self.webhook_down = False  # the feature-health webhook endpoint is unreachable
+        self.webhook_posts: list[dict] = []  # every body that reached the webhook endpoint
 
     # ---- setup helpers ---------------------------------------------------
 
@@ -97,6 +107,15 @@ class FakeFlagsmith:
                     for k in keys]}},
         )
         self.experiments[experiment_id] = info
+        if environment not in self.environments:
+            self.add_environment(environment, name="Test" if environment == "env-key" else environment,
+                                 project=project)
+        self.features[(project, flag)] = info.feature_id
+        return info
+
+    def add_environment(self, key: str, *, name: str, project: int = 1) -> fh.EnvironmentInfo:
+        info = fh.EnvironmentInfo(id=len(self.environments) + 1, name=name, project=project)
+        self.environments[key] = info
         return info
 
     def set_results(
@@ -262,6 +281,92 @@ class FakeFlagsmith:
         # Open-source self-hosted Flagsmith returns no rows here (visibility 0 days); tests that want
         # the API path can set ``audit_api_visible``.
         return list(self.audit) if getattr(self, "audit_api_visible", True) else []
+
+    # ---- Feature Health ------------------------------------------------------
+
+    def environment_info(self, environment: str) -> fh.EnvironmentInfo:
+        self._check_up()
+        e = self.environments.get(environment)
+        if e is None:
+            raise FlagsmithError("Not found.", status=404)
+        return e
+
+    def health_providers(self, project: int) -> list[fh.HealthProvider]:
+        self._check_up()
+        return list(self.health_providers_by_project.get(project, []))
+
+    def create_health_provider(self, project: int, name: str = fh.WEBHOOK_PROVIDER) -> fh.HealthProvider:
+        self._check_up()
+        if name not in ("Webhook", "Grafana"):
+            raise FlagsmithError(f'"{name}" is not a valid choice.', status=400)
+        rows = self.health_providers_by_project.setdefault(project, [])
+        if any(r.name == name for r in rows):
+            # unique_together (name, project) with no serializer check: the database refuses it.
+            raise FlagsmithError("duplicate key value violates unique constraint", status=500)
+        url = f"http://flagsmith.test/api/v1/feature-health/p{project}{name.lower()}/signedpart"
+        prov = fh.HealthProvider(name=name, project=project, webhook_url=url)
+        rows.append(prov)
+        self._webhooks[url] = (project, name)
+        return prov
+
+    def health_events(self, project: int) -> list[fh.HealthEvent]:
+        """The latest event per (provider, environment, external id, feature), as get_latest_by_project."""
+        self._check_up()
+        latest: dict[tuple, dict] = {}
+        for ev in self.health_history:
+            if ev["_project"] == project:
+                latest[(ev["provider_name"], ev["environment"], ev["_external_id"], ev["feature"])] = ev
+        return [fh.parse_event({k: v for k, v in ev.items() if not k.startswith("_")}) for ev in latest.values()]
+
+    def _store_health(self, project: int, feature_id: int, environment_id: int | None, provider: str,
+                      kind: str, reason: dict | None, external_id: str | None = None) -> dict:
+        ev = {"id": len(self.health_history) + 1, "feature": feature_id, "environment": environment_id,
+              "provider_name": provider, "type": kind, "reason": reason, "_project": project,
+              "_external_id": external_id}
+        self.health_history.append(ev)
+        return ev
+
+    def receive_webhook(self, url: str, body: str | bytes | dict) -> int:
+        """POST to a provider's webhook_url, as feature_health_webhook handles it. Returns the HTTP status."""
+        if self.webhook_down or self.down:
+            raise FlagsmithError("cannot reach Flagsmith: connection refused")
+        target = self._webhooks.get(url)
+        if target is None:
+            return 404
+        project, provider = target
+        try:
+            data = json.loads(body) if isinstance(body, (str, bytes)) else body
+            feature, status = data["feature"], data["status"]
+            if not isinstance(feature, str) or status not in ("healthy", "unhealthy"):
+                return 400
+            reason = data.get("reason")
+            if reason is not None:
+                for b in reason["text_blocks"]:
+                    if not isinstance(b["text"], str):
+                        return 400
+                for b in reason["url_blocks"]:
+                    if not isinstance(b["url"], str):
+                        return 400
+        except (ValueError, KeyError, TypeError):
+            return 400
+        self.webhook_posts.append(data)
+        fid = self.features.get((project, feature))
+        if fid is None:
+            return 400  # no event created for an unknown feature, so the view answers 400
+        env = next((e for e in self.environments.values()
+                    if e.project == project and e.name == data.get("environment")), None)
+        self._store_health(project, fid, env.id if env else None, provider,
+                           fh.UNHEALTHY if status == "unhealthy" else fh.HEALTHY, reason)
+        return 200
+
+    def external_health(self, flag: str, status: str, *, provider: str = "Grafana", environment: str | None = None,
+                        project: int = 1, title: str = "Alert firing", external_id: str | None = "alert-1") -> None:
+        """Another provider (Grafana by default) reports on a flag. ``environment`` is an environment key."""
+        env_id = self.environments[environment].id if environment else None
+        self._store_health(project, self.features[(project, flag)], env_id, provider,
+                           fh.UNHEALTHY if status == "unhealthy" else fh.HEALTHY,
+                           {"text_blocks": [{"title": title, "text": f"{provider} says {status}"}], "url_blocks": []},
+                           external_id=external_id)
 
     # ---- test helpers: writes that do not come from the contract service ----------
 

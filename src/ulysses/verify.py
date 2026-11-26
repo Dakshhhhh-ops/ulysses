@@ -727,6 +727,7 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
                                                f"{p.get('action')} ships {ship!r}")
             else:
                 add("PASS", f"{name} shipped", f"{p.get('action')} ships {ship!r} on flag {c.experiment.flag}")
+            _health_check(add, name, c, p)
     if len(executed) > 1:
         add("FAIL", "one executed outcome", f"{len(executed)} outcomes were executed on one experiment")
     if executed and executed[-1].get("contract_hash") != chain[-1]:
@@ -779,6 +780,33 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
             add("SKIP", f"outcome line in Flagsmith{src}", "the experiment carries no outcome line (the service "
                                                           "writes it after completing; the final state above is "
                                                           "the evidence)")
+
+
+def _health_check(add, name: str, c: ct.Contract, p: dict) -> None:
+    """The Feature Health state the service relied on when it executed, for a contract that signs the rule.
+
+    This is the service's own record of what Flagsmith's feature-health events said at that moment; the
+    events themselves are not in the bundle, so it shows what was relied on rather than proving it.
+    """
+    if c.health is None or not c.health.block_ship_when_unhealthy:
+        return
+    fh = (p.get("result") or {}).get("feature_health")
+    if p.get("action") != "ship_treatment":
+        state = (fh or {}).get("state", "not read")
+        add("PASS", f"{name} feature health", f"{p.get('action')} is never blocked by Feature Health "
+                                               f"(recorded state: {state})")
+        return
+    if not isinstance(fh, dict):
+        add("FAIL", f"{name} feature health", "the contract signs block_ship_when_unhealthy, but the executed "
+                                               "ship records no Feature Health check")
+    elif fh.get("state") != "healthy":
+        add("FAIL", f"{name} feature health", f"the treatment shipped while the recorded Feature Health state "
+                                               f"was {fh.get('state')!r}")
+    else:
+        add("PASS", f"{name} feature health",
+            f"the service recorded Flagsmith's Feature Health for flag {c.experiment.flag} in "
+            f"{fh.get('environment')!r} as healthy before shipping ({fh.get('events_for_flag', 0)} latest "
+            "event(s) for the flag, none unhealthy); recorded by the service, not re-read here")
 
 
 def compare_flagsmith(exported: dict | None, live: dict) -> Check:

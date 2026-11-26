@@ -277,10 +277,15 @@ def main() -> None:
     llm_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY")
     operator = {**{k: v for k, v in os.environ.items() if k not in llm_keys}, **env_vals}
     py = sys.executable
-    step("creating demo flags, metrics and the signed audit webhook")
-    if subprocess.run([py, "-m", "ulysses.cli", "lab", "setup"], cwd=ROOT,
+    step("creating demo flags, metrics, the signed audit webhook and the Feature Health provider")
+    if subprocess.run([py, "-m", "ulysses.cli", "lab", "setup", "--env-file", str(JUDGE_ENV)], cwd=ROOT,
                       env={**operator, "PYTHONPATH": str(ROOT / "src")}).returncode != 0:
         stop("ulysses lab setup failed")
+    # lab setup keeps the Feature Health webhook URL (a signed path) in judge.env; the service reads it.
+    health_url = read_env(JUDGE_ENV).get("ULYSSES_HEALTH_WEBHOOK_URL")
+    if health_url:
+        env_vals["ULYSSES_HEALTH_WEBHOOK_URL"] = health_url
+        operator["ULYSSES_HEALTH_WEBHOOK_URL"] = health_url
     step("creating the A/A and real-effect experiments and the two signers")
     if subprocess.run([py, str(ROOT / "scripts/demo_setup.py"), "--replace"], cwd=ROOT,
                       env={**operator, **passphrases}).returncode != 0:

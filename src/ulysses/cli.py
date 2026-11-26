@@ -213,6 +213,11 @@ start_within_days = 30
 baseline_rate = 0.05
 min_relative_lift = 0.1
 power = 0.8
+
+[health]
+# Refuse to ship the treatment while Flagsmith's Feature Health reports the flag
+# unhealthy (any provider: Ulysses' own webhook, Grafana, ...). Keeping control is never blocked.
+block_ship_when_unhealthy = true
 """
 
 
@@ -527,6 +532,8 @@ def cmd_lab_setup(a) -> None:
     cfg = lab.LabConfig.from_env()
     d = lab.setup_demo(cfg)
     console.print({k: v for k, v in d.items() if "key" not in k})
+    if not a.no_health:
+        _setup_feature_health(lab, cfg, d["project_id"], a.env_file)
     if a.no_webhook:
         console.print("[yellow]audit webhook skipped[/] (--no-webhook): deviation detection by webhook is off; "
                       "the look-time state check still runs")
@@ -546,6 +553,22 @@ def cmd_lab_setup(a) -> None:
             return
         fail(f"could not register the audit webhook: {exc}")
     console.print(f"audit-log webhook -> {h['url']} (enabled: {h['enabled']}, signed)")
+
+
+def _setup_feature_health(lab, cfg, project_id: int, env_file: str) -> None:
+    """Create (or find) the project's Feature Health "Webhook" provider and keep its URL in the env file."""
+    from .flagsmith.health import redact_webhook
+
+    try:
+        prov = lab.ensure_health_provider(cfg, project_id)
+    except (RuntimeError, httpx.HTTPError) as exc:
+        err.print(f"[yellow]Feature Health provider skipped[/]: {exc}. Looks still run; breaches are not reported "
+                  "to Flagsmith's Feature Health until `ulysses lab setup` succeeds.")
+        return
+    lab.set_env_value(env_file, "ULYSSES_HEALTH_WEBHOOK_URL", prov["webhook_url"])
+    os.environ["ULYSSES_HEALTH_WEBHOOK_URL"] = prov["webhook_url"]
+    console.print(f"Feature Health provider {prov['name']} ({'created' if prov['created'] else 'already there'}) "
+                  f"-> {redact_webhook(prov['webhook_url'])} (signed URL kept in {env_file})")
 
 
 def cmd_lab_experiment(a) -> None:
@@ -864,6 +887,9 @@ def build_parser() -> argparse.ArgumentParser:
     lb = sub.add_parser("lab", help="create the demo objects in Flagsmith").add_subparsers(dest="sub", required=True)
     s = lb.add_parser("setup")
     s.add_argument("--no-webhook", action="store_true", help="do not register the audit-log webhook")
+    s.add_argument("--no-health", action="store_true", help="do not create the Feature Health webhook provider")
+    s.add_argument("--env-file", default=".env",
+                   help="where to keep the Feature Health webhook URL (ULYSSES_HEALTH_WEBHOOK_URL); git-ignored")
     s.set_defaults(fn=cmd_lab_setup)
     s = lb.add_parser("experiment", help="create a fresh demo experiment on the demo flag")
     s.add_argument("--name", default="ulysses checkout cta")
