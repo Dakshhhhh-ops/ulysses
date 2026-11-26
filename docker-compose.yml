@@ -4,14 +4,14 @@
 #   uv run python scripts/judge_demo.py        # brings this up, bootstraps it and runs the demo
 #   docker compose -p ulysses down -v          # removes it and its data
 #
-# The Flagsmith API and dashboard listen on http://localhost:8280.
+# The Flagsmith API and dashboard listen on http://localhost:8280 (set ULYSSES_FLAGSMITH_PORT to move it).
 name: ulysses
 
 x-flagsmith-env: &flagsmith-env
   DATABASE_URL: postgresql://postgres:password@postgres:5432/flagsmith
   ENVIRONMENT: production
   DJANGO_ALLOWED_HOSTS: '*'
-  FLAGSMITH_DOMAIN: localhost:8280
+  FLAGSMITH_DOMAIN: localhost:${ULYSSES_FLAGSMITH_PORT:-8280}
   DJANGO_SECRET_KEY: ulysses-throwaway-local-secret
   WAREHOUSE_CREDENTIALS_SECRET: ulysses-throwaway-warehouse-secret
   EXPERIMENTATION_ENABLED: 'true'
@@ -59,7 +59,7 @@ services:
     environment:
       <<: *flagsmith-env
     ports:
-      - '8280:8000'
+      - '127.0.0.1:${ULYSSES_FLAGSMITH_PORT:-8280}:8000'
     extra_hosts:
       # Linux has no host.docker.internal by default; Docker Desktop does.
       - 'host.docker.internal:host-gateway'
