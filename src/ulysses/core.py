@@ -1156,7 +1156,17 @@ class Ulysses:
 
     def execute_for_contract(self, h: str, action: str) -> dict:
         """Agent path: run ``action`` for whatever outcome this contract has fired."""
-        _, row = self._load(h)
+        c, row = self._load(h)
+        if c.amendment and row["state"] == "draft":
+            # An amendment authorises nothing until both signers have signed it; say who is missing.
+            missing = [r for r in ROLES if not self._signature_valid(c, h, r)]
+            if not missing:  # both signed, but activation was refused (the amended contract had moved on)
+                raise Refused("this amendment never took effect, so it authorises nothing; draft a new one")
+            self.store.log_refusal("execute", f"amendment not signed by {', '.join(missing)}", h, self.clock())
+            raise Refused("this amendment needs both the owner and the second signer before it authorises "
+                          f"anything; still missing: {', '.join(missing)}",
+                          needs=missing, supersedes=c.amendment.supersedes,
+                          sign_urls={r: f"{self.settings.public_url}/sign/{h}?role={r}" for r in missing})
         props = [p for p in self.store.proposals_for(h) if p["state"] in ("pending", "confirmed", "executed", "failed")]
         if not props:
             self.store.log_refusal("execute", f"no fired outcome authorises {action}", h, self.clock())
