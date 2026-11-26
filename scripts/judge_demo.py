@@ -246,7 +246,9 @@ def main() -> None:
         keyfile.parent.mkdir(parents=True, exist_ok=True)
         keyfile.write_text("".join(f"{k}={v}\n" for k, v in passphrases.items()), encoding="utf-8")
 
-    operator = {**os.environ, **env_vals}
+    # Only the agent's process needs a model key; the service and the stand-in human never get one.
+    llm_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY")
+    operator = {**{k: v for k, v in os.environ.items() if k not in llm_keys}, **env_vals}
     py = sys.executable
     step("creating demo flags, metrics and the signed audit webhook")
     if subprocess.run([py, "-m", "ulysses.cli", "lab", "setup"], cwd=ROOT,
@@ -265,7 +267,7 @@ def main() -> None:
                                       cwd=ROOT, env={**operator, "PYTHONPATH": str(ROOT / "src")}))
         wait_healthy(f"http://127.0.0.1:{a.port}/healthz", 3)
         step("starting the stand-in for the owner's browser taps (separate process; holds maya's key)")
-        human_env = {k: v for k, v in os.environ.items() if not k.startswith("FLAGSMITH_")}
+        human_env = {k: v for k, v in os.environ.items() if not k.startswith("FLAGSMITH_") and k not in llm_keys}
         human_env.update({**passphrases, "ULYSSES_PUBLIC_URL": env_vals["ULYSSES_PUBLIC_URL"],
                           "ULYSSES_DB": env_vals["ULYSSES_DB"], "ULYSSES_KEY_DIR": env_vals["ULYSSES_KEY_DIR"]})
         procs.append(subprocess.Popen([py, str(ROOT / "scripts/human_stand_in.py"), "--owner", "maya"],

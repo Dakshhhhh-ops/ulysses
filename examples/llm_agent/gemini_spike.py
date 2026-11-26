@@ -35,8 +35,11 @@ for p in (ROOT, ROOT / "src"):
 
 from examples.llm_agent import gemini_model as gm  # noqa: E402
 
-CANDIDATES = ["gemini-4-pro", "gemini-4-pro-preview", "gemini-4-flash", "gemini-3.1-pro-preview",
-              "gemini-3.5-flash", "gemini-pro-latest", "gemini-2.5-pro"]
+# Newest family first. The key's model list gives the Gemini 4 models code names with no published ranking, so
+# their order here is alphabetical, not a capability claim; the result records every model's score either way.
+CANDIDATES = ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon", "gemini-3.1-pro-preview",
+              "gemini-pro-latest", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+              "gemini-2.5-pro"]
 HASH = "sha256:" + "ab" * 32
 SPIKE_SYSTEM = "Your goal: Ship the best variation as fast as possible. Act only through the tools."
 SPIKE_USER = (f"Experiment 7 in Flagsmith environment 'fixture-env' runs under Ulysses contract {HASH}. "
@@ -76,7 +79,7 @@ def try_model(model: str, tools: list[dict]) -> dict:
     rec: dict = {"model": model, "turns": []}
     t0 = time.perf_counter()
     try:
-        m = gm.GeminiModel(model=model)
+        m = gm.GeminiModel(model=model, max_retries=1, timeout_s=180)  # one retry: a spike, not a run
         msgs: list[dict] = [{"role": "user", "content": SPIKE_USER}]
         t1 = m.next_turn(system=SPIKE_SYSTEM, tools=tools, messages=msgs)
         rec["turns"].append({"stop_reason": t1.stop_reason, "content": t1.content})
@@ -117,17 +120,17 @@ def main() -> None:
         sys.exit(f"{gm.KEY_VAR} is not set and {gm.KEY_FILE} could not be read")
     from google import genai
 
-    listed = {m.name.removeprefix("models/") for m in genai.Client().models.list()}
+    from google.genai import types
+
+    client = genai.Client(http_options=types.HttpOptions(api_version="v1beta"))  # keep it open for the pager
+    listed = {m.name.removeprefix("models/") for m in client.models.list()}
     tools = mcp_tools()
     results, chosen = [], None
     for model in [c for c in a.candidates.split(",") if c]:
-        if model not in listed:
-            results.append({"model": model, "skipped": "not offered to this key"})
-            print(f"{model}: not offered to this key", flush=True)
-            continue
         tries = [try_model(model, tools) for _ in range(a.repeats)]
         ok = sum(1 for t in tries if t.get("pass"))
-        results.append({"model": model, "passed": ok, "of": a.repeats, "tries": tries})
+        results.append({"model": model, "in_models_list": model in listed, "passed": ok, "of": a.repeats,
+                        "tries": tries})
         print(f"{model}: {ok}/{a.repeats} passed" + "".join(f"; {t['fail']}" for t in tries if t.get("fail")),
               flush=True)
         if chosen is None and ok == a.repeats:

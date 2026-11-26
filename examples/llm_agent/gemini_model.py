@@ -59,7 +59,7 @@ KEY_VAR = "GEMINI_API_KEY"
 KEY_FILE = Path.home() / ".ulysses" / "llm.env"
 # The model the transcripts were recorded with unless --gemini-model / ULYSSES_GEMINI_MODEL says otherwise.
 # gemini_spike.py picks it; its result is examples/llm_agent/transcripts/gemini-spike.json.
-DEFAULT_MODEL = os.environ.get("ULYSSES_GEMINI_MODEL", "gemini-2.5-pro")
+DEFAULT_MODEL = os.environ.get("ULYSSES_GEMINI_MODEL", "gemini-4-hydrogen")
 TRANSIENT = (429, 500, 502, 503, 504)
 
 
@@ -122,7 +122,8 @@ class GeminiModel:
     label = "gemini"
 
     def __init__(self, *, model: str = DEFAULT_MODEL, client: Any = None, types: Any = None,
-                 include_thoughts: bool = True, max_retries: int = 4, sleep=time.sleep):
+                 include_thoughts: bool = True, max_retries: int = 8, sleep=time.sleep, timeout_s: float = 240,
+                 api_version: str | None = os.environ.get("ULYSSES_GEMINI_API_VERSION", "v1beta")):
         if types is None:
             try:
                 from google.genai import types as _types
@@ -134,7 +135,10 @@ class GeminiModel:
                 raise RuntimeError(f"{KEY_VAR} is not set (put it in {KEY_FILE}, outside the repository)")
             from google import genai
 
-            client = genai.Client()  # reads GEMINI_API_KEY from the environment
+            # Reads GEMINI_API_KEY from the environment. A per-request timeout, so a stuck call fails as technical.
+            # v1beta serves the preview models as well as the stable ones.
+            client = genai.Client(http_options=types.HttpOptions(timeout=int(timeout_s * 1000),
+                                                                 api_version=api_version))
         self.client = client
         self.types = types
         self.model = model
@@ -254,7 +258,8 @@ class GeminiModel:
             except Exception as exc:  # noqa: BLE001 - classify, scrub, retry only what is transient
                 code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
                 msg = scrub_text(f"{type(exc).__name__} {code}: {getattr(exc, 'message', None) or exc}")
-                if code in TRANSIENT and attempt < self.max_retries:
+                daily = code == 429 and "PerDay" in json.dumps(getattr(exc, "details", None), default=str)
+                if code in TRANSIENT and not daily and attempt < self.max_retries:  # a daily cap will not lift
                     self.retries.append(msg[:300])
                     self.sleep(min(60.0, 4.0 * 2 ** attempt) + random.random())
                     continue
