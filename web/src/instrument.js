@@ -38,6 +38,7 @@ class Plate {
     const place = () => this.chips.place(project, this.stage.clientWidth, this.stage.clientHeight);
     this.placeFlat = place;
     requestAnimationFrame(place);
+    document.fonts?.ready.then(() => { if (!this.gl) place(); });  // labels widen once the web fonts arrive
     new ResizeObserver(() => { if (!this.gl) place(); }).observe(this.stage);
   }
 

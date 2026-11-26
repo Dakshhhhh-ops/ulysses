@@ -47,7 +47,7 @@
       </div>
     </div>
     <div>
-      {%- if d.proposal %}<p class="read-line" style="color:var(--ink)">Pre-signed action <span class="state-chip" data-s="{{ d.proposal.state }}">{{ d.proposal.state }}</span>{% if d.proposal.result %}: <code>{{ d.proposal.result.flag }}</code> now serves <code>{{ d.proposal.result.serving }}</code>{% endif %}</p>{% endif %}
+      {%- if d.proposal %}<p class="read-line" style="color:var(--ink)">Pre-signed action <span class="state-chip" data-s="{{ d.proposal.state }}">{{ d.proposal.state | state_word }}</span>{% if d.proposal.result %}: <code>{{ d.proposal.result.flag }}</code> now serves <code>{{ d.proposal.result.serving }}</code>{% endif %}</p>{% endif %}
       <p style="margin-top:8px"><a href="/card/{{ d.look.id }}">Open the decision card</a></p>
     </div>
   </aside>
@@ -113,7 +113,7 @@
         <td><a class="mono" href="/sign/{{ c.hash }}">{{ (c.hash.split(':')[-1])[:12] }}</a></td>
         <td class="num">{{ c.experiment_id }}</td>
         <td><code>{{ c.flag or '–' }}</code></td>
-        <td><span class="state-chip" data-s="{{ 'void' if c.error else c.state }}">{{ 'unreadable' if c.error else c.state }}</span></td>
+        <td><span class="state-chip" data-s="{{ 'void' if c.error else c.state }}">{{ 'unreadable' if c.error else (c.state | state_word) }}</span></td>
         {%- if c.look %}
         <td class="num">{% if c.look.look_number %}{{ c.look.look_number }}/{{ c.looks }}{% else %}–/{{ c.looks }}{% endif %}</td>
         <td class="num">{{ c.look.ctw or '–' }}</td>
@@ -132,7 +132,7 @@
   <div class="cards-list">
     {%- for c in items %}
     <a class="sheet" style="display:grid;grid-template-columns:1fr auto;gap:4px 12px;padding:12px 14px;color:var(--ink);text-decoration:none" href="{{ ('/card/' ~ c.look.id) if c.look else ('/sign/' ~ c.hash) }}">
-      <span><span class="mono">{{ (c.hash.split(':')[-1])[:12] }}</span> <span class="state-chip" data-s="{{ c.state }}">{{ c.state }}</span></span>
+      <span><span class="mono">{{ (c.hash.split(':')[-1])[:12] }}</span> <span class="state-chip" data-s="{{ c.state }}">{{ c.state | state_word }}</span></span>
       <span style="grid-row:span 2;align-self:center">{{ glyph(c.glyph) }}</span>
       <span class="mono" style="font-size:14px">{% if c.look %}<b style="font-family:var(--f-ui)">{{ c.look.word }}</b> · {% endif %}{% if c.deviations %}<span style="color:var(--loss)">{{ c.deviations | length }} outside contract</span> · {% endif %}{% if c.look and c.look.ctw %}{{ c.look.ctw }} / needs {{ c.look.needs or '–' }}{% if c.look.needs %} (z {{ c.look.bz }}){% endif %}{% else %}<span class="muted">No looks yet</span>{% endif %}</span>
     </a>
