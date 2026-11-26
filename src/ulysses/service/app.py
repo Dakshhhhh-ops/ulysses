@@ -175,6 +175,8 @@ class DraftBody(BaseModel):
     start_within_days: int = 30
     guardrail_alpha: float = 0.01
     override_reason: str | None = None
+    # Actions the agent may run without the owner's tap (only keep_control); the owner signs this clause.
+    without_confirmation: list[str] | None = None
 
 
 class SubmitBody(BaseModel):

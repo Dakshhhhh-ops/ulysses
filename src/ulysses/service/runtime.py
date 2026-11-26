@@ -36,9 +36,12 @@ def slack_notifier(url: str, public_url: str):
     def notify(event: str, payload: dict) -> None:
         if event == "fired":
             text = (f"*Ulysses: contract fired ({payload['outcome'].replace('_', ' ')})*\n{payload['reason']}\n"
-                    f"Confirm the pre-signed action: {payload['card_url']}")
+                    + (f"Keep control runs without a tap under the signed autonomy clause: {payload['card_url']}"
+                       if payload.get("autonomous") else f"Confirm the pre-signed action: {payload['card_url']}"))
         elif event == "executed":
-            text = f"*Ulysses executed* {payload['action'].replace('_', ' ')}: flag now serves `{payload['serving']}`."
+            how = " under the signed autonomy clause (no tap)" if payload.get("autonomous") else ""
+            text = (f"*Ulysses executed* {payload['action'].replace('_', ' ')}{how}: flag now serves "
+                    f"`{payload['serving']}`.")
         elif event == "deviation":
             text = f"*Ulysses deviation:* {payload['log']} by {payload.get('author') or 'an API key'} (outside contract)."
         elif event == "started":

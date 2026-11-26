@@ -10,8 +10,10 @@ and makes exactly three kinds of Flagsmith write, each only when a check passes:
 * ``complete`` (with Flagsmith's rollout decision): only for an outcome that a
   look produced from Flagsmith's results, whose action is the one the signed
   contract (or a doubly signed amendment) assigns to that outcome, after the
-  owner's signed one-tap confirmation, and only while that contract still
-  governs (not superseded, voided or deviated).
+  owner's signed one-tap confirmation (or, for ``keep_control`` only, when the
+  contract's signed ``[autonomy]`` clause lists it, so the owner decided in
+  advance that it needs no tap), and only while that contract still governs
+  (not superseded, voided or deviated).
 
 Before each write the service records an expected write: the experiment, the
 kind of change and what Flagsmith must show afterwards, valid for a short
@@ -56,6 +58,7 @@ from .store import Store
 log = logging.getLogger("ulysses")
 
 ROLES = ("owner", "second_signer")
+AUTONOMY = "autonomy"  # proposals.authorised_by: the contract's signed autonomy clause, not a tap
 MARK = "[Ulysses]"
 
 # Service policy. A contract outside it needs a signed design.override_reason.
@@ -481,6 +484,7 @@ class Ulysses:
         guardrail_alpha: float = ct.GUARDRAIL_ALPHA,
         horizon_action: str = "keep_control",
         override_reason: str | None = None,
+        without_confirmation: list[str] | None = None,
     ) -> dict:
         """Draft a contract from the experiment as Flagsmith describes it, and store it."""
         exp = self._fs.get_experiment(environment, experiment_id)
@@ -518,6 +522,10 @@ class Ulysses:
         except ValueError as exc:
             raise Invalid(str(exc)) from exc
         horizon = ct.Horizon(identities_per_arm=identities_per_arm or hp.identities_per_arm, looks=hp.looks)
+        try:
+            autonomy = ct.Autonomy(without_confirmation=without_confirmation) if without_confirmation else None
+        except ValidationError as exc:
+            raise Invalid("the autonomy clause does not validate", errors=_errors(exc)) from exc
         c = ct.draft(
             experiment=ct.ExperimentRef(
                 project=exp.project or 0,
@@ -543,6 +551,7 @@ class Ulysses:
             design=ct.Design(baseline_rate=baseline_rate, min_relative_lift=min_relative_lift, power=power,
                              override_reason=override_reason),
             sample_ratio=_signed_split(exp, [CONTROL_KEY, *treatments]),
+            autonomy=autonomy,
         )
         out = self.submit(c)
         out["horizon_plan"] = hp.to_dict()
@@ -953,8 +962,12 @@ class Ulysses:
             )
             pid = None
             if d.fires and self.store.cas_contract_state(h, ("active",), "decided"):
-                pid = self.store.add_proposal(contract_hash=h, look_id=look_id, outcome=d.outcome,
-                                              action=d.action or "keep_control", state="pending", now=self.clock())
+                action = d.action or "keep_control"
+                # The signed autonomy clause authorises this action in advance: the proposal needs no tap.
+                auto = c.autonomous(action)
+                pid = self.store.add_proposal(contract_hash=h, look_id=look_id, outcome=d.outcome, action=action,
+                                              state="confirmed" if auto else "pending", now=self.clock(),
+                                              authorised_by=AUTONOMY if auto else None)
         return d, look_id, pid
 
     def _after_look(self, h: str, d: LookDecision, look_id: str, pid: str | None, out: dict) -> None:
@@ -966,7 +979,8 @@ class Ulysses:
         if pid:
             out["proposal"] = self._proposal_view(self.store.proposal(pid))
             self._emit("fired", {"hash": h, "outcome": d.outcome, "action": d.action, "reason": d.reason,
-                                 "card_url": out["card_url"]})
+                                 "card_url": out["card_url"],
+                                 "autonomous": out["proposal"]["authorised_by"] == "signed_autonomy"})
 
     def _hides_numbers(self, environment: str, experiment_id: int, status: str | None = None) -> bool:
         """While a contract governs an experiment and has not decided, Flagsmith's numbers are shown only at
@@ -1127,12 +1141,34 @@ class Ulysses:
 
     # -------------------------------------------------------------- execution
 
+    @staticmethod
+    def _autonomous(p: dict) -> bool:
+        return p.get("authorised_by") == AUTONOMY
+
+    def authorisation_text(self, c: ct.Contract, p: dict) -> str:
+        """How proposal ``p`` is authorised, in one plain line (recorded with the proposal and its result)."""
+        if self._autonomous(p):
+            return f"authorised in advance by clause autonomy, signed by {c.owner.name}"
+        if p.get("confirm_signature") and p.get("confirm_signer"):
+            return f"confirmed by {p['confirm_signer']}'s signed tap"
+        return f"waits for {c.owner.name}'s signed tap"
+
     def _proposal_view(self, p: dict) -> dict:
+        auto = self._autonomous(p)
+        try:
+            text = self.authorisation_text(self._load(p["contract_hash"])[0], p)
+        except UlyssesError:
+            text = None
         return {
             "id": p["id"], "outcome": p["outcome"], "action": p["action"], "state": p["state"],
             "look_id": p["look_id"], "contract": p["contract_hash"],
             "confirm_url": self.link(f"/card/{p['look_id'] or p['id']}", p["contract_hash"]),
             "result": json.loads(p["result"]) if p["result"] else None,
+            # 'signed_autonomy': the contract's signed autonomy clause authorised it, no tap needed;
+            # 'owner_tap': it waits for (or ran after) the owner's signed one-tap confirmation.
+            "authorised_by": "signed_autonomy" if auto else "owner_tap",
+            "needs_tap": not auto and p["state"] in ("pending", "failed") and not p.get("confirm_signature"),
+            "authorised_text": text,
         }
 
     def proposal(self, pid: str) -> dict:
@@ -1181,6 +1217,11 @@ class Ulysses:
                                           x["decision"]) for x in looks)
         return signing.confirm_message(p["contract_hash"], p["look_id"], p["action"], evidence)
 
+    def _autonomy_valid(self, c: ct.Contract, p: dict) -> bool:
+        """An autonomous proposal is valid only for a look-fired outcome whose action the signed clause lists."""
+        return (self._autonomous(p) and bool(p["look_id"]) and p["outcome"] != "amendment"
+                and c.autonomous(p["action"]))
+
     def _confirm_valid(self, c: ct.Contract, p: dict, signature: str | None) -> bool:
         """The owner's tap verifies over the card's text (no other form, outside a replay of an old recording)."""
         msgs = [self.confirm_message(p)]
@@ -1195,6 +1236,9 @@ class Ulysses:
         if p["state"] == "executed":
             return self._proposal_view(p)
         c, _ = self._governing(p)
+        if self._autonomous(p):
+            # Nothing to sign: the owner already authorised this action in the contract's autonomy clause.
+            return self.execute(pid)
         if p["state"] not in ("pending", "failed"):
             raise Refused(f"this proposal is {p['state']}; there is nothing to confirm")
         if signer != c.owner.name:
@@ -1242,12 +1286,18 @@ class Ulysses:
             return self._proposal_view(p)
         # Re-check everything at the moment of execution, from stored evidence.
         c, row = self._governing(p)
+        auto = self._autonomous(p)
         if p["state"] not in ("confirmed", "failed"):
             raise Refused("waiting for the owner's one-tap confirmation",
                           confirm_url=self.link(f"/card/{p['look_id'] or p['id']}", h))
         if not self._fully_signed(c, h):
             raise Refused("the governing contract's signatures no longer verify")
-        if p["confirm_signer"] != c.owner.name or not self._confirm_valid(c, p, p["confirm_signature"]):
+        if auto:
+            if not self._autonomy_valid(c, p):
+                self.store.log_refusal("execute", f"{p['action']} is not listed in the signed autonomy clause",
+                                       h, self.clock())
+                raise Refused(f"the signed contract does not let {p['action']!r} run without the owner's tap")
+        elif p["confirm_signer"] != c.owner.name or not self._confirm_valid(c, p, p["confirm_signature"]):
             raise Refused("the confirmation signature does not verify")
         if self._authorised_action(c, p["outcome"]) != p["action"]:
             raise Refused("this action is not the one the contract assigns to the outcome")
@@ -1291,20 +1341,25 @@ class Ulysses:
         except BaseException:
             self.store.cas_contract_state(h, ("executing",), prior)
             raise
+        how = ("under the autonomy clause the owner signed (no tap needed)" if auto
+               else "after the owner's signed confirmation")
         line = (f"{MARK} Contract {short_hash(h)} fired: {p['outcome'].replace('_', ' ')}. "
-                f"Executed '{p['action'].replace('_', ' ')}' after the owner's signed confirmation; "
+                f"Executed '{p['action'].replace('_', ' ')}' {how}; "
                 f"flag {ref.flag} now serves {ship or CONTROL_KEY} to everyone.")
         try:
             self._append_hypothesis(c, h, line)
         except FlagsmithError as exc:
             log.warning("could not record the outcome on the experiment: %s", exc)
-        result = {"flagsmith": res, "serving": ship or CONTROL_KEY, "flag": ref.flag}
+        result = {"flagsmith": res, "serving": ship or CONTROL_KEY, "flag": ref.flag,
+                  "authorised_by": "signed_autonomy" if auto else "owner_tap",
+                  "authorised_text": self.authorisation_text(c, p)}
         if health:
             result["feature_health"] = health
         with self.store.transaction():
             self.store.update_proposal(pid, self.clock(), state="executed", result=json.dumps(result))
             self.store.set_contract_state(h, "executed")
-        self._emit("executed", {"hash": h, "action": p["action"], "serving": ship or CONTROL_KEY})
+        self._emit("executed", {"hash": h, "action": p["action"], "serving": ship or CONTROL_KEY,
+                                "autonomous": auto})
         self.health.after_execute(c, h, p["look_id"], p["action"], ship or CONTROL_KEY)
         return self._proposal_view(self.store.proposal(pid))
 
@@ -1377,7 +1432,7 @@ class Ulysses:
     # -------------------------------------------------------------- amendments
 
     AMENDABLE = {"horizon", "primary_metric", "guardrails", "actions", "validity", "boundary", "design",
-                 "require_guardrail_results_to_ship"}
+                 "require_guardrail_results_to_ship", "autonomy"}
 
     def amend(self, h: str, changes: dict, reason: str, action_now: str | None = None) -> dict:
         old, row = self._load(h)
@@ -1807,7 +1862,12 @@ class Ulysses:
                 ok = self._signature_valid(c, h, "owner") and (kind != "complete" or self._fully_signed(c, h))
                 if kind == "complete":
                     p = self.store.proposal(ew["proposal_id"]) if ew["proposal_id"] else None
-                    conf_ok = bool(p) and self._confirm_valid(c, p, p["confirm_signature"])
+                    if p and self._autonomous(p):
+                        conf_ok = self._autonomy_valid(c, p)
+                        row["authorised_by"] = "signed_autonomy"
+                    else:
+                        conf_ok = bool(p) and self._confirm_valid(c, p, p["confirm_signature"])
+                        row["authorised_by"] = "owner_tap"
                     row["confirmed_by"] = p["confirm_signer"] if p else None
                     row["outcome"] = p["outcome"] if p else None
                     row["shipped"] = ew["expect"].get("ship")
@@ -2057,9 +2117,27 @@ def summarise(c: ct.Contract) -> dict:
         "expires_after_days": c.validity.start_within_days,  # older name, kept for the pages
         "design": c.design.model_dump() if c.design else None,
         "amendment": c.amendment.model_dump() if c.amendment else None,
+        "autonomy": {"without_confirmation": [] if c.autonomy is None else list(c.autonomy.without_confirmation),
+                     "outcomes": c.autonomous_outcomes()},
+        "autonomy_text": autonomy_text(c),
         "health": None if c.health is None else {
             "block_ship_when_unhealthy": c.health.block_ship_when_unhealthy,
             "text": ("Shipping the treatment is refused while Flagsmith's Feature Health reports the flag "
                      "unhealthy in this environment, from any provider. Keeping control is never blocked."
                      if c.health.block_ship_when_unhealthy else "Feature Health is not checked before a ship.")},
     }
+
+
+_OUTCOME_WORDS = {"guardrail_breach": "a guardrail breaks", "loss": "the experiment loses",
+                  "horizon": "the experiment reaches its horizon without a decision", "win": "the treatment wins"}
+
+
+def autonomy_text(c: ct.Contract) -> str:
+    """The signed autonomy clause in one plain sentence, for the signing page and the cards."""
+    owner = c.owner.name
+    outcomes = c.autonomous_outcomes()
+    if not outcomes:
+        return f"Every action waits for {owner}'s signed tap; the agent carries out nothing on its own."
+    words = [_OUTCOME_WORDS[o] for o in outcomes]
+    when = words[0] if len(words) == 1 else ", ".join(words[:-1]) + " or " + words[-1]
+    return f"The agent may keep control on its own when {when}; shipping always waits for {owner}'s tap."

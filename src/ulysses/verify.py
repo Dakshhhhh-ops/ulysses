@@ -22,7 +22,10 @@ experiment. It holds no timestamps and no keys beyond the signers' public keys.
   may follow it under the same contract;
 * each executed outcome must be one a look actually fired (or a doubly signed
   amendment authorised), its action the one the contract assigns, and the
-  variation Flagsmith ended up serving the one that action ships.
+  variation Flagsmith ended up serving the one that action ships;
+* an outcome carried out under signed autonomy (no tap) is checked against
+  the contract's ``[autonomy]`` clause instead of a tap signature: it passes
+  only for a look-fired ``keep_control`` the signed clause lists.
 
 What the numbers alone cannot prove. An edit is caught when it makes a recorded
 decision disagree with the bundle's own numbers, or points an outcome at a look
@@ -199,6 +202,8 @@ def export_bundle(store, environment: str, experiment_id: int, *, flagsmith: dic
                 "state": p["state"],
                 "confirm_signer": p["confirm_signer"],
                 "confirm_signature": p["confirm_signature"],
+                # 'signed_autonomy': run without a tap under the contract's signed autonomy clause.
+                "authorised_by": "signed_autonomy" if p.get("authorised_by") == "autonomy" else "owner_tap",
                 "result": json.loads(p["result"]) if p["result"] else None,
             })
     deviations = [{"kind": d.get("kind"), "source": d.get("source"), "log": d["log"], "author": d.get("author"),
@@ -363,9 +368,11 @@ def _shape_problem(bundle: Any) -> str | None:
     for i, p in enumerate(bundle.get("outcomes") or []):
         if not isinstance(p.get("id"), str) or not opt(p.get("look_id"), str) or not opt(p.get("contract_hash"), str):
             return f"outcomes[{i}] needs a string id, and look_id and contract_hash must be strings or null"
-        for k in ("outcome", "action", "state", "confirm_signer", "confirm_signature"):
+        for k in ("outcome", "action", "state", "confirm_signer", "confirm_signature", "authorised_by"):
             if not opt(p.get(k), str):
                 return f"outcomes[{i}].{k} must be a string or null"
+        if p.get("authorised_by") not in (None, "owner_tap", "signed_autonomy"):
+            return f"outcomes[{i}].authorised_by must be owner_tap or signed_autonomy"
         if not opt(p.get("result"), dict):
             return f"outcomes[{i}].result must be an object or null"
     fs = bundle.get("flagsmith_final")
@@ -720,8 +727,22 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
                                           f"the outcome records {p.get('action')!r}")
         else:
             add("PASS", f"{name} action", f"{want} is the action the contract assigns to {p.get('outcome')}")
-        # 3. The owner's tap, and the looks it covers.
-        if p.get("state") in ("executed", "confirmed") or p.get("confirm_signature"):
+        # 3. The owner's tap, and the looks it covers; or the signed autonomy clause that replaces the tap.
+        if p.get("authorised_by") == "signed_autonomy":
+            listed = c.autonomy.without_confirmation if c.autonomy else []
+            if p.get("outcome") == "amendment" or not p.get("look_id"):
+                add("FAIL", f"{name} autonomy", "only an outcome a look fired can run under signed autonomy; "
+                                                "an amendment's action always waits for the owner's tap")
+            elif not c.autonomous(p.get("action") or ""):
+                add("FAIL", f"{name} autonomy",
+                    f"ran {p.get('action')!r} without the owner's tap, but the signed contract's autonomy clause "
+                    f"lists {listed or 'nothing'}" + ("; shipping always needs the tap"
+                                                      if p.get("action") == "ship_treatment" else ""))
+            else:
+                add("PASS", f"{name} autonomy",
+                    f"{p.get('action')} ran without a tap, authorised in advance by clause autonomy "
+                    f"(without_confirmation {listed}) in the contract {c.owner.name} signed")
+        elif p.get("state") in ("executed", "confirmed") or p.get("confirm_signature"):
             sig = p.get("confirm_signature") or ""
             legacy = signing.confirm_message(h, p.get("look_id") or pid, p.get("action") or "")
             bound = None

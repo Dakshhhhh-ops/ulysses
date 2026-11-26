@@ -218,6 +218,14 @@ power = 0.8
 # Refuse to ship the treatment while Flagsmith's Feature Health reports the flag
 # unhealthy (any provider: Ulysses' own webhook, Grafana, ...). Keeping control is never blocked.
 block_ship_when_unhealthy = true
+
+[autonomy]
+# Signed autonomy: actions the agent may carry out on its own, without your
+# one-tap confirmation, when a look fires an outcome assigned to them. Only
+# keep_control may be listed (a guardrail breach or a loss stops at once, even
+# at night); ship_treatment always waits for your tap. Delete this section to
+# confirm every action yourself.
+without_confirmation = ["keep_control"]
 """
 
 
