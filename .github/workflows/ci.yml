@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit tests (no Flagsmith)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run pytest -q
+
+  web:
+    name: Bell parity (JS draws what Python draws)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The parity test imports only the repo's own sources; no npm install is needed.
+      - run: npm test
+        working-directory: web
+
+  replay:
+    name: Replay of the recorded judge demo (no Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      # Exits non-zero if any recorded decision, signature or execution does not reproduce.
+      - run: uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl --minutes 0.25 --lead 0 --no-hold
+
+  compose-smoke:
+    name: Stock Flagsmith (docker compose) - sign, start, one look
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ULYSSES_FLAGSMITH_PORT: "8280"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - name: Start the repo's Flagsmith
+        run: docker compose -p ulysses up -d
+      - name: Smoke test
+        run: uv run python scripts/smoke.py --flagsmith http://localhost:8280 --bootstrap --wait 600
+      - name: Flagsmith logs on failure
+        if: failure()
+        run: docker compose -p ulysses logs --tail 200
+      - name: Remove Flagsmith
+        if: always()
+        run: docker compose -p ulysses down -v

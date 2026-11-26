@@ -19,6 +19,14 @@ Needs only Docker and uv. It:
 Flagsmith refreshes results at most every five minutes; a measured run from a fresh clone took about half an hour.
 
     uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down]
+
+Two minutes, no Docker: ``--replay data/replay-judge-demo.jsonl`` plays a recorded run (format in
+docs/REPLAY.md) through the real contract service, a fresh store under ``.run/replay/`` and the real
+pages, sped up and labelled as a replay on every page and every terminal line. Flagsmith is not
+contacted; each look's decision is recomputed from the recorded Flagsmith numbers and checked against
+the recorded one, and the script exits non-zero if any differs.
+
+    uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl [--minutes 2] [--open] [--no-hold]
 """
 
 from __future__ import annotations
@@ -47,6 +55,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 RUN = ROOT / ".run"
 JUDGE_ENV = RUN / "judge.env"
+# The live calibration batch the README reports; the replay serves it on its calibration page.
+REPLAY_CALIBRATION_TRACE = "live-72e1bc.jsonl"
 # Signer keys and their passphrases live in the user profile, not in this folder, so nothing the agent
 # process can find by reading the project tree signs for the owner. One directory per checkout.
 JUDGE_KEYS = Path.home() / ".ulysses" / "judge" / hashlib.sha256(str(ROOT).encode()).hexdigest()[:10]
@@ -111,7 +121,15 @@ def main() -> None:
     ap.add_argument("--down", action="store_true", help="remove the Flagsmith containers at the end")
     ap.add_argument("--serve-only", action="store_true",
                     help="after a run: serve the cards and the signing pages again (Ctrl+C to stop)")
+    ap.add_argument("--replay", metavar="TRACE", help="play a recorded run (data/replay-*.jsonl) instead of a live one")
+    ap.add_argument("--minutes", type=float, default=2.0, help="with --replay: how long the playback takes")
+    ap.add_argument("--lead", type=float, default=6.0, help="with --replay: seconds to open the browser first")
+    ap.add_argument("--open", action="store_true", help="with --replay: open the overview in your browser")
+    ap.add_argument("--no-hold", action="store_true", help="with --replay: stop serving when the playback ends")
     a = ap.parse_args()
+    if a.replay:
+        replay(a)
+        return
     if a.serve_only:
         if not JUDGE_ENV.exists():
             stop("no earlier run here (.run/judge.env is missing); run without --serve-only first")
@@ -242,6 +260,105 @@ def summarise(seconds: float, api: str, port: int) -> None:
     print(f"  Flagsmith dashboard: {api} (the experiments are completed there with the contract in the hypothesis)")
     print("  Browse the cards again:  uv run python scripts/judge_demo.py --serve-only", flush=True)
     print(f"  Remove Flagsmith:        docker compose -p ulysses down -v", flush=True)
+
+
+def replay(a) -> None:
+    """Play a recorded run through the real service and pages, labelled as a replay throughout."""
+    import secrets as _secrets
+    import threading
+
+    import uvicorn
+
+    from ulysses.replay import ReplayBanner, Replayer, TraceError, load_trace
+    from ulysses.service.app import create_app
+
+    trace = Path(a.replay)
+    if not trace.is_absolute():
+        trace = (Path.cwd() / trace) if (Path.cwd() / trace).exists() else ROOT / trace
+    try:
+        header, events = load_trace(trace)
+    except (OSError, TraceError) as exc:
+        stop(str(exc))
+    if not port_free(a.port):
+        stop(f"port {a.port} for the replayed contract service is in use; pick another with --port")
+    span = float(header.get("recorded_span_s") or 0.0)
+    speed = max(span / max(a.minutes * 60, 1.0), 1.0)
+    tag = f"[1;33m[REPLAY {speed:.1f}x][0m"
+    run_dir = RUN / "replay" / trace.stem
+    shutil.rmtree(run_dir, ignore_errors=True)
+    _copy_calibration(run_dir / "calibration")
+    url = f"http://127.0.0.1:{a.port}"
+    r = Replayer(header, events, run_dir, public_url=url, speed=speed, base=time.time())
+    finished = threading.Event()
+
+    def status() -> dict:
+        return {"played": r.done, "total": len(events), "finished": finished.is_set(), "speed": round(speed, 1),
+                "trace": trace.name,
+                "label": (f"A recorded run played back at {speed:.1f}x from data/{trace.name}; not live. "
+                          "Flagsmith is not contacted: every number is Flagsmith's own, as recorded. "
+                          + (f"Finished: all {len(events)} recorded events played." if finished.is_set()
+                             else f"Event {r.done} of {len(events)}."))}
+
+    app = ReplayBanner(create_app(r.svc, agent_token=_secrets.token_urlsafe(24)), status)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=a.port, log_level="warning"))
+    threading.Thread(target=server.run, daemon=True).start()
+    wait_healthy(f"{url}/healthz", 1)
+
+    step(f"{tag} REPLAY of a recorded run, not live: {trace.name}")
+    print(f"{tag} {header.get('title')}")
+    print(f"{tag} recorded on: {header.get('flagsmith')}")
+    if header.get("note"):
+        print(f"{tag} note: {header['note']}")
+    print(f"{tag} {span / 60:.1f} recorded minutes played in about {span / speed / 60:.1f} (speed-up {speed:.1f}x). "
+          "The contract service, its store, signature checks, decision engine and pages are the real ones; "
+          "only Flagsmith is replaced by the recorded answers.")
+    print(f"{tag} pages: {url}/  (store: {run_dir.relative_to(ROOT)})", flush=True)
+    if a.open:
+        import webbrowser
+
+        webbrowser.open(f"{url}/")
+    time.sleep(max(a.lead, 0.0))
+    began = time.monotonic()
+    for ev in events:
+        # Keep to the recorded timeline at the chosen speed; time the service spends is not added on top.
+        time.sleep(max(began + ev["t"] / speed - time.monotonic(), 0.0))
+        s = r.play(ev)
+        if s is None:
+            continue
+        colour = "" if s.ok else "[1;31m"
+        print(f"{tag} recorded +{s.t / 60:5.1f} min  {colour}{s.text}[0m", flush=True)
+        if s.kind == "look" and (s.detail.get("decision") or {}).get("fires"):
+            print(f"{tag}   card: {s.detail.get('card')}", flush=True)
+    # steps() is bypassed here (the loop keeps the recorded timeline), so run its end-of-trace check too.
+    s = r.finish()
+    if s is not None:
+        print(f"{tag} [1;31m{s.text}[0m", flush=True)
+    finished.set()
+    looks = [e for e in events if e["event"] == "look"]
+    bad_looks = sum(1 for m in r.mismatches if m.kind == "look")
+    step(f"{tag} replay finished: {len(events)} recorded events played at {speed:.1f}x")
+    print(f"{tag} {len(looks) - bad_looks} of {len(looks)} recorded decisions recomputed identically by this checkout's "
+          f"engine; {len(r.mismatches)} event(s) did not reproduce", flush=True)
+    for m in r.mismatches:
+        print(f"{tag} [1;31mdid not reproduce:[0m {m.text}", flush=True)
+    if not a.no_hold:
+        print(f"{tag} still serving the replayed pages at {url}/ (Ctrl+C to stop)", flush=True)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    server.should_exit = True
+    if r.mismatches:
+        sys.exit(1)
+
+
+def _copy_calibration(dest: Path) -> None:
+    """The calibration page reads the newest live trace next to the store: give it the batch the README reports."""
+    src = ROOT / "data" / REPLAY_CALIBRATION_TRACE
+    if src.exists():
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest / src.name)
 
 
 if __name__ == "__main__":
