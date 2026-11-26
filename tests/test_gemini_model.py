@@ -46,9 +46,10 @@ def fake_types() -> SimpleNamespace:
 
 
 def real_types():
-    if importlib.util.find_spec("google.genai") is None:
+    try:
+        from google.genai import types
+    except ImportError:  # no `google` package at all, or no google-genai in it
         pytest.skip("google-genai (the optional `gemini` extra) is not installed")
-    from google.genai import types
 
     return types
 
