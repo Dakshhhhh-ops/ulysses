@@ -220,7 +220,7 @@ def cmd_serve(a) -> None:
     from .service.runtime import default_port, serve
 
     _env()
-    serve(a.host, a.port or default_port())
+    serve(a.host, a.port or default_port(), poll_seconds=a.poll)
 
 
 def cmd_mcp(a) -> None:
@@ -705,6 +705,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="run the contract service (holds the Flagsmith write key)")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=None, help="default: the port in ULYSSES_PUBLIC_URL, else 8200")
+    s.add_argument("--poll", type=float, nargs="?", const=60.0, default=None, metavar="SECONDS",
+                   help="take looks on the service's own schedule, trying every SECONDS (default 60); each "
+                        "contract's refresh floor still applies")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("mcp", help="run the MCP extension over stdio")

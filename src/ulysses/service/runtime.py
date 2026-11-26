@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -69,9 +71,28 @@ def build(db_path: str | Path | None = None) -> tuple[Ulysses, dict]:
                  "public_url": public_url}
 
 
-def make_asgi():
+def start_poller(svc: Ulysses, every_seconds: float) -> threading.Thread:
+    """Take the looks on the service's own schedule, so they do not wait for an agent to ask."""
+
+    def run() -> None:
+        while True:
+            try:
+                svc.poll_once()
+            except Exception as exc:  # noqa: BLE001 - the poller must outlive one bad round
+                log.warning("scheduled looks failed: %s", exc)
+            time.sleep(every_seconds)
+
+    t = threading.Thread(target=run, name="ulysses-poller", daemon=True)
+    t.start()
+    return t
+
+
+def make_asgi(poll_seconds: float | None = None):
     load_dotenv()
     svc, cfg = build()
+    if poll_seconds:
+        log.info("taking looks on schedule every %.0f s (subject to each contract's refresh floor)", poll_seconds)
+        start_poller(svc, poll_seconds)
     insecure = os.environ.get("ULYSSES_WEBHOOK_INSECURE") == "1"
     if not cfg["webhook_secret"]:
         log.warning("ULYSSES_WEBHOOK_SECRET is not set: %s", "accepting UNSIGNED audit webhooks (dev only)"
@@ -89,9 +110,9 @@ def default_port() -> int:
     return u.port or DEFAULT_PORT
 
 
-def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
+def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT, poll_seconds: float | None = None) -> None:
     import uvicorn
 
     if not (8200 <= port <= 8299):
         log.warning("port %s is outside Ulysses' usual range 8200-8299", port)
-    uvicorn.run(make_asgi(), host=host, port=port, log_level="info")
+    uvicorn.run(make_asgi(poll_seconds), host=host, port=port, log_level="info")

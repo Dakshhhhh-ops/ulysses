@@ -183,24 +183,79 @@ def _spending_boundaries(
             b = math.inf
             out.append(None)
         else:
-            def f(bb: float) -> float:
-                u, l = _crossing(stage, t, bb, 0.0)
-                return (u + l) - inc
-
-            hi = 40.0
-            if f(Z_CAP) > 0:
-                b = brentq(f, Z_CAP, hi, xtol=1e-10)
-            else:
-                b = brentq(f, 0.0, Z_CAP, xtol=1e-10)
+            b = _solve_two_sided(stage, t, inc)
             out.append(float(b))
             u, l = _crossing(stage, t, b, 0.0)
             spent += u + l
         if not last:
             stage = _advance(stage, t, b, 0.0, next_dt)
-        if inc < UNREACHABLE_SPEND:
-            # Nothing was spent; keep the bookkeeping exact.
-            pass
     return out
+
+
+def _solve_two_sided(stage: _Stage | None, t: float, inc: float) -> float:
+    """The symmetric boundary whose first-crossing probability at ``t`` (no effect) is ``inc``."""
+
+    def f(bb: float) -> float:
+        u, l = _crossing(stage, t, bb, 0.0)
+        return (u + l) - inc
+
+    if f(Z_CAP) > 0:
+        return float(brentq(f, Z_CAP, 40.0, xtol=1e-10))
+    return float(brentq(f, 0.0, Z_CAP, xtol=1e-10))
+
+
+@dataclass(frozen=True)
+class NextBoundary:
+    """The boundary for the next look, given the boundaries earlier looks actually applied."""
+
+    boundary: float | None
+    spent_before: float
+    """Alpha already spent by the earlier looks (both sides), integrated through their applied boundaries."""
+    spent_after: float
+    """Alpha spent once this look is analysed with ``boundary``."""
+
+
+def _key(xs: Sequence[float | None], places: int) -> tuple:
+    return tuple(None if x is None or not math.isfinite(float(x)) else round(float(x), places) for x in xs)
+
+
+def next_two_sided(prior_fractions: Sequence[float], prior_boundaries: Sequence[float | None], t: float,
+                   alpha: float, final: bool) -> NextBoundary:
+    """Lan-DeMets O'Brien-Fleming boundary for a look at ``t`` after looks that applied ``prior_boundaries``.
+
+    The earlier boundaries are taken as they were applied (``None``: no stop was possible there), not
+    re-derived from the current horizon or level. The look spends ``a(t)`` minus what the earlier looks
+    spent, or everything left when ``final``. When the earlier looks already spent ``a(t)`` (a horizon
+    amended upwards) no stop is possible at this look. Fractions may be on any common scale as long as
+    ``t`` is the information fraction of the current horizon; for a final look past the horizon pass
+    them divided by that look's own count, so the final look sits at 1.
+    """
+    if len(prior_fractions) != len(prior_boundaries):
+        raise ValueError("one applied boundary per earlier look is needed")
+    return _next_two_sided_cached(_key(prior_fractions, 9), _key(prior_boundaries, 12), round(float(t), 9),
+                                  float(alpha), bool(final))
+
+
+@functools.lru_cache(maxsize=8192)
+def _next_two_sided_cached(fractions: tuple, boundaries: tuple, t: float, alpha: float,
+                           final: bool) -> NextBoundary:
+    ts = _validate_fractions([*fractions, t])
+    t = ts[-1]
+    stage: _Stage | None = None
+    spent = 0.0
+    for i, b in enumerate(boundaries):
+        bb = math.inf if b is None else float(b)
+        if math.isfinite(bb):
+            u, l = _crossing(stage, ts[i], bb, 0.0)
+            spent += u + l
+        stage = _advance(stage, ts[i], bb, 0.0, ts[i + 1] - ts[i])
+    target = alpha if final else obf_spending(t, alpha)
+    inc = target - spent
+    if inc < UNREACHABLE_SPEND:
+        return NextBoundary(None, spent, spent)
+    b = _solve_two_sided(stage, t, inc)
+    u, l = _crossing(stage, t, b, 0.0)
+    return NextBoundary(b, spent, spent + u + l)
 
 
 def crossing_probabilities(
@@ -384,6 +439,56 @@ def one_sided_boundaries(fractions: Sequence[float], alpha: float, final_spends_
     """
     key = tuple(round(float(t), 9) for t in fractions)
     return list(_one_sided_cached(key, float(alpha), bool(final_spends_all)))
+
+
+@functools.lru_cache(maxsize=8192)
+def _spent_two_sided_cached(fractions: tuple, boundaries: tuple) -> float:
+    if not fractions:
+        return 0.0
+    ups, lows = crossing_probabilities(list(fractions), list(boundaries), 0.0)
+    return float(sum(ups) + sum(lows))
+
+
+def spent_two_sided(fractions: Sequence[float], boundaries: Sequence[float | None]) -> float:
+    """Alpha (both sides, no effect) the applied boundaries have spent so far."""
+    if len(fractions) != len(boundaries):
+        raise ValueError("one applied boundary per look is needed")
+    return _spent_two_sided_cached(_key(fractions, 9), _key(boundaries, 12))
+
+
+def next_one_sided(prior_fractions: Sequence[float], prior_boundaries: Sequence[float | None], t: float,
+                   alpha: float, final: bool) -> NextBoundary:
+    """Pocock-type one-sided boundary for a look at ``t``, integrated forward from the applied boundaries.
+
+    The one-sided counterpart of :func:`next_two_sided` (guardrails)."""
+    if len(prior_fractions) != len(prior_boundaries):
+        raise ValueError("one applied boundary per earlier look is needed")
+    return _next_one_sided_cached(_key(prior_fractions, 9), _key(prior_boundaries, 12), round(float(t), 9),
+                                  float(alpha), bool(final))
+
+
+@functools.lru_cache(maxsize=8192)
+def _next_one_sided_cached(fractions: tuple, boundaries: tuple, t: float, alpha: float,
+                           final: bool) -> NextBoundary:
+    ts = _validate_fractions([*fractions, t])
+    t = ts[-1]
+    stage: _Stage | None = None
+    spent = 0.0
+    for i, b in enumerate(boundaries):
+        bb = math.inf if b is None else float(b)
+        if math.isfinite(bb):
+            spent += _upper_crossing(stage, ts[i], bb)
+        stage = _advance_upper(stage, ts[i], bb, ts[i + 1] - ts[i])
+    target = alpha if final else pocock_spending(t, alpha)
+    inc = target - spent
+    if inc < UNREACHABLE_SPEND:
+        return NextBoundary(None, spent, spent)
+
+    def f(bb: float) -> float:
+        return _upper_crossing(stage, t, bb) - inc
+
+    b = float(brentq(f, -8.0, 40.0, xtol=1e-10)) if f(Z_CAP) <= 0 else Z_CAP + 1
+    return NextBoundary(b, spent, spent + _upper_crossing(stage, t, b))
 
 
 def one_sided_crossing(fractions: Sequence[float], boundaries: Sequence[float | None]) -> float:

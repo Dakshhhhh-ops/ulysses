@@ -7,6 +7,7 @@ because it holds run-time timestamps.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import uuid
@@ -143,6 +144,10 @@ CREATE TABLE IF NOT EXISTS governed (
 );
 """
 
+log = logging.getLogger("ulysses")
+
+BUSY_TIMEOUT_MS = 10_000
+
 MIGRATIONS = [
     ("deviations", "note_state", "ALTER TABLE deviations ADD COLUMN note_state TEXT"),
     ("deviations", "note", "ALTER TABLE deviations ADD COLUMN note TEXT"),
@@ -158,15 +163,37 @@ class Store:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None,
+                                   timeout=BUSY_TIMEOUT_MS / 1000)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         with self._lock:
+            # Several service processes may share one file: readers do not block the writer under WAL,
+            # and a writer waits for the other's transaction instead of failing at once.
+            self._db.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+            if self.path != ":memory:":
+                self._db.execute("PRAGMA journal_mode=WAL")
             self._db.executescript(SCHEMA)
             for table, column, sql in MIGRATIONS:
                 cols = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})").fetchall()}
                 if column not in cols:
                     self._db.execute(sql)
+            self._index_looks()
+
+    def _index_looks(self) -> None:
+        """One look per sequence number per experiment, so two processes cannot record the same look twice.
+
+        A database written before the constraint may already hold a repeated number; renumbering would
+        break the owner's signed evidence chain over the looks, so such a file keeps a plain index and
+        relies on the counting transaction alone.
+        """
+        try:
+            self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS looks_experiment_seq "
+                             "ON looks(environment, experiment_id, seq)")
+        except sqlite3.IntegrityError:
+            log.warning("looks table has repeated sequence numbers; keeping a non-unique index")
+            self._db.execute("CREATE INDEX IF NOT EXISTS looks_experiment_seq_plain "
+                             "ON looks(environment, experiment_id, seq)")
 
     # ---- helpers -------------------------------------------------------------
 
@@ -274,6 +301,15 @@ class Store:
             r["canonical"] = json.loads(r["canonical"])
         return rows
 
+    def contract_state(self, h: str) -> str | None:
+        row = self._one("SELECT state FROM contracts WHERE hash=?", (h,))
+        return row["state"] if row else None
+
+    def contract_states(self, environment: str, experiment_id: int) -> list[dict]:
+        """Hash and state of every contract on an experiment, oldest first (no contract text parsed)."""
+        return self._all("SELECT hash, state FROM contracts WHERE environment=? AND experiment_id=? "
+                         "ORDER BY created_at", (environment, experiment_id))
+
     def all_contracts(self) -> list[dict]:
         return self._all(
             "SELECT hash, environment, experiment_id, supersedes, state, created_at FROM contracts ORDER BY created_at DESC"
@@ -307,7 +343,7 @@ class Store:
                  identities_per_arm: int, outcome: str, decision: dict, snapshot: dict | None,
                  refreshed: bool, now: float) -> str:
         with self._lock:
-            seq = (self._one("SELECT COUNT(*) AS c FROM looks WHERE environment=? AND experiment_id=?",
+            seq = (self._one("SELECT COALESCE(MAX(seq), 0) AS c FROM looks WHERE environment=? AND experiment_id=?",
                              (environment, experiment_id)) or {"c": 0})["c"] + 1
             look_id = f"L{seq:04d}-{uuid.uuid4().hex[:8]}"
             self._exec(
