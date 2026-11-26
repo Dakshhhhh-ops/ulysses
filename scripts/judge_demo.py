@@ -303,6 +303,8 @@ def main() -> None:
         if a.agent_in_container:
             if mode != "scripted":
                 step("--agent-in-container runs the scripted agent; the LLM agent runs on this machine only")
+            elif a.llm:
+                step(line)  # --llm with no usable key or SDK: say why, as the on-host branch does
             mode = "scripted"
             rc = run_agent_container(a, env_vals, procs)
         else:
