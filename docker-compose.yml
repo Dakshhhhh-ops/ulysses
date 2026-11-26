@@ -14,10 +14,13 @@ x-flagsmith-env: &flagsmith-env
   FLAGSMITH_DOMAIN: localhost:${ULYSSES_FLAGSMITH_PORT:-8280}
   DJANGO_SECRET_KEY: ulysses-throwaway-local-secret
   WAREHOUSE_CREDENTIALS_SECRET: ulysses-throwaway-warehouse-secret
+  USE_POSTGRES_FOR_ANALYTICS: 'true'
   EXPERIMENTATION_ENABLED: 'true'
-  # Results and exposures are computed inside the refresh request instead of on a task queue,
-  # so a demo look does not wait behind other work. The five-minute refresh floor still applies.
-  TASK_RUN_METHOD: SYNCHRONOUSLY
+  # Results, exposures and webhooks run on Flagsmith's task processor, as in a normal deployment.
+  # (Run synchronously, a webhook is delivered while the request that caused it is still open.)
+  TASK_RUN_METHOD: TASK_PROCESSOR
+  TASK_PROCESSOR_NUM_THREADS: '4'
+  TASK_PROCESSOR_SLEEP_INTERVAL_MS: '250'
   # The contract service runs on the host; Flagsmith refuses webhooks to private addresses unless listed.
   SSRF_ALLOWED_HOSTS: 'host.docker.internal'
   GUNICORN_WORKERS: '2'
@@ -49,6 +52,8 @@ services:
     command: ['migrate']
     environment:
       <<: *flagsmith-env
+    healthcheck:
+      disable: true
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,3 +72,15 @@ services:
       migrate-db:
         condition: service_completed_successfully
     mem_limit: 1g
+
+  flagsmith-task-processor:
+    image: *image
+    command: ['run-task-processor']
+    environment:
+      <<: *flagsmith-env
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      migrate-db:
+        condition: service_completed_successfully
+    mem_limit: 640m
