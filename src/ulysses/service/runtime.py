@@ -1,0 +1,97 @@
+"""Build the contract service from environment variables and serve it."""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+
+import httpx
+
+from ..core import Settings, Ulysses
+from ..flagsmith.rest import RestFlagsmith
+from ..store import Store
+from .app import create_app
+
+DEFAULT_PORT = 8200
+log = logging.getLogger("ulysses.service")
+
+
+def load_dotenv(path: str | Path = ".env") -> None:
+    """Minimal .env reader (KEY=VALUE lines); real environment variables win."""
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+def slack_notifier(url: str, public_url: str):
+    def notify(event: str, payload: dict) -> None:
+        if event == "fired":
+            text = (f"*Ulysses: contract fired ({payload['outcome'].replace('_', ' ')})*\n{payload['reason']}\n"
+                    f"Confirm the pre-signed action: {payload['card_url']}")
+        elif event == "executed":
+            text = f"*Ulysses executed* {payload['action'].replace('_', ' ')}: flag now serves `{payload['serving']}`."
+        elif event == "deviation":
+            text = f"*Ulysses deviation:* {payload['log']} by {payload.get('author') or 'an API key'} (outside contract)."
+        elif event == "started":
+            text = f"*Ulysses:* experiment {payload['experiment']} started under contract {payload['hash'][:19]}."
+        else:
+            text = f"Ulysses {event}: {payload}"
+        httpx.post(url, json={"text": text}, timeout=10)
+
+    return notify
+
+
+def build(db_path: str | Path | None = None) -> tuple[Ulysses, dict]:
+    url = os.environ.get("FLAGSMITH_API_URL", "http://localhost:8000")
+    key = os.environ.get("FLAGSMITH_ADMIN_KEY", "")
+    if not key:
+        raise SystemExit("FLAGSMITH_ADMIN_KEY is not set. The contract service needs Flagsmith's organisation "
+                         "admin API key (only the service ever holds it). See .env.example.")
+    token = os.environ.get("ULYSSES_AGENT_TOKEN", "")
+    if len(token) < 16:
+        raise SystemExit("ULYSSES_AGENT_TOKEN must be set (16+ characters). Run `ulysses init` to create one.")
+    public_url = os.environ.get("ULYSSES_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")
+    slack = os.environ.get("ULYSSES_SLACK_WEBHOOK") or None
+    settings = Settings(public_url=public_url, slack_webhook=slack,
+                        # Kept well under the 300 s client timeout so a slow look does not invite a retry.
+                        refresh_wait_seconds=float(os.environ.get("ULYSSES_REFRESH_WAIT", "150")))
+    store = Store(db_path or os.environ.get("ULYSSES_DB", ".run/ulysses.db"))
+    svc = Ulysses(store, RestFlagsmith(url, key), settings,
+                  notify=slack_notifier(slack, public_url) if slack else None)
+    return svc, {"agent_token": token, "flagsmith_key": key, "webhook_secret": os.environ.get("ULYSSES_WEBHOOK_SECRET") or None,
+                 "public_url": public_url}
+
+
+def make_asgi():
+    load_dotenv()
+    svc, cfg = build()
+    insecure = os.environ.get("ULYSSES_WEBHOOK_INSECURE") == "1"
+    if not cfg["webhook_secret"]:
+        log.warning("ULYSSES_WEBHOOK_SECRET is not set: %s", "accepting UNSIGNED audit webhooks (dev only)"
+                    if insecure else "the audit webhook is disabled until it is (deviation detection by webhook off)")
+    return create_app(svc, agent_token=cfg["agent_token"],
+                      protected_secrets=[cfg["flagsmith_key"], cfg["webhook_secret"] or ""],
+                      webhook_secret=cfg["webhook_secret"], webhook_insecure=insecure)
+
+
+def default_port() -> int:
+    """The port in ULYSSES_PUBLIC_URL, so the links the service hands out match where it listens."""
+    from urllib.parse import urlparse
+
+    u = urlparse(os.environ.get("ULYSSES_PUBLIC_URL", ""))
+    return u.port or DEFAULT_PORT
+
+
+def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
+    import uvicorn
+
+    if not (8200 <= port <= 8299):
+        log.warning("port %s is outside Ulysses' usual range 8200-8299", port)
+    uvicorn.run(make_asgi(), host=host, port=port, log_level="info")
