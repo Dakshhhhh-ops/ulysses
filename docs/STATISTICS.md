@@ -58,6 +58,8 @@ Pooled over five seeds, 10,000 simulated A/A experiments, 30 looks of 100 synthe
 
 Compare like with like. The 95%/5% thresholds are a 10%-level rule, so the fair comparison is the contract at alpha 0.10: reading the 95% rule at every one of 30 looks raises false ships from 3.9% to 13.4%; the contract at the same level keeps them at 3.0%. The default contract is stricter still (alpha 0.05).
 
+The same run also writes `.run/calibration/paths-offline.json`: Flagsmith's chance to win at every look for runs 1 to 100 of seed 62944 (the opening runs of the pooled table, the same random draws), with the look where each rule stops. In those 100 runs the first-95% rule ships 12 do-nothing variations (and stops 30 more under 5%), the contract at alpha 0.10 ships 3 (5 false losses) and at alpha 0.05 ships 3 (3 false losses). The calibration page draws them as "Two ships". `uv run ulysses calibrate offline --flagsmith-src <Flagsmith checkout> --paths-only` writes only that file in seconds; the committed copy `data/paths-offline.json` was written by that command, and the page falls back to it when the run directory holds an `offline.json` of the same design and engine but no export of its own.
+
 With a true relative lift of +25% (10% to 12.5%), 10,000 runs: the first-95% rule calls the win in 91.0% of runs (and calls it the wrong way in 5.0%); the contract calls it in 88.4% at alpha 0.10 and 79.3% at alpha 0.05, never the wrong way, at mean look 19.9 and 21.8 of 30. Against a fixed-horizon test with the same false-ship level and the same 79.3% power, which needs 2,858 identities per arm, the default contract used 2,350.2 on average: 17.8% fewer.
 
 ## What it guarantees

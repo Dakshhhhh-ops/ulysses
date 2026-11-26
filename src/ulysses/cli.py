@@ -563,8 +563,13 @@ def cmd_audit_sync(a) -> None:
 def cmd_calibrate_offline(a) -> None:
     from .calibrate import offline
 
+    if a.paths_only:
+        path = offline.export_paths(runs=a.paths, flagsmith_src=a.flagsmith_src, looks=a.looks, per_arm_per_look=a.per_arm)
+        console.print(f"[dim]written: {path}[/]")
+        return
     console.print("Running Flagsmith's own stats.py on simulated A/A tests (synthetic units) ...")
-    r = offline.run(runs=a.runs, flagsmith_src=a.flagsmith_src, looks=a.looks, per_arm_per_look=a.per_arm)
+    r = offline.run(runs=a.runs, flagsmith_src=a.flagsmith_src, looks=a.looks, per_arm_per_look=a.per_arm,
+                    paths=a.paths)
     console.print(r["markdown"])
     console.print(f"[dim]written: {', '.join(r['paths'])}[/]")
 
@@ -948,6 +953,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--looks", type=int, default=30)
     s.add_argument("--per-arm", type=int, default=100)
     s.add_argument("--flagsmith-src", help="path to a Flagsmith checkout (else downloaded at the pinned tag)")
+    s.add_argument("--paths", type=int, default=100, help="runs whose per-look path is exported to paths-offline.json")
+    s.add_argument("--paths-only", action="store_true", help="write only paths-offline.json (seconds, same runs)")
     s.set_defaults(fn=cmd_calibrate_offline)
     s = cal.add_parser("summarise", help="recompute the live table from a captured trace")
     s.add_argument("trace", help=".run/calibration/live-<batch>.jsonl")

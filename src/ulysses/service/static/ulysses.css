@@ -522,3 +522,73 @@ svg.elevation.pencil .edge { stroke: var(--graphite); }
   .oc-y { width: 44px; }
 }
 .oc-ref-label[data-side="below"] { transform: translateY(3px); }
+
+/* ---- Two Ships: calibration hero (templates/_two_ships.html) ------------------------------ */
+.ts { margin: 0 0 var(--s-7); }
+.ts-head { display: grid; gap: 6px; margin-bottom: var(--s-4); }
+.ts-head h1 { font-size: 32px; line-height: 38px; }
+.ts-lede { font: 400 19px/28px var(--f-doc); color: var(--ink); max-width: 70ch; }
+.ts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-4); }
+.ts-panel { margin: 0; background: var(--sheet); border: 1px solid var(--rule); padding: var(--s-3) var(--s-4) var(--s-3); display: grid; gap: 4px; min-width: 0; }
+.ts-panel[data-side="right"] { border-top: 3px solid var(--contract); }
+.ts-panel[data-side="left"] { border-top: 3px solid var(--loss); }
+.ts-cap h2 { font-size: 19px; line-height: 26px; }
+.ts-cap p { font-size: 14px; line-height: 20px; color: var(--graphite); }
+.ts-svg { display: block; width: 100%; height: auto; overflow: visible; }
+.ts-axis text { font: 400 11px var(--f-mono); fill: var(--graphite); }
+.ts-axis .ts-xt { font-family: var(--f-ui); font-size: 12px; }
+.ts-grid-line { stroke: var(--hairline); stroke-width: 1; }
+.ts-key { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.ts-line95 { stroke: var(--loss); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.ts-bound { fill: none; stroke: var(--contract); stroke-width: 2.5; }
+.ts-tag { font: 600 12px var(--f-ui); paint-order: stroke; stroke: var(--sheet); stroke-width: 4px; stroke-linejoin: round; }
+.ts-tag95 { fill: var(--loss); }
+.ts-tagb { fill: var(--contract); }
+.ts-run { stroke: var(--graphite); stroke-width: 1.1; stroke-opacity: .38; stroke-linejoin: round; stroke-linecap: round; }
+.ts-run.kept { stroke-opacity: .5; }
+.ts-run.ship { stroke: var(--loss); stroke-width: 2.2; stroke-opacity: 1; }
+.ts-wreck path { fill: var(--loss); stroke: var(--sheet); stroke-width: 1.2; }
+.ts-wreck .ts-sail { fill: var(--sheet); stroke: var(--loss); }
+.ts-kept { fill: var(--sheet); stroke: var(--graphite); stroke-width: 1.5; }
+.ts-count { display: flex; align-items: baseline; gap: 10px; margin-top: 2px; flex-wrap: wrap; }
+.ts-num { font: 500 44px/48px var(--f-mono); font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; }
+.ts-panel[data-side="left"] .ts-num { color: var(--loss); }
+.ts-panel[data-side="right"] .ts-num { color: var(--contract); }
+.ts-of { font: 600 17px/24px var(--f-ui); }
+.ts-rate { font: 500 15px/22px var(--f-ui); color: var(--ink); }
+.ts-rate b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ts-also { font-size: 13px; line-height: 18px; color: var(--graphite); }
+.ts-foot { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-4); margin-top: var(--s-2); }
+.ts-replay { font: 600 14px/1 var(--f-ui); color: var(--ink); background: var(--sheet); border: 1px solid var(--rule); border-radius: 2px; min-height: 32px; padding: 0 14px; cursor: pointer; }
+.ts-replay[hidden] { display: none; }
+.ts-details .why p + p { margin-top: 8px; }
+.ph-h { font-size: 22px; line-height: 30px; }
+/* replay: only when the script armed it (never without JS, never under reduced motion) */
+.ts-armed .ts-run { stroke-dasharray: 1 1; stroke-dashoffset: 1; }
+.ts-armed .ts-run.ship { stroke: var(--graphite); stroke-width: 1.1; stroke-opacity: .38; }
+.ts-armed .ts-wreck, .ts-armed .ts-kept { opacity: 0; }
+.ts-wreck { transform-box: fill-box; transform-origin: 50% 100%; transform: rotate(16deg); }
+.ts-armed.ts-play .ts-run { animation: ts-draw calc(var(--e) * var(--ts-dur)) linear forwards; }
+.ts-armed.ts-play .ts-run.ship { animation: ts-draw calc(var(--e) * var(--ts-dur)) linear forwards,
+  ts-red 240ms linear calc(var(--e) * var(--ts-dur)) forwards; }
+.ts-armed.ts-play .ts-wreck { animation: ts-sink 420ms var(--e-out) calc(var(--e) * var(--ts-dur)) forwards; }
+.ts-armed.ts-play .ts-kept { animation: ts-fade 200ms linear calc(var(--e) * var(--ts-dur)) forwards; }
+@keyframes ts-draw { to { stroke-dashoffset: 0; } }
+@keyframes ts-red { to { stroke: var(--loss); stroke-width: 2.2; stroke-opacity: 1; } }
+@keyframes ts-sink { 0% { opacity: 0; transform: scale(1.8) rotate(0deg); } 100% { opacity: 1; transform: scale(1) rotate(16deg); } }
+@keyframes ts-fade { to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .ts-armed .ts-run, .ts-armed .ts-wreck, .ts-armed .ts-kept { animation: none !important; opacity: 1; stroke-dashoffset: 0; }
+}
+@media (max-width: 759px) {
+  .ts-grid { grid-template-columns: 1fr; }
+  .ts-head h1 { font-size: 26px; line-height: 32px; }
+  .ts-lede { font-size: 17px; line-height: 26px; }
+  .ts-num { font-size: 36px; line-height: 40px; }
+  .ts-foot { flex-direction: column; }
+  .ts-axis text { font-size: 19px; }
+  .ts-axis .ts-xt { font-size: 19px; }
+  .ts-tag { font-size: 19px; stroke-width: 6px; }
+  .ts-run { stroke-width: 1.6; }
+  .ts-run.ship { stroke-width: 3; }
+}

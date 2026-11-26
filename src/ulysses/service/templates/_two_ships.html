@@ -1,0 +1,116 @@
+{#- Two Ships: the calibration hero. Final state is plain SVG; the inline script replays it once. -#}
+{%- macro wreck(v) -%}
+<g transform="translate({{ v.end.x }},{{ v.end.y }})"><g class="ts-wreck" style="--e:{{ v.e }}"><path d="M-8,-1 L8,-1 L5,5 L-5,5 Z" /><path d="M0,-1 L0,-10 L6,-3 Z" class="ts-sail" /></g></g>
+{%- endmacro -%}
+{%- macro kept(v) -%}
+<circle class="ts-kept" style="--e:{{ v.e }}" cx="{{ v.end.x }}" cy="{{ v.end.y }}" r="3" />
+{%- endmacro -%}
+{%- macro panel(ts, p, side) -%}
+<figure class="ts-panel" data-side="{{ side }}">
+  <figcaption class="ts-cap">
+    <h2>{{ p.title }}</h2>
+    <p>{{ p.rule }}</p>
+  </figcaption>
+  <svg class="ts-svg" viewBox="0 0 {{ ts.w }} {{ ts.h }}" role="img"
+       aria-label="{{ p.n }} A/A experiments. {{ p.ships }} shipped a variation that does nothing, {{ p.kept }} stopped and kept control, {{ p.sailed }} reached the planned end without shipping.">
+    <g class="ts-axis" aria-hidden="true">
+      {%- for t in ts.ticks %}
+      <line x1="{{ ts.plot.l }}" x2="{{ ts.plot.r }}" y1="{{ t.y }}" y2="{{ t.y }}" class="{{ 'ts-key' if t.key else 'ts-grid-line' }}" />
+      <text x="{{ ts.plot.l - 6 }}" y="{{ t.y + 4 }}" text-anchor="end">{{ t.text }}</text>
+      {%- endfor %}
+      {%- for t in ts.x_ticks %}
+      <text x="{{ t.x }}" y="{{ ts.h - 10 }}" text-anchor="middle">{{ t.text }}</text>
+      {%- endfor %}
+      <text x="{{ ts.x_title }}" y="{{ ts.h - 10 }}" text-anchor="middle" class="ts-xt">look</text>
+    </g>
+    {%- if side == 'left' %}
+    <line class="ts-line95" x1="{{ ts.plot.l }}" x2="{{ ts.plot.r }}" y1="{{ ts.line95 }}" y2="{{ ts.line95 }}" />
+    <line class="ts-line95" x1="{{ ts.plot.l }}" x2="{{ ts.plot.l + 28 }}" y1="{{ ts.plot.t - 16 }}" y2="{{ ts.plot.t - 16 }}" />
+    <text class="ts-tag ts-tag95" x="{{ ts.plot.l + 36 }}" y="{{ ts.plot.t - 12 }}">95% &#8220;Winning&#8221;: the unbound agent ships here</text>
+    {%- else %}
+    <path class="ts-bound" d="{{ ts.boundary.upper }}" />
+    <path class="ts-bound" d="{{ ts.boundary.lower }}" />
+    <line class="ts-bound" x1="{{ ts.plot.l }}" x2="{{ ts.plot.l + 28 }}" y1="{{ ts.plot.t - 16 }}" y2="{{ ts.plot.t - 16 }}" />
+    <text class="ts-tag ts-tagb" x="{{ ts.plot.l + 36 }}" y="{{ ts.plot.t - 12 }}">signed boundary: the contract ships only past it</text>
+    {%- endif %}
+    <g class="ts-runs" fill="none">
+      {%- for v in p.voyages %}
+      <path class="ts-run {{ v.cat }}" pathLength="1" style="--e:{{ v.e }}" d="{{ v.d }}" />
+      {%- endfor %}
+    </g>
+    <g class="ts-marks">
+      {%- for v in p.voyages %}{% if v.cat == 'ship' %}{{ wreck(v) }}{% elif v.cat == 'kept' %}{{ kept(v) }}{% endif %}{% endfor %}
+    </g>
+  </svg>
+  <div class="ts-count">
+    <span class="ts-num" data-ts-count data-final="{{ p.ships }}" data-times="{{ p.ship_times | join(' ') }}">{{ p.ships }}</span>
+    <span class="ts-of">of {{ p.n }} shipped a do-nothing variation</span>
+  </div>
+  <p class="ts-rate">
+    {%- if side == 'left' %}Over {{ ts.rates.n_text }} voyages: <b>{{ ts.rates.unbound }}</b>
+    {%- else %}Over {{ ts.rates.n_text }} voyages: <b>{{ ts.rates.same }}</b> at the same strictness{% if ts.rates.default %} · <b>{{ ts.rates.default }}</b> at the contract&#8217;s default{% endif %}
+    {%- endif %}</p>
+  <p class="ts-also">{{ p.kept }} stopped early and kept control · {{ p.sailed }} reached the planned end without shipping</p>
+</figure>
+{%- endmacro -%}
+
+{%- macro two_ships(ts) -%}
+{%- if ts.error %}
+<div class="err-panel" style="margin-bottom:24px">{{ ts.error }}</div>
+{%- else %}
+<section class="ts" id="two-ships" aria-labelledby="ts-title" data-ts style="--ts-dur:{{ ts.duration }}s">
+  <div class="ts-head">
+    <p class="label">Two ships · the same {{ ts.runs }} A/A experiments, sailed twice · lab simulation on Flagsmith&#8217;s own stats code</p>
+    <h1 id="ts-title">The agent can&#8217;t peek its way to a ship</h1>
+    <p class="ts-lede">Every variation here does nothing. Each red ship is a change that would have gone live anyway.</p>
+  </div>
+  <div class="ts-grid">
+    {{ panel(ts, ts.left, 'left') }}
+    {{ panel(ts, ts.right, 'right') }}
+  </div>
+  <div class="ts-foot">
+    <details class="ts-details">
+      <summary>How this is drawn</summary>
+      <div class="why">
+        <p>Each line is one simulated A/A experiment: {{ ts.looks }} looks of {{ ts.per_arm }} synthetic identities per arm, base rate {{ '%.0f' % (ts.base_rate * 100) }}%, both arms identical, scored by {{ ts.engine }}, unmodified. The vertical axis is Flagsmith&#8217;s chance to win at each look, on a normal (z) scale. These are runs 1 to {{ ts.runs }} of seed {{ ts.seed }}, the opening runs of the {{ ts.rates.n_text }}-run table below.</p>
+        <p>Left: stop at the first look over 95% (ship) or under 5% (keep control), a two-sided 10% rule read {{ ts.looks }} times. Right: the Ulysses contract at alpha {{ ts.level }}, the same two-sided 10% level, boundary spent over the signed looks; the contract&#8217;s default is alpha 0.05. Red ships are false Winning calls; grey dots are false Losing calls, which keep control and ship nothing.</p>
+        <p>Data: <code>{{ ts.file }}</code>, written by <code>{{ ts.command }}</code>. The 100-run counts are counted from the runs; the {{ ts.rates.n_text }}-run rates are read from <code>offline.json</code>.</p>
+      </div>
+    </details>
+    <button type="button" class="ts-replay" hidden>Replay</button>
+  </div>
+</section>
+<script>
+(() => {
+  const root = document.getElementById("two-ships");
+  if (!root || !("IntersectionObserver" in window) || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const counters = [...root.querySelectorAll("[data-ts-count]")];
+  const btn = root.querySelector(".ts-replay");
+  let timers = [];
+  const arm = () => {
+    timers.forEach(clearTimeout); timers = [];
+    root.classList.remove("ts-play"); root.classList.add("ts-armed");
+    counters.forEach((c) => { c.textContent = "0"; });
+  };
+  const play = () => {
+    void root.offsetWidth;  // restart the CSS animations
+    root.classList.add("ts-play");
+    counters.forEach((c) => {
+      let n = 0;
+      (c.dataset.times || "").split(" ").filter(Boolean).forEach((t) => {
+        timers.push(setTimeout(() => { c.textContent = String(++n); }, parseFloat(t) * 1000 + 150));
+      });
+      timers.push(setTimeout(() => { c.textContent = c.dataset.final; }, parseFloat(getComputedStyle(root).getPropertyValue("--ts-dur")) * 1000 + 600));
+    });
+  };
+  arm();
+  btn.hidden = false;
+  btn.addEventListener("click", () => { arm(); play(); });
+  const io = new IntersectionObserver((es) => {
+    if (es.some((e) => e.isIntersecting)) { io.disconnect(); play(); }
+  }, { threshold: 0.4 });
+  io.observe(root.querySelector(".ts-grid"));
+})();
+</script>
+{%- endif %}
+{%- endmacro -%}

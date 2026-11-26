@@ -1,7 +1,7 @@
 """The calibration page's data, read from the calibration scripts' own output files.
 
 Nothing here is typed in. The lab tab reads ``offline.json`` written by
-``ulysses calibrate offline``; the live tab reads the newest ``live-*.jsonl``
+``ulysses calibrate offline`` and the hero its per-run export ``paths-offline.json`` (``two_ships``); the live tab reads the newest ``live-*.jsonl``
 trace and recomputes its table with ``calibrate.live.summarise_trace``. The
 per-run paths for the fan come from the same trace, with each run's first
 banner exit and contract call found by the same rules ``summarise_trace``
@@ -19,6 +19,7 @@ from ..calibrate.offline import wilson
 from ..decision import Observation, evaluate
 from . import fmt
 from . import scene as sc
+from . import two_ships
 
 
 def _interval(k: int, n: int) -> str:
@@ -62,6 +63,29 @@ def _any_rows(first: int, final: int, contract: dict, n: int) -> list[dict]:
     return rows
 
 
+def _fan(run_dir: Path, aa: dict, alpha: str) -> dict:
+    """The hero and, from the same per-run export, the lab tab's fan (paths as z per look)."""
+    hero = two_ships.build(run_dir, aa)
+    found = two_ships.load(run_dir, aa) if hero and not hero.get("error") else None
+    if not found:
+        return {"two_ships": hero, "paths": None}
+    export = found[0]
+    runs = []
+    for r in export["runs"]:
+        pts = [[k, None if c is None else round(chance_to_z(c), 4)] for k, c in enumerate(r["chance_to_win"], start=1)]
+        z_at = lambda look: pts[look - 1][1]  # noqa: E731
+        e = r.get("first_exit")
+        c = (r.get("contract") or {}).get(alpha)
+        runs.append({"experiment": r["run"], "points": pts,
+                     "banner": {"look": e["look"], "z": z_at(e["look"]), "side": e["side"]} if e else None,
+                     "contract": {"look": c["look"], "z": z_at(c["look"]), "outcome": c["outcome"]} if c else None,
+                     "horizon": c is None})
+    return {"two_ships": hero, "paths": runs,
+            "counts": {"banner": sum(1 for r in runs if r["banner"]), "contract": sum(1 for r in runs if r["contract"])},
+            "paths_note": f"The drawing and its counter show the {len(runs)} exported runs; the tables count all "
+                          f"{fmt.count(aa['banner_every_look']['runs'])}."}
+
+
 def offline_view(run_dir: Path) -> dict | None:
     p = run_dir / "offline.json"
     if not p.exists():
@@ -92,7 +116,7 @@ def offline_view(run_dir: Path) -> dict | None:
         "looks": looks,
         "alpha": float(alpha),
         "planned": planned,
-        "paths": None,
+        **_fan(run_dir, aa, alpha),
         "command": "uv run ulysses calibrate offline --flagsmith-src ../_shared/reference/flagsmith",
     }
 
