@@ -90,15 +90,17 @@ def card_context(svc, d: dict) -> dict:
         per_look[lk["seq"]] = guardrail_rows(c, lk["snapshot"], lk["decision"])
     later = [v for s, v in sorted(fr.items()) if s > d["look"]["seq"]]
     snap = d.get("flagsmith") or {}
-    prim = None
-    for name, m in (snap.get("metrics") or {}).items():
-        if c.primary_metric.name == name:
-            prim = m
+    lead = sc.lead_arm(d["contract"]["summary"].get("arms"), d.get("decision"))
+    metrics = snap.get("metrics") or {}
+    prim = metrics.get(f"{c.primary_metric.name}@{lead}") if lead else None
+    if prim is None and c.comparisons == 1:
+        prim = metrics.get(c.primary_metric.name)
     return {
         "scene": scene, "source": src,
         "later": later[-1] if later else None,
         "results_age": fmt.results_age(snap.get("as_of"), (fr.get(d["look"]["seq"]) or {}).get("at")),
         "lift": fmt.lift((prim or {}).get("lift")),
+        "lead_t": lead,
         "arms_n": snap.get("identities") or {},
         "guardrails": _guardrails(c),
         "metric": c.primary_metric.name,
@@ -135,7 +137,9 @@ def guardrail_rows(c: ct.Contract, snap: dict | None, dec: dict | None) -> list[
     if engine:
         for r in engine:
             bz = r.get("boundary_z")
-            rows.append({"name": r["name"], "direction": str(r.get("direction", "")).replace("_", " "),
+            arm = r.get("arm")
+            rows.append({"name": r["name"], "arm": arm, "label": f"{r['name']} ({arm})" if arm else r["name"],
+                         "direction": str(r.get("direction", "")).replace("_", " "),
                          "rule": _rule(r.get("alpha")),
                          "worse": None if r.get("chance_worse") is None else fmt.pct(r["chance_worse"], 2),
                          "worse_z": fmt.zval(r.get("z")) if r.get("z") is not None else None,
@@ -146,7 +150,7 @@ def guardrail_rows(c: ct.Contract, snap: dict | None, dec: dict | None) -> list[
     for g in c.guardrails:
         w = worse.get(g.name)
         state = "breach" if (dec or {}).get("guardrail") == g.name else ("no_result" if w is None else "unrecorded")
-        rows.append({"name": g.name, "direction": g.direction.replace("_", " "), "rule": _rule(getattr(g, "alpha", None)),
+        rows.append({"name": g.name, "arm": None, "label": g.name, "direction": g.direction.replace("_", " "), "rule": _rule(getattr(g, "alpha", None)),
                      "worse": None if w is None else fmt.pct(w, 2), "worse_z": None, "stop_at": None, "state": state,
                      "word": {"breach": "breach", "no_result": "no reading"}.get(state, "not checked by this look")})
     return rows
@@ -219,7 +223,9 @@ def sign_context(svc, data: dict) -> dict:
         old_summary = None
     scene = sc.build_sign(data, source=src, horizon=horizon, alpha=alpha, superseded=sup)
     looks = svc.store.looks(c.experiment.environment, c.experiment.experiment)
-    return {"scene": scene, "source": src, "changed": changed, "old": old_summary,
+    from . import curves as oc
+
+    return {"scene": scene, "source": src, "changed": changed, "old": old_summary, "oc_curves": oc.build(c),
             "has_looks": bool(looks), "guardrails": _guardrails(c), "keys": signer_keys(c),
             "deviations": deviations(svc, c.experiment.environment, c.experiment.experiment, c)}
 

@@ -122,7 +122,7 @@
       {{ elevation_svg(scene) }}
       <div class="chips" aria-hidden="true"></div>
       {%- if axis %}
-      <span class="plate-axis up" aria-hidden="true">{{ icon("up") }}{{ (scene.contract.arms[1] if scene.contract and scene.contract.arms else "variation") }} ahead</span>
+      <span class="plate-axis up" aria-hidden="true">{{ icon("up") }}{{ (scene.contract.get("lead") or scene.contract.arms[1]) if scene.contract and scene.contract.arms else "variation" }} ahead</span>
       <span class="plate-axis down" aria-hidden="true">{{ icon("down") }}{{ (scene.contract.arms[0] if scene.contract and scene.contract.arms else "control") }} ahead</span>
       {%- endif %}
       {%- if note %}<p class="plate-note">{{ note }}</p>{% endif %}

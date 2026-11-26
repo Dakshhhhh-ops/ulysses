@@ -48,6 +48,8 @@ class HorizonPlan:
     minutes_between_looks: float | None
     schedule: list[LookSlot]
     notes: list[str]
+    comparisons: int = 1
+    comparison_alpha: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -80,7 +82,10 @@ def plan(
     exposure_rate_per_hour: float | None = None,
     min_minutes_between_looks: int = 5,
     max_looks: int = 30,
+    comparisons: int = 1,
 ) -> HorizonPlan:
+    """``comparisons`` > 1 sizes each treatment-vs-control comparison at alpha / comparisons (the
+    contract's Bonferroni split), so the horizon is per arm with that stricter boundary."""
     if min_relative_lift == 0:
         raise ValueError("the smallest lift you care about cannot be zero")
     if not (0.5 <= power < 1):
@@ -94,7 +99,10 @@ def plan(
         raise ValueError("give a baseline conversion rate, or a baseline mean and standard deviation")
 
     notes: list[str] = []
-    fixed_z = float(ndtri(1 - alpha / 2) + ndtri(power))
+    if comparisons < 1:
+        raise ValueError("comparisons must be at least 1")
+    a_c = alpha / comparisons if comparisons > 1 else alpha
+    fixed_z = float(ndtri(1 - a_c / 2) + ndtri(power))
     n_fixed = math.ceil(uv * (fixed_z / lift) ** 2)
 
     # Choose the number of looks: one per refresh window is the most Flagsmith
@@ -111,7 +119,7 @@ def plan(
                     f"so the plan uses {looks} looks."
                 )
     fractions = [k / looks for k in range(1, looks + 1)]
-    bounds = bd.spending_boundaries(fractions, alpha)
+    bounds = bd.spending_boundaries(fractions, a_c)
     theta = bd.drift_for_power(fractions, bounds, power)
     n = math.ceil(uv * (theta / lift) ** 2)
     if n < 100:
@@ -148,4 +156,6 @@ def plan(
         minutes_between_looks=None if minutes_between is None else round(minutes_between, 1),
         schedule=schedule,
         notes=notes,
+        comparisons=comparisons,
+        comparison_alpha=a_c,
     )

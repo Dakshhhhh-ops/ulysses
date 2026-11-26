@@ -322,6 +322,13 @@ def create_app(
         st["toml"] = ct.to_toml(c)
         return st
 
+    @app.get("/human/contract/{h}/curves")
+    def human_curves(h: str):
+        """Power and expected-sample-size curves of a contract's boundary (ulysses.power)."""
+        from .. import power
+
+        return power.curves_for_contract(svc.contract(h))
+
     @app.get("/sign/{h}", response_class=HTMLResponse)
     def sign_page(request: Request, h: str, role: str = "owner"):
         try:

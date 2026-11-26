@@ -6,7 +6,8 @@
 {% block title %}{% if d.kind == 'look' %}{{ scene.decision.word }} · experiment {{ s.experiment }}{% else %}Amendment · experiment {{ s.experiment }}{% endif %} · Ulysses{% endblock %}
 {% block main %}
 {%- set arm_c = s.arms[0] -%}
-{%- set arm_t = s.arms[1] -%}
+{%- set arm_t = lead_t if lead_t else (d.decision.winner if d.decision and d.decision.winner else s.arms[1]) -%}
+{%- set srm_d = d.decision.sample_ratio if d.decision else none -%}
 {%- set p = d.proposal -%}
 {%- macro action_panel(p, executed_sentence) -%}
 <section class="action" id="confirm-panel" data-proposal="{{ p.id }}" aria-labelledby="action-h">
@@ -64,6 +65,8 @@
   <p class="verdict-sentence">
   {%- if err -%}
     The service could not read Flagsmith's results for this refresh. It retries at the next scheduled look; run <code>ulysses look {{ d.contract.hash | short }}</code> to retry now.
+  {%- elif outcome == 'hold' and srm_d and srm_d.blocks_win and dec.boundary_z and dec.z is not none and dec.z >= dec.boundary_z -%}
+    The win boundary is crossed, but the traffic split is broken: Flagsmith's exposure counts do not fit the signed split (chi-square p&nbsp;{{ '%.2g' | format(srm_d.p_value) }}, below the signed {{ srm_d.threshold }}). The contract holds and ships nothing while the arms are not comparable.
   {%- elif outcome == 'hold' -%}
     Flagsmith chance to win {{ sc.decision.ctw }}; the contract needs {{ needs }} (z&nbsp;{{ sc.decision.bz_text }}) at look {{ k }} of {{ N }}.
   {%- elif outcome == 'watch' -%}
@@ -149,8 +152,9 @@
       <p class="label">Source</p>
       <p class="read-line" style="color:var(--ink)">{{ sc.source.chip }}{% if sc.source.detail %}: {{ sc.source.detail }}{% endif %}</p>
       {%- if results_age %}<p class="read-line">Flagsmith's results were {{ results_age }}.</p>{% endif %}
-      <p class="read-line">SRM: {% if d.flagsmith and d.flagsmith.srm_p_value is not none %}p <span class="mono">{{ '%.4f' | format(d.flagsmith.srm_p_value) }}</span>{% else %}not computed by Flagsmith for this experiment{% endif %}</p>
-      {%- if guardrail_rows %}<p class="read-line">Guardrails: {% for g in guardrail_rows %}<span class="mono">{{ g.name }}</span> {{ {'breach': 'breached', 'pass': 'within rule', 'none': 'no reading yet'}[g.state] }}{% if not loop.last %}; {% endif %}{% endfor %}. <a href="#gr-h">Details</a></p>{% endif %}
+      {%- if srm_d %}<p class="read-line"{% if srm_d.blocks_win %} style="color:var(--loss)"{% endif %}>Sample ratio against the signed split: {% if srm_d.state == 'too_few' %}not tested yet ({{ srm_d.total | count }} identities, under the signed minimum){% else %}chi-square p <span class="mono">{{ '%.4g' | format(srm_d.p_value) }}</span>, {% if srm_d.blocks_win %}mismatch: a win is held{% else %}within the signed threshold {{ srm_d.threshold }}{% endif %}{% endif %}</p>{% endif %}
+      <p class="read-line">Flagsmith's own SRM: {% if d.flagsmith and d.flagsmith.srm_p_value is not none %}p <span class="mono">{{ '%.4f' | format(d.flagsmith.srm_p_value) }}</span>{% else %}not computed by Flagsmith for this experiment{% endif %}</p>
+      {%- if guardrail_rows %}<p class="read-line">Guardrails: {% for g in guardrail_rows %}<span class="mono">{{ g.label }}</span> {{ {'breach': 'breached', 'pass': 'within rule', 'none': 'no reading yet'}[g.state] }}{% if not loop.last %}; {% endif %}{% endfor %}. <a href="#gr-h">Details</a></p>{% endif %}
       {%- if deviations %}<p class="read-line" style="color:var(--loss)">{{ deviations | length }} change{{ 's' if deviations|length != 1 }} outside the contract. <a href="#deviations">See below</a></p>{% endif %}
     </div>
   </aside>

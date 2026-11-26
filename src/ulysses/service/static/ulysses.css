@@ -470,3 +470,55 @@ svg.elevation.pencil .edge { stroke: var(--graphite); }
 .chips svg.leaders circle { fill: var(--sheet); stroke: var(--graphite); stroke-width: 1; }
 .chip.docked { white-space: normal; max-width: min(58%, 420px); }
 .state-chip[data-s="executing"] { color: var(--contract); border-style: dashed; }
+
+/* Power and expected-sample-size curves on the signing page (templates/_curves.html). */
+.oc { margin-top: var(--s-5); padding: var(--s-5); }
+.oc h2 { font: 600 20px/28px var(--f-ui); margin: 4px 0 8px; }
+.oc-lede { font: 400 16px/26px var(--f-doc); max-width: 68ch; margin: 0 0 var(--s-3); }
+.oc-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font: 500 14px/20px var(--f-ui); color: var(--ink); margin-bottom: var(--s-3); }
+.oc-legend .key { display: inline-flex; align-items: center; gap: 6px; }
+.oc-charts { position: relative; }
+.oc-panel + .oc-panel { margin-top: var(--s-4); }
+.oc-title { font: 600 12px/16px var(--f-ui); letter-spacing: .08em; text-transform: uppercase; color: var(--graphite); margin: 0 0 6px 56px; }
+.oc-frame { position: relative; padding-left: 56px; }
+.oc-plot { position: relative; height: 168px; border-left: 1px solid var(--rule); border-bottom: 1px solid var(--rule); touch-action: pan-y; }
+.oc-plot svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; display: block; }
+.oc-grid { stroke: var(--hairline); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.oc-zero { stroke: var(--rule); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.oc-ref { stroke: var(--graphite); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.oc-design { stroke: var(--contract); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.oc-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.oc-line[data-tone="contract"], .oc-key[data-tone="contract"] { stroke: var(--contract); }
+.oc-line[data-tone="ink"], .oc-key[data-tone="ink"] { stroke: var(--ink); }
+.oc-line[data-tone="amber"], .oc-key[data-tone="amber"] { stroke: var(--amber); }
+.oc-line[data-dash="true"], .oc-key[data-dash="true"] { stroke-dasharray: 6 4; }
+.oc-key { stroke-width: 2; }
+.oc-y { position: absolute; left: 0; top: 0; width: 56px; height: 168px; }
+.oc-y span { position: absolute; left: 0; width: 50px; text-align: right; transform: translateY(-50%);
+  font: 400 12px/16px var(--f-mono); font-variant-numeric: tabular-nums; color: var(--graphite); }
+.oc-x { position: relative; height: 20px; }
+.oc-x span { position: absolute; top: 4px; transform: translateX(-50%); font: 400 12px/16px var(--f-mono); color: var(--graphite); white-space: nowrap; }
+.oc-x-title { margin: 6px 0 0 56px; font: 500 14px/20px var(--f-ui); color: var(--graphite); }
+.oc-ref-label { position: absolute; right: 6px; transform: translateY(calc(-100% - 2px)); font: 500 12px/16px var(--f-ui); color: var(--graphite);
+  background: var(--sheet); padding: 0 4px; white-space: nowrap; max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; }
+.oc-dot { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--contract); box-shadow: 0 0 0 2px var(--sheet);
+  transform: translate(-50%, -50%); }
+.oc-mark-label { position: absolute; transform: translate(8px, 4px); font: 500 12px/16px var(--f-mono); color: var(--ink);
+  background: var(--sheet); border: 1px solid var(--rule); border-radius: 2px; padding: 0 4px; white-space: nowrap; }
+.oc-cross { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--ink); pointer-events: none; }
+.oc-tip { position: absolute; top: 0; transform: translateX(-50%); z-index: 4; min-width: 170px; padding: 8px 10px; pointer-events: none;
+  background: var(--sheet); border: 1px solid var(--rule); border-radius: 2px; font: 500 13px/18px var(--f-ui); color: var(--ink);
+  display: grid; gap: 2px; }
+.oc-tip[hidden] { display: none; }
+.oc-tip i { display: inline-block; width: 12px; height: 2px; margin-right: 6px; vertical-align: middle; background: var(--contract); }
+.oc-tip i[data-tone="ink"] { background: var(--ink); }
+.oc-tip i[data-tone="amber"] { background: var(--amber); }
+@media (max-width: 639px) {
+  .oc { padding: var(--s-4); }
+  .oc-frame { padding-left: 44px; }
+  .oc-y span { width: 40px; }
+  .oc-title, .oc-x-title { margin-left: 44px; }
+  .oc-plot, .oc-y { height: 148px; }
+  .oc-y { width: 44px; }
+}
+.oc-ref-label[data-side="below"] { transform: translateY(3px); }

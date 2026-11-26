@@ -124,6 +124,21 @@ def _contract_block(h: str, summary: dict, horizon: dict | None, alpha: float | 
             "alpha": alpha}
 
 
+def lead_arm(arms: list[str] | None, dec: dict | None) -> str | None:
+    """The treatment a card is about: the only one, else the winner, else the highest chance to win."""
+    if not arms or len(arms) < 2:
+        return None
+    if len(arms) == 2:
+        return arms[1]
+    dec = dec or {}
+    if dec.get("winner"):
+        return dec["winner"]
+    rows = [r for r in dec.get("arms") or [] if r.get("chance_to_win") is not None]
+    if rows:
+        return max(rows, key=lambda r: r["chance_to_win"])["arm"]
+    return arms[1]
+
+
 # ---- card ------------------------------------------------------------------------------
 
 def build_card(d: dict, *, source: dict | None, horizon: dict | None, alpha: float | None,
@@ -168,7 +183,8 @@ def build_card(d: dict, *, source: dict | None, horizon: dict | None, alpha: flo
     return {
         "kind": "card",
         "source": _source(source),
-        "contract": _contract_block(d["contract"]["hash"], d["contract"]["summary"], horizon, alpha),
+        "contract": {**_contract_block(d["contract"]["hash"], d["contract"]["summary"], horizon, alpha),
+                     "lead": lead_arm(d["contract"]["summary"].get("arms"), dec)},
         "planned": planned,
         "signed": True,
         "history": hist,

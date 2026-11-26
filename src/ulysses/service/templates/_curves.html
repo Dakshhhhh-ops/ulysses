@@ -1,0 +1,90 @@
+{#- Power and expected-sample-size curves for the signer. Geometry from service/curves.py, numbers from ulysses.power. -#}
+{%- macro panel(p, x_ticks, zero, id, show_x) -%}
+<div class="oc-panel" data-oc-panel="{{ id }}">
+  <p class="oc-title">{{ p.title }}</p>
+  <div class="oc-frame">
+    <div class="oc-y" aria-hidden="true">{% for t in p.y_ticks %}<span style="top:{{ t.at }}%">{{ t.text }}</span>{% endfor %}</div>
+    <div class="oc-plot" data-oc-plot>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+        {%- for t in p.y_ticks %}<line class="oc-grid" x1="0" x2="100" y1="{{ t.at }}" y2="{{ t.at }}"/>{% endfor %}
+        {%- if zero is not none %}<line class="oc-zero" x1="{{ zero }}" x2="{{ zero }}" y1="0" y2="100"/>{% endif %}
+        {%- for r in p.refs or [] %}<line class="oc-ref" x1="0" x2="100" y1="{{ r.at }}" y2="{{ r.at }}"/>{% endfor %}
+        {%- if p.mark %}<line class="oc-design" x1="{{ p.mark.x }}" x2="{{ p.mark.x }}" y1="0" y2="100"/>{% endif %}
+        {%- for s in p.series %}
+        <polyline class="oc-line" data-tone="{{ s.tone }}"{% if s.dash %} data-dash="true"{% endif %} points="{% for x, y in s.points %}{{ x }},{{ y }} {% endfor %}"/>
+        {%- endfor %}
+      </svg>
+      {%- for r in p.refs or [] %}<span class="oc-ref-label" data-side="{{ r.side }}" style="top:{{ r.at }}%">{{ r.text }}</span>{% endfor %}
+      {%- if p.mark %}<span class="oc-dot" data-tone="contract" style="left:{{ p.mark.x }}%;top:{{ p.mark.y }}%"></span>
+      <span class="oc-mark-label" style="left:{{ p.mark.x }}%;top:{{ p.mark.y }}%">{{ p.mark.text }}</span>{% endif %}
+      <span class="oc-cross" hidden></span>
+    </div>
+    {%- if show_x %}
+    <div class="oc-x" aria-hidden="true">{% for t in x_ticks %}<span style="left:{{ t.at }}%">{{ t.text }}</span>{% endfor %}</div>
+    {%- endif %}
+  </div>
+</div>
+{%- endmacro -%}
+
+{%- macro curves(cv) -%}
+{%- if cv %}
+<section class="oc sheet" id="curves" aria-labelledby="oc-h">
+  <p class="label">Before you sign · computed from this contract</p>
+  <h2 id="oc-h">What this boundary does, for each true effect</h2>
+  <p class="oc-lede">If the treatment's real lift is the value along the bottom, the top chart is the chance the contract ships it or keeps control, and the bottom chart is how many identities per arm it uses on average before it stops.{% if cv.design %} The marked line is the smallest lift you said you care about ({{ cv.design_text }}{% if cv.baseline %}, from a {{ cv.baseline }} baseline{% endif %}).{% endif %}{% if cv.signed_note %} {{ cv.signed_note }}{% endif %}</p>
+  <div class="oc-legend">
+    {%- for s in cv.a.series %}<span class="key"><svg width="18" height="8" aria-hidden="true"><line x1="0" x2="18" y1="4" y2="4" class="oc-key" data-tone="{{ s.tone }}"{% if s.dash %} data-dash="true"{% endif %}/></svg>{{ s.name }}</span>{% endfor %}
+  </div>
+  <div class="oc-charts" data-oc data-hover='{{ cv.hover | tojson }}' data-multi="{{ 'true' if cv.multi else 'false' }}">
+    {{ panel(cv.a, cv.x_ticks, cv.zero, "a", false) }}
+    {{ panel(cv.b, cv.x_ticks, cv.zero, "b", true) }}
+    <p class="oc-x-title">{{ cv.x_title }}</p>
+    <div class="oc-tip" role="status" aria-live="polite" hidden></div>
+  </div>
+  {%- if cv.b.ref_note %}<p class="footnote">{{ cv.b.ref_note }}</p>{% endif %}
+  <p class="footnote">{{ cv.method }}{% if cv.comparisons > 1 %} Each comparison's boundary is at alpha {{ '%.4g' | format(cv.comparison_alpha) }}.{% endif %} These describe the stop rule under the normal approximation; at low conversion counts Flagsmith's relative-lift z is skewed, see docs/STATISTICS.md.</p>
+  <details>
+    <summary>The numbers as a table</summary>
+    <div class="table-wrap" role="region" aria-label="Power and expected sample size" tabindex="0">
+    <table>
+      <thead><tr><th scope="col">True effect</th><th scope="col" class="num">Expected z at horizon</th><th scope="col" class="num">Ships</th>{% if cv.multi %}<th scope="col" class="num">Ships a no-effect arm</th>{% endif %}<th scope="col" class="num">Keeps control on a loss</th><th scope="col" class="num">Expected identities per arm</th></tr></thead>
+      <tbody>{% for r in cv.rows %}<tr><td class="num">{{ r.x }}</td><td class="num">{{ r.z }}</td><td class="num">{{ r.win }}</td>{% if cv.multi %}<td class="num">{{ r.other }}</td>{% endif %}<td class="num">{{ r.loss }}</td><td class="num">{{ r.ess }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+  </details>
+</section>
+<script type="module">
+const root = document.querySelector("[data-oc]");
+if (root) {
+  const pts = JSON.parse(root.dataset.hover);
+  const tip = root.querySelector(".oc-tip");
+  const multi = root.dataset.multi === "true";
+  const plots = [...root.querySelectorAll("[data-oc-plot]")];
+  const hide = () => { tip.hidden = true; plots.forEach((p) => p.querySelector(".oc-cross").hidden = true); };
+  const show = (clientX, plot) => {
+    const r = plot.getBoundingClientRect();
+    const fx = Math.min(100, Math.max(0, (clientX - r.left) / r.width * 100));
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(p.x - fx) < Math.abs(best.x - fx)) best = p;
+    plots.forEach((pl) => { const c = pl.querySelector(".oc-cross"); c.hidden = false; c.style.left = best.x + "%"; });
+    tip.textContent = "";
+    const head = document.createElement("b"); head.textContent = "True effect " + best.label; tip.append(head);
+    const rows = [["contract", "Ships", best.win], ...(multi ? [["amber", "Ships a no-effect arm", best.other]] : []),
+                  ["ink", "Keeps control on a loss", best.loss], ["contract", "Expected per arm", best.ess]];
+    for (const [tone, k, v] of rows) {
+      const line = document.createElement("span");
+      const key = document.createElement("i"); key.dataset.tone = tone; line.append(key, `${k} ${v}`); tip.append(line);
+    }
+    tip.hidden = false;
+    const rr = root.getBoundingClientRect();
+    const left = r.left - rr.left + best.x / 100 * r.width;
+    tip.style.left = Math.min(Math.max(left, 90), rr.width - 90) + "px";
+  };
+  plots.forEach((plot) => {
+    plot.addEventListener("pointermove", (e) => show(e.clientX, plot));
+    plot.addEventListener("pointerleave", hide);
+  });
+}
+</script>
+{%- endif %}
+{%- endmacro -%}
