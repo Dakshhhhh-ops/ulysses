@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from ulysses import contract as ct
 from ulysses.service import calibration_view, fmt, scene as sc
+from ulysses.core import Refused
 from ulysses.service.app import create_app
 
 from .conftest import make_contract, read_all, sign_as
@@ -57,7 +58,7 @@ def _fixture_scene() -> dict:
         {"seq": 1, "t": 0.0133, "z": None, "counted": False, "look_number": None, "boundary_z": None},
         {"seq": 2, "t": 0.1, "z": 0.2, "counted": True, "look_number": 3, "boundary_z": 6.9913},
         {"seq": 3, "t": 0.1467, "z": 1.7, "counted": False, "look_number": None, "boundary_z": None},
-        {"seq": 4, "t": 0.1667, "z": 1.91, "counted": True, "look_number": 5, "boundary_z": 5.3679},
+        {"seq": 4, "t": 0.1667, "z": 1.91, "counted": True, "look_number": 5, "boundary_z": 5.3679, "siren": True},
         {"seq": 5, "t": 0.21, "z": 9.2, "counted": True, "look_number": 6, "boundary_z": 4.7},
     ]
     return {"planned": sc.planned_rows(planned), "history": hist, "current_seq": 5,
@@ -222,10 +223,94 @@ def test_no_page_renders_a_date_or_time(world, keys, clock, tmp_path, monkeypatc
         pages.append(f"/card/{out['look_id']}")
     if out.get("proposal"):
         pages.append(f"/card/{out['proposal']['id']}")
+        # voyage rows: an agent asking to execute before the owner's tap, then the tap and the execution
+        clock.advance(20)
+        with pytest.raises(Refused):
+            svc.execute_for_contract(unsigned, "keep_control")
+        with pytest.raises(Refused):
+            svc.execute_for_contract(unsigned, "ship_treatment")
+        p = store.proposal(out["proposal"]["id"])
+        clock.advance(60)
+        svc.confirm(p["id"], "maya", keys["maya"].sign(svc.confirm_message(p)))
+        pages.append(f"/card/{out['look_id']}")
     pages += ["/", "/calibration?tab=live", "/calibration?tab=lab", f"/enrol/{svc.enrol_token('maya')}",
               "/card/L9999-nothing"]
+    card = client.get(f"/card/{out['look_id']}").text
+    assert 'id="voyage"' in card and "signed the tap" in card and "Executed in Flagsmith" in card
     for page in pages:
         html = client.get(page).text
         body = html.split("<body>", 1)[-1]
         hit = _DATE.search(body)
         assert hit is None, f"{page} shows {hit.group(0)!r}"
+
+
+# ---- the voyage (the Siren Log) ------------------------------------------------------------------
+
+def test_voyage_marks_sirens_refusals_and_the_unbound_agent(client, keys, clock):
+    """A look at 97% that the contract holds is a siren; the agent's refused execute shows in plain words; the
+    counterfactual comes from the same readings; between looks Flagsmith's numbers (guardrails too) stay withheld."""
+    c, svc, fs = client
+    h = svc.submit(make_contract(keys, looks=4, n=400))["hash"]
+    sign_as(svc, keys, h)
+    svc.start_under_contract(h)
+    clock.advance(301)
+    fs.set_results(1, 100, 100, 0.8, {"refunds": 0.5})
+    svc.look(h)
+    clock.advance(301)
+    fs.set_results(1, 150, 150, 0.9912, {"refunds": 0.1234})       # between looks: must never reach a page
+    watch = svc.look(h)
+    clock.advance(301)
+    fs.set_results(1, 200, 200, 0.97, {"refunds": 0.5})
+    out = svc.look(h)
+    assert out["decision"]["outcome"] == "hold"
+    clock.advance(20)
+    with pytest.raises(Refused):
+        svc.execute_for_contract(h, "ship_treatment")
+
+    card = c.get(f"/card/{out['look_id']}").text
+    assert 'id="voyage"' in card
+    assert "Flagsmith said Winning; the contract held." in card
+    assert "The agent asked to ship big_cta" in card
+    assert "Refused: no look had fired the contract, so nothing authorised it." in card
+    assert "Asked right after look 2, where Flagsmith said Winning." in card
+    assert "would have shipped big_cta at look 2, on a 97.00% reading" in card
+    assert "Counterfactual, not something that happened" in card
+    assert "99.12%" not in card and "12.34%" not in card          # withheld between looks
+    assert "minutes after the start" in card
+    visible = re.sub(r"<script.*?</script>|<[^>]+>", " ", card, flags=re.S)
+    assert visible.count(h.split(":")[-1][:12]) == 1                 # the contract hash is printed once
+
+    scene = sc.build_card(svc.look_view(out["look_id"]), source=None, horizon={"identities_per_arm": 400, "looks": 4},
+                          alpha=0.05)
+    assert [b["siren"] for b in sc.elevation(scene)["beads"] if b["kind"] != "tick"] == [False, True]  # the watch row is a tick
+    assert 'class="siren"' in card                                   # the flat drawing marks it too
+
+    w = c.get(f"/card/{watch['look_id']}").text
+    assert "99.12%" not in w and "12.34%" not in w
+    home = c.get("/").text
+    assert "1</b> siren" in home and "would have shipped" in home
+
+
+def test_old_between_looks_rows_never_show_flagsmith_numbers(client, keys, clock):
+    """Rows recorded before redaction kept Flagsmith's numbers on watch decisions; pages withhold them."""
+    c, svc, fs = client
+    h = svc.submit(make_contract(keys, looks=4, n=400))["hash"]
+    sign_as(svc, keys, h)
+    svc.start_under_contract(h)
+    clock.advance(301)
+    fs.set_results(1, 100, 100, 0.8, {"refunds": 0.5})
+    out = svc.look(h)
+    dec = dict(svc.store.look(out["look_id"])["decision"])
+    dec.update(counted=False, outcome="watch", look_number=None, chance_to_win=0.9876, z=2.25,
+               guardrails=[{**g, "chance_worse": 0.4321, "z": 0.1, "state": "watch"} for g in dec.get("guardrails") or []],
+               guardrail_chance_worse={"refunds": 0.4321})
+    snap = {"identities": {"control": 150, "big_cta": 150}, "as_of": None, "srm_p_value": None,
+            "metrics": {"purchase": {"chance_to_win": 0.9876, "lift": 0.1, "direction": "up"},
+                        "refunds": {"chance_to_win": 0.5679, "lift": 0.0, "direction": "down"}}}
+    clock.advance(60)
+    old = svc.store.add_look(contract_hash=h, environment="env-key", experiment_id=1, counted=False,
+                             identities_per_arm=150, outcome="watch", decision=dec, snapshot=snap, refreshed=False,
+                             now=clock())
+    for page in (f"/card/{old}", f"/card/{out['look_id']}", "/"):
+        html = c.get(page).text
+        assert "98.76%" not in html and "43.21%" not in html, page

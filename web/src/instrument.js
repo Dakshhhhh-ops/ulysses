@@ -3,6 +3,7 @@
 // loads, and keep working if it never does (the server-rendered SVG stays).
 import { elevation } from "./elevation.js";
 import { Chips, flatProjector, labelScene, note, lowPowerRemembered } from "./labels.js";
+import { Tour, tourSteps, svgDriver } from "./tour.js";
 
 const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 const phone = () => matchMedia("(max-width: 639px)").matches;
@@ -240,21 +241,37 @@ function boot() {
 
   if (!plates.length) return;
   const params = new URLSearchParams(location.search);
+  // the walk-through: decision cards only
+  let autoTour = false;
+  if (main && main.scene.kind === "card" && location.pathname.startsWith("/card/")) {
+    const steps = tourSteps(main.scene);
+    if (steps.length) {
+      main.tour = new Tour(main, steps);
+      main.svgDriver = svgDriver(main);
+      main.tour.setDriver(main.svgDriver);
+      autoTour = Tour.wanted(params, reduced());
+    }
+  }
+  const flatTour = () => { if (main?.tour) { main.tour.setDriver(main.svgDriver); if (autoTour) main.tour.play(); } };
   const noGL = params.has("flat") || lowPowerRemembered() || !webglAvailable();
   if (noGL) {
     for (const p of plates) p.fig.dataset.flat = "true";
     if (lowPowerRemembered()) for (const p of plates) note(p, "Showing the flat drawing: this device was drawing slowly.");
+    if (main?.tour && autoTour) main.tour.play();
     return;
   }
   idle(async () => {
     const { mountInstrument } = await import("./bell.js");
     for (const p of plates) {
       try {
-        p.gl = mountInstrument(p, { reduced: reduced(), phone: phone(), debug: params.has("debug"), forceGL: params.has("gl"), arrived: params.has("arrived") });
+        p.gl = mountInstrument(p, { reduced: reduced(), phone: phone(), debug: params.has("debug"), forceGL: params.has("gl"),
+          arrived: params.has("arrived"), tour: p === main && !!p.tour && autoTour });
+        if (p.tour) p.tour.setDriver(p.gl.tourDriver);
       } catch (err) {
         console.warn("instrument: staying with the flat drawing", err);
         p.fig.dataset.flat = "true";
         note(p, "3D view unavailable: showing the flat drawing.");
+        if (p === main) flatTour();
       }
     }
   });

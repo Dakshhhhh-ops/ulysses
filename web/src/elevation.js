@@ -93,7 +93,7 @@ export function beads(scene) {
     if (h.z === null || h.z === undefined) return { seq: h.seq, x: r6(xOf(h.t)), y: 0, kind: "tick" };
     let kind = h.counted ? "bead" : "hollow";
     if (h.seq === scene.current_seq) kind = h.counted ? "current" : "current-hollow";
-    return { seq: h.seq, x: r6(xOf(h.t)), y: r6(rOf(h.z)), kind, clamped: Math.abs(h.z) > Z_MAX };
+    return { seq: h.seq, x: r6(xOf(h.t)), y: r6(rOf(h.z)), kind, clamped: Math.abs(h.z) > Z_MAX, siren: !!h.siren };
   });
 }
 

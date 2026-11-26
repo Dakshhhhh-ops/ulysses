@@ -20,6 +20,7 @@ from .. import contract as ct
 from ..decision import observation_from_snapshot
 from ..flagsmith.gateway import MetricResult, ResultsSnapshot
 from . import calibration_view, fmt, sources
+from . import voyage as vg
 from . import scene as sc
 
 _ORDER = {"executing": 0, "decided": 0, "active": 1, "signed": 2, "draft": 3, "executed": 4, "deviated": 5, "superseded": 6, "void": 7}
@@ -63,7 +64,7 @@ def _contract_facts(svc, h: str) -> tuple[ct.Contract, dict, float]:
 
 def _fractions(svc, environment: str, experiment_id: int) -> dict[int, dict]:
     out = {}
-    for lk in svc.store.looks(environment, experiment_id):
+    for lk in vg.looks_for_view(svc, environment, experiment_id):
         d = lk["decision"] or {}
         out[lk["seq"]] = {"fraction": d.get("fraction"), "look_number": d.get("look_number"), "id": lk["id"], "at": lk["at"],
                           "age": fmt.results_age((lk["snapshot"] or {}).get("as_of"), lk["at"])}
@@ -86,7 +87,8 @@ def card_context(svc, d: dict) -> dict:
     fr = _fractions(svc, env, exp)
     scene = sc.build_card(d, source=src, horizon=horizon, alpha=alpha, fractions=fr)
     per_look = {}
-    for lk in svc.store.looks(env, exp):
+    # between-looks rows withhold Flagsmith's numbers (guardrails included), as the service's own views do
+    for lk in vg.looks_for_view(svc, env, exp):
         per_look[lk["seq"]] = guardrail_rows(c, lk["snapshot"], lk["decision"])
     later = [v for s, v in sorted(fr.items()) if s > d["look"]["seq"]]
     snap = d.get("flagsmith") or {}
@@ -109,6 +111,8 @@ def card_context(svc, d: dict) -> dict:
         "guardrails_by_seq": per_look,
         "deviations": deviations(svc, env, exp, c),
         "keys": signer_keys(c),
+        "voyage": vg.build(svc, c, h, current_seq=d["look"]["seq"]),
+        "alpha": d.get("alpha"),
     }
 
 
@@ -234,7 +238,7 @@ def index_context(svc, rows: list[dict]) -> dict:
     latest = sc.latest_looks(svc.store, rows)
     items = []
     for r in rows:
-        lk = latest.get(r["hash"])
+        lk = _withheld(svc, latest.get(r["hash"]))
         dec = (lk or {}).get("decision") or {}
         c, error = None, None
         try:
@@ -256,8 +260,12 @@ def index_context(svc, rows: list[dict]) -> dict:
             devs = [x for x in devs if x["contract"] in (None, r["hash"])]
         except Exception:  # noqa: BLE001
             src_row, devs = None, []
+        try:
+            voy = vg.build(svc, c, r["hash"]) if c and lk else None
+        except Exception:  # noqa: BLE001 - the voyage is extra; the row still renders without it
+            voy = None
         items.append({
-            **r, "flag": flag, "looks": looks, "source": src_row, "deviations": devs if c else [], "error": error,
+            **r, "flag": flag, "voyage": voy, "looks": looks, "source": src_row, "deviations": devs if c else [], "error": error,
             "look": None if not lk else {
                 "id": lk["id"], "look_number": dec.get("look_number"), "outcome": dec.get("outcome"),
                 "word": sc.SHORT.get(dec.get("outcome"), dec.get("outcome")),
@@ -299,6 +307,16 @@ def index_context(svc, rows: list[dict]) -> dict:
         hero = {"scene": sc.build_example(planned, alpha=0.05, looks=10), "example": True,
                 "source": None}
     return {"items": items, "hero": hero, "unreadable": [i for i in items if i["error"]]}
+
+
+def _withheld(svc, lk: dict | None) -> dict | None:
+    """A between-looks row read straight from the store, with Flagsmith's numbers withheld while undecided."""
+    if not lk or lk["counted"]:
+        return lk
+    hides = getattr(svc, "_hides_numbers", None)
+    if hides and hides(lk["environment"], lk["experiment_id"]):
+        return {**lk, "decision": svc._redact_decision(lk["decision"]), "snapshot": svc._redact_snapshot(lk["snapshot"])}
+    return lk
 
 
 def calibration_dir(svc) -> Path:

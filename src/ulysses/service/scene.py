@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import fmt
+from .voyage import is_siren
 
 CONST: dict[str, float] = json.loads((Path(__file__).parent / "elevation_constants.json").read_text(encoding="utf-8"))
 K = CONST["K"]
@@ -168,6 +169,7 @@ def build_card(d: dict, *, source: dict | None, horizon: dict | None, alpha: flo
             "z_text": fmt.zval(x["z"]) if x["chance_to_win"] is not None else None,
             "bz_text": fmt.zval(x["boundary_z"]),
             "word": SHORT.get(x["outcome"], x["outcome"]),
+            "siren": is_siren(x["counted"], x["outcome"], x["chance_to_win"]),
         })
     p = d.get("proposal")
     outcome = dec["outcome"]
@@ -325,7 +327,7 @@ def beads(scene: dict) -> list[dict]:
         if h["seq"] == scene.get("current_seq"):
             kind = "current" if h.get("counted") else "current-hollow"
         out.append({"seq": h["seq"], "x": _r6(x_of(h["t"])), "y": _r6(r_of(z)), "kind": kind,
-                    "clamped": abs(z) > Z_MAX})
+                    "clamped": abs(z) > Z_MAX, "siren": bool(h.get("siren"))})
     return out
 
 

@@ -23,6 +23,9 @@
   {%- else %}
   <p class="lede">Read it before any data exists. Once signed, the agent can start the experiment, and it can only complete it and ship when one of these rules fires.</p>
   {%- endif %}
+  {%- if s.autonomy_text %}
+  <p class="lede autonomy-line"><b>What the agent may do on its own:</b> {{ s.autonomy_text }}</p>
+  {%- endif %}
 </div>
 
 <div class="grid-12">
