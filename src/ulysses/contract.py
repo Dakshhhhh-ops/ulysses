@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import math
 import tomllib
+import unicodedata
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,7 +36,17 @@ Action = Literal["ship_treatment", "keep_control"]
 
 
 class _Model(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # No NaN or infinity anywhere: they have no canonical JSON form, so they could not be hashed.
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+
+def _nfc(v: str | None) -> str | None:
+    """Prose is hashed in Unicode NFC, so text that reads the same hashes the same.
+
+    Identifiers (flag, variation, metric, environment and signer names) are left byte-exact: they must
+    equal what Flagsmith and the signer registry hold, and two spellings there are two different things.
+    """
+    return None if v is None else unicodedata.normalize("NFC", v)
 
 
 class ExperimentRef(_Model):
@@ -179,6 +190,11 @@ class Design(_Model):
     override_reason: str | None = Field(
         None, description="Why the signers accept a design outside the service's policy (shown on the signing page)")
 
+    @field_validator("override_reason")
+    @classmethod
+    def _prose(cls, v: str | None) -> str | None:
+        return _nfc(v)
+
 
 class Amendment(_Model):
     supersedes: str = Field(description="Hash of the contract this one replaces")
@@ -186,6 +202,11 @@ class Amendment(_Model):
     action_now: Action | None = Field(
         None, description="If set, this amendment authorises one action immediately (for example: ship early)"
     )
+
+    @field_validator("reason")
+    @classmethod
+    def _prose(cls, v: str) -> str:
+        return _nfc(v)
 
 
 class Contract(_Model):
@@ -217,7 +238,7 @@ class Contract(_Model):
     def _hyp(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("hypothesis must not be empty")
-        return v
+        return _nfc(v)
 
     @model_validator(mode="after")
     def _checks(self) -> "Contract":
@@ -232,16 +253,13 @@ class Contract(_Model):
         if len(self.boundary.planned) != len(expected):
             raise ValueError("boundary.planned must have one row per look; regenerate it with `ulysses contract fix`")
         for got, want in zip(self.boundary.planned, expected):
-            if (
-                got.look != want.look
-                or got.identities_per_arm != want.identities_per_arm
-                or abs(got.fraction - want.fraction) > 1e-6
-                or (got.z is None) != (want.z is None)
-                or (got.z is not None and want.z is not None and abs(got.z - want.z) > 5e-4)
-            ):
+            # Exactly the table the spending rule gives (it is rounded to fixed places), so one contract
+            # has one hash, and no row can show a reading (chance_to_win) that its z does not give.
+            if got != want:
                 raise ValueError(
                     f"boundary.planned look {got.look} does not match the signed spending rule "
-                    f"(expected z={want.z}); the table was edited or computed with other settings"
+                    f"(expected z={want.z}, chance_to_win={want.chance_to_win}); the table was edited or "
+                    "computed with other settings"
                 )
         return self
 

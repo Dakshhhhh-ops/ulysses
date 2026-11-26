@@ -32,6 +32,14 @@ import httpx
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 
+# The cards quote Flagsmith names between ⟦ ⟧, which a non-UTF-8 stream (a redirected or piped stdout
+# on Windows) cannot encode; write a replacement character there instead of dying at the first look.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 ROOT = Path(__file__).resolve().parents[1]
 DIM, GREEN, RED, YELLOW, BOLD, END = "\033[2m", "\033[32m", "\033[31m", "\033[33m", "\033[1m", "\033[0m"
 REFRESH_FLOOR = 300
@@ -242,8 +250,45 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
     }
 
 
+# What the agent needs to know about the demo: names and ids only. The rest of .run/demo.json (the
+# environment's server-side key that the demo shop uses) is not the agent's.
+DEMO_FIELDS = ("environment", "owner", "second_signer", "experiments")
+
+
+def agent_view(demo: dict) -> dict:
+    out = {k: demo[k] for k in DEMO_FIELDS if k in demo}
+    out["experiments"] = {w: {"id": e["id"]} for w, e in (demo.get("experiments") or {}).items()}
+    return out
+
+
+def mark_synthetic(demo: dict, which: list[str], db: str | None = None) -> None:
+    """Label the demo experiments' data source as simulated visitors (the pages show it)."""
+    try:
+        from ulysses.service import sources
+
+        for w in which:
+            sources.mark(ROOT / (db or os.environ.get("ULYSSES_DB", ".run/ulysses.db")), demo["environment"],
+                         demo["experiments"][w]["id"], "synthetic",
+                         "visitors simulated by examples/shop/visitors.py; Flagsmith assigns the variations")
+    except Exception:  # noqa: BLE001 - the label is a convenience for the pages
+        pass
+
+
+def write_results(results: dict) -> None:
+    try:
+        (ROOT / ".run").mkdir(exist_ok=True)
+        (ROOT / ".run" / "agent-session-result.json").write_text(json.dumps(results, indent=2))
+        say("AGENT", "wrote .run/agent-session-result.json")
+    except OSError:
+        # In the agent container nothing is writable: hand the result to whoever reads the output.
+        print("AGENT-RESULT " + json.dumps(results), flush=True)
+
+
 async def run(a) -> None:
-    demo = json.loads((ROOT / ".run" / "demo.json").read_text())
+    if a.demo:
+        demo = json.loads(a.demo)
+    else:
+        demo = agent_view(json.loads((ROOT / ".run" / "demo.json").read_text()))
     if "experiments" not in demo:
         raise SessionError(".run/demo.json is from an older setup; run scripts/demo_setup.py again")
     url, token = settings()
@@ -257,15 +302,7 @@ async def run(a) -> None:
     procs: list[subprocess.Popen] = []
     if a.with_traffic:
         start_traffic(a, procs)
-        try:
-            from ulysses.service import sources
-
-            for w in which:
-                sources.mark(ROOT / os.environ.get("ULYSSES_DB", ".run/ulysses.db"), demo["environment"],
-                             demo["experiments"][w]["id"], "synthetic",
-                             "visitors simulated by examples/shop/visitors.py; Flagsmith assigns the variations")
-        except Exception:  # noqa: BLE001 - the label is a convenience for the pages
-            pass
+        mark_synthetic(demo, which)
     env = get_default_environment()
     env.update({"ULYSSES_URL": url, "ULYSSES_AGENT_TOKEN": token, "PYTHONPATH": str(ROOT / "src")})
     params = StdioServerParameters(command=sys.executable, args=["-m", "ulysses.mcp_server"], env=env, cwd=str(ROOT))
@@ -283,8 +320,7 @@ async def run(a) -> None:
     finally:
         for pr in procs:
             pr.terminate()
-    (ROOT / ".run" / "agent-session-result.json").write_text(json.dumps(results, indent=2))
-    say("AGENT", "wrote .run/agent-session-result.json")
+    write_results(results)
     for w, r in results.items():
         say("AGENT", f"{r.get('kind', w)}: {r.get('outcome')} after {r.get('minutes_from_start_to_decision')} min; "
                      f"{r.get('results_refreshes_run_by_agent')} refreshes run by the agent, "
@@ -298,6 +334,8 @@ def main() -> None:
     ap.add_argument("--min-lift", type=float, default=0.5)
     ap.add_argument("--baseline-rate", type=float, default=0.10)
     ap.add_argument("--with-traffic", action="store_true", help="start the demo shop and simulated visitors")
+    ap.add_argument("--demo", help="the demo's names and ids as JSON (environment, owner, second_signer, "
+                    "experiments); default: read from .run/demo.json. The agent container gets it this way.")
     ap.add_argument("--shop-port", type=int, default=int(os.environ.get("SHOP_PORT", "8210")))
     ap.add_argument("--visitors-per-minute", type=float, default=90)
     ap.add_argument("--classic", type=float, default=0.10)

@@ -1,0 +1,22 @@
+# The only image built from this folder is docker/agent.Dockerfile (the agent side). Nothing secret
+# or run-time may enter its build context.
+.env
+.env.*
+.run/
+var/
+keys/
+**/*.key
+**/*.db
+**/*.sqlite3
+ulysses.mcp.json
+.git/
+.venv/
+**/__pycache__/
+.pytest_cache/
+web/node_modules/
+web/dev/
+upstream/
+data/
+docs/
+examples/
+tests/

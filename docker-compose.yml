@@ -5,6 +5,11 @@
 #   docker compose -p ulysses down -v          # removes it and its data
 #
 # The Flagsmith API and dashboard listen on http://localhost:8280 (set ULYSSES_FLAGSMITH_PORT to move it).
+#
+# The `agent` profile adds the agent side of the split in its own container (the scripted agent and
+# the Ulysses MCP server). It is not started by a plain `up`; the judge demo runs it with
+# `--agent-in-container`. It gets the Ulysses URL and agent token and nothing else: no volume, no
+# env_file, a read-only filesystem, and its own network, so it cannot reach Flagsmith's Postgres.
 name: ulysses
 
 x-flagsmith-env: &flagsmith-env
@@ -30,6 +35,10 @@ x-image: &image docker.flagsmith.com/flagsmith/flagsmith:2.295.2@sha256:48905c66
 
 volumes:
   pgdata:
+
+networks:
+  # The agent's network: shared with no other service. It reaches the contract service on the host.
+  agent-only: {}
 
 services:
   postgres:
@@ -84,3 +93,23 @@ services:
       migrate-db:
         condition: service_completed_successfully
     mem_limit: 640m
+
+  agent:
+    profiles: ['agent']
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    image: ulysses-agent:local
+    environment:
+      ULYSSES_URL: ${ULYSSES_AGENT_URL:-http://host.docker.internal:8240}
+      ULYSSES_AGENT_TOKEN: ${ULYSSES_AGENT_TOKEN:-}
+    networks: ['agent-only']
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: '10001:10001'
+    cap_drop: ['ALL']
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 384m
