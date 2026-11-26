@@ -273,7 +273,8 @@
     "z": 1.91,
     "counted": true,
     "look_number": 5,
-    "boundary_z": 5.3679
+    "boundary_z": 5.3679,
+    "siren": true
    },
    {
     "seq": 5,
@@ -1039,28 +1040,32 @@
     "x": -3.2,
     "y": 0.072,
     "kind": "bead",
-    "clamped": false
+    "clamped": false,
+    "siren": false
    },
    {
     "seq": 3,
     "x": -2.8264,
     "y": 0.612,
     "kind": "hollow",
-    "clamped": false
+    "clamped": false,
+    "siren": false
    },
    {
     "seq": 4,
     "x": -2.6664,
     "y": 0.6876,
     "kind": "bead",
-    "clamped": false
+    "clamped": false,
+    "siren": true
    },
    {
     "seq": 5,
     "x": -2.32,
     "y": 2.7,
     "kind": "current",
-    "clamped": true
+    "clamped": true,
+    "siren": false
    }
   ],
   "proposed": [

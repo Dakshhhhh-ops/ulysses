@@ -56,7 +56,9 @@ attribute float aX; attribute float aRadius; attribute float aState; attribute f
 attribute float aOpen; attribute float aSide; attribute float aTube; attribute float aFade; attribute float aDim;
 uniform vec3 uCol[9]; uniform vec3 uHair; uniform vec3 uSheet;
 varying float vU; varying float vState; varying float vOpen; varying float vSide; varying vec3 vColor; varying vec3 vN;
+varying float vFade;
 void main() {
+  vFade = aFade;
   float t = aTube * (1.0 + 0.8 * aHighlight);
   vec3 radial = vec3(0.0, sin(aU), cos(aU));
   vec3 n = radial * cos(aV) + vec3(sin(aV), 0.0, 0.0);
@@ -70,9 +72,11 @@ void main() {
   gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
 }`;
 const RING_FS = /* glsl */ `
-uniform vec3 uLight;
+uniform vec3 uLight; uniform float uHide;
 varying float vU; varying float vState; varying float vOpen; varying float vSide; varying vec3 vColor; varying vec3 vN;
+varying float vFade;
 void main() {
+  if (uHide > 0.5 && vFade < 0.02) discard;
   float s = floor(vState + 0.5);
   if (abs(s - 6.0) < 0.5 && fract(vU * 16.0 / 6.2831853) > 0.55) discard;
   if (abs(s - 7.0) < 0.5 && fract(vU * 40.0 / 6.2831853) > 0.42) discard;
@@ -258,7 +262,7 @@ class Instrument {
     rg.instanceCount = all.length;
     mats.ring = new ShaderMaterial({
       vertexShader: RING_VS, fragmentShader: RING_FS, toneMapped: false,
-      uniforms: { uCol: { value: this.ringColors() }, uHair: { value: t.hairline }, uSheet: { value: t.sheet },
+      uniforms: { uCol: { value: this.ringColors() }, uHair: { value: t.hairline }, uSheet: { value: t.sheet }, uHide: { value: 0 },
         uLight: { value: new Vector3(-0.35, 0.6, 0.72).normalize() } },
     });
     this.rings = new Mesh(rg, mats.ring);
@@ -381,6 +385,23 @@ class Instrument {
     this.hollow.count = hollow.length;
     this.hollow.frustumCulled = false;
     W.add(this.hollow);
+
+    this.sirenList = e.beads.filter((b) => b.siren);
+    this.mats.siren = new MeshBasicMaterial({ color: t.flagsmith, toneMapped: false, side: DoubleSide });
+    this.sirens = new InstancedMesh(new RingGeometry(0.15, 0.185, 4, 1), this.mats.siren, Math.max(this.sirenList.length, 1));
+    this.sirens.count = 0;
+    this.sirens.frustumCulled = false;
+    W.add(this.sirens);
+    // where each refresh sits along the thread (segment progress), for the walk-through
+    this.seqProgress = new Map();
+    {
+      let before = 0, j = -1;
+      for (const h of sc.history || []) {
+        if (h.z === null || h.z === undefined) { if (j >= 0) before += j; j = -1; continue; }
+        j += 1;
+        this.seqProgress.set(h.seq, before + j);
+      }
+    }
 
     const cur = e.beads.find((b) => b.kind === "current");
     this.current = cur || null;
@@ -519,11 +540,12 @@ class Instrument {
       const o = whole * 6;
       return progress >= segs ? Infinity : lerp(full[o], full[o + 3], progress - Math.floor(progress)) + 1e-6;
     })() : Infinity;
+    const lim = this.tourX ?? Infinity;
     const o = new Object3D();
     const q = this.camera.quaternion;
     let n = 0;
     for (const b of this.beadList) {
-      if (b.x > xEnd + 1e-6) break;
+      if (b.x > xEnd + 1e-6 || b.x > lim + 1e-6) break;
       o.position.set(b.x, b.y, 0);
       o.quaternion.identity();
       o.scale.setScalar(this.highlighted.seq === b.seq ? 1.9 : 1);
@@ -534,7 +556,7 @@ class Instrument {
     this.beads.instanceMatrix.needsUpdate = true;
     n = 0;
     for (const b of this.hollowList) {
-      if (b.x > xEnd + 1e-6 && b.kind !== "tick") continue;
+      if ((b.x > xEnd + 1e-6 && b.kind !== "tick") || b.x > lim + 1e-6) continue;
       o.position.set(b.x, b.y, 0.001);
       o.quaternion.copy(q);
       o.scale.setScalar((b.kind === "tick" ? 1 : 1) * (this.highlighted.seq === b.seq ? 1.7 : 1));
@@ -543,7 +565,18 @@ class Instrument {
     }
     this.hollow.count = n;
     this.hollow.instanceMatrix.needsUpdate = true;
-    const showCur = progress >= segs;
+    n = 0;
+    for (const b of this.sirenList) {
+      if (b.x > xEnd + 1e-6 || b.x > lim + 1e-6) continue;
+      o.position.set(b.x, b.y, 0.003);
+      o.quaternion.copy(q);
+      o.scale.setScalar(1);
+      o.updateMatrix();
+      this.sirens.setMatrixAt(n++, o.matrix);
+    }
+    this.sirens.count = n;
+    this.sirens.instanceMatrix.needsUpdate = true;
+    const showCur = progress >= segs && (!this.current || this.current.x <= lim + 1e-6);
     if (this.current) {
       const y = this.needleY;
       this.curBead.position.set(this.current.x, y, 0);
@@ -629,6 +662,13 @@ class Instrument {
   }
 
   intro() {
+    if (this.opts.tour && this.plate.tour) {
+      this.introDone = false;
+      this.view = { ...READ };
+      this.placeCamera();
+      this.plate.tour.play();
+      return;
+    }
     const sc = this.scene, ra = this.ra;
     const finalProgress = this.threadSegs;
     const chipsOn = () => this.labels(true);
@@ -709,6 +749,85 @@ class Instrument {
   }
 
   delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  // ---- the walk-through (driven by tour.js) -------------------------------------------------------
+  tourReset() {
+    this.started = true;
+    for (const tw of this.tweens) tw.resolve();
+    this.tweens = [];
+    this.introDone = false;
+    const ra = this.ra;
+    for (let i = 0; i < ra.fade.array.length; i++) ra.fade.array[i] = 0;
+    ra.fade.needsUpdate = true;
+    this.mats.ring.uniforms.uHide.value = 1;
+    this.tourX = -Infinity;
+    this.mats.shell.uniforms.uCast.value = 0;
+    if (this.shell) this.shell.visible = false;
+    if (this.edge) this.edge.visible = false;
+    this.mats.banner.opacity = 0;
+    if (this.bannerLines) this.bannerLines.visible = false;
+    if (this.dim) this.dim.visible = this.arrows.visible = false;
+    this.springing = false;
+    this.needleY = this.current ? this.current.y : 0;
+    this.progress = 0;
+    this.placeBeads(0);
+    this.labels(false);
+    this.view = { ...READ };
+    this.placeCamera();
+    this.invalidate();
+  }
+
+  tourRings(k, ms) {
+    const ra = this.ra;
+    const idx = this.ringList.map((r, i) => [r, i]).filter(([r, i]) => ra.fade.array[i] < 1 && (r.k < 0 || r.k <= k)).map(([, i]) => i);
+    const step = idx.length ? ms / idx.length : 0;
+    const done = this.tween(ms + 160, (u) => {
+      const tms = u * (ms + 160);
+      idx.forEach((i, j) => { ra.fade.array[i] = clamp01((tms - j * step) / 160); });
+      ra.fade.needsUpdate = true;
+    }, "tour-rings");
+    return done.then(() => {
+      if (this.ringList.every((r, i) => ra.fade.array[i] >= 1)) {
+        if (this.shell) this.shell.visible = true;
+        if (this.edge) this.edge.visible = true;
+        const cast = this.scene.signed && !this.scene.wire ? 1 : 0;
+        return this.tween(ms ? 600 : 0, (u) => { this.mats.shell.uniforms.uCast.value = cast * easeOut(u); }, "cast");
+      }
+      return undefined;
+    });
+  }
+
+  tourBanner(ms) {
+    if (this.bannerLines) this.bannerLines.visible = true;
+    return this.tween(ms, (u) => { this.mats.banner.opacity = 0.07 * u; }, "tour-banner");
+  }
+
+  tourDrawTo(seq, ms) {
+    const target = this.seqProgress.get(seq);
+    if (target === undefined) return Promise.resolve();
+    const from = this.progress ?? 0;
+    const end = target >= this.threadSegs ? this.threadSegs : target;
+    const bead = this.e.beads.find((b) => b.seq === seq);
+    if (bead) this.tourX = bead.x;
+    return this.tween(ms, (u) => {
+      this.progress = lerp(from, end, easeOut(u));
+      this.placeBeads(this.progress);
+    }, "thread");
+  }
+
+  tourFinish() {
+    for (const tw of this.tweens) tw.resolve();
+    this.tweens = [];
+    if (this.shell) this.shell.visible = true;
+    if (this.edge) this.edge.visible = true;
+    if (this.bannerLines) this.bannerLines.visible = true;
+    this.mats.banner.opacity = 0.07;
+    this.mats.ring.uniforms.uHide.value = 0;
+    this.tourX = null;
+    if (this.dim) this.dim.visible = this.arrows.visible = true;
+    this.introDone = false;
+    this.skipIntro();
+  }
 
   ready() {
     this.invalidate();
@@ -975,6 +1094,7 @@ class Instrument {
     if (avg > 24 && !this.opts.debug && !this.opts.forceGL) {
       // Stop drawing for good: the next frame() would otherwise set data-ready back to "gl" and hide the SVG.
       this.slow = true;
+      for (const tw of this.tweens) tw.resolve();
       this.tweens = [];
       this.springing = false;
       this.inertia = false;
@@ -987,6 +1107,11 @@ class Instrument {
       this.stage.dataset.ready = "svg";
       note(this.plate, "Showing the flat drawing: this device was drawing slowly.");
       this.plate.placeFlat?.();
+      const tour = this.plate.tour;
+      if (tour && this.plate.svgDriver) {
+        tour.setDriver(this.plate.svgDriver);
+        if (tour.playing) tour.play();
+      }
     }
   }
 
@@ -1014,6 +1139,13 @@ export function mountInstrument(plate, opts) {
     highlightRing: (k, text) => inst.highlightRing(k, text),
     cast: () => inst.cast(),
     release: () => inst.release(),
+    tourDriver: {
+      reset: () => inst.tourReset(),
+      rings: (k, ms) => inst.tourRings(k, ms),
+      banner: (ms) => inst.tourBanner(ms),
+      drawTo: (seq, ms) => inst.tourDrawTo(seq, ms),
+      finish: () => inst.tourFinish(),
+    },
     setFan: (opt) => {
       if (!inst.fanU) return;
       if ("look" in opt) inst.fanU.uLook.value = opt.look;

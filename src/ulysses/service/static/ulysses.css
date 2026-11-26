@@ -592,3 +592,101 @@ svg.elevation.pencil .edge { stroke: var(--graphite); }
   .ts-run { stroke-width: 1.6; }
   .ts-run.ship { stroke-width: 3; }
 }
+
+/* ---- the voyage (the Siren Log) --------------------------------------------------------------- */
+.siren-ic { width: 14px; height: 14px; flex: none; vertical-align: -2px; display: inline-block; }
+.legend svg.legend-siren { width: 14px; height: 14px; }
+.siren-line { display: flex; align-items: center; gap: 6px; color: var(--ink) !important; }
+.verdict-short { font: 600 28px/32px var(--f-ui); letter-spacing: .02em; margin-top: 6px; color: var(--ink); }
+.verdict-short[data-outcome="win"] { color: var(--win); }
+.verdict-short[data-outcome="loss"] { color: var(--loss); }
+.verdict-short[data-outcome="guardrail_breach"] { color: var(--amber); }
+.toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--graphite); margin: 0 0 var(--s-3); cursor: pointer; min-height: 32px; }
+.toggle input { width: 16px; height: 16px; accent-color: var(--ink); margin: 0; }
+.refresh-row { display: none !important; }
+section:has(input[data-toggle-refresh]:checked) li.refresh-row { display: grid !important; }
+section:has(input[data-toggle-refresh]:checked) tr.refresh-row { display: table-row !important; }
+.voyage-sum { background: var(--sheet); border: 1px solid var(--rule); padding: 12px 16px; margin-bottom: var(--s-3); font-size: 15px; line-height: 22px; display: grid; gap: 8px; }
+.cf { color: var(--ink); }
+.cf-tag { display: inline-block; font: 600 11px/14px var(--f-ui); letter-spacing: .08em; text-transform: uppercase; color: var(--graphite);
+  border: 1px dashed var(--graphite); border-radius: 2px; padding: 1px 5px; margin-right: 4px; vertical-align: 1px; }
+.voyage-list { list-style: none; margin: 0; padding: 0; background: var(--sheet); border: 1px solid var(--rule); position: relative; }
+.voyage-list li { display: grid; grid-template-columns: 22px 1fr auto; gap: 4px 14px; padding: 10px 16px; border-bottom: 1px solid var(--hairline); position: relative; }
+.voyage-list li:last-child { border-bottom: 0; }
+.voyage-list li::before { content: ""; position: absolute; left: 26px; top: 0; bottom: 0; width: 1px; background: var(--hairline); }
+.voyage-list li:first-child::before { top: 20px; } .voyage-list li:last-child::before { bottom: calc(100% - 20px); }
+.v-mark { position: relative; z-index: 1; padding-top: 2px; }
+.v-mark svg { width: 16px; height: 16px; display: block; background: var(--sheet); }
+.v-title { font: 600 15px/22px var(--f-ui); color: var(--ink); }
+.v-title a { color: var(--ink); }
+.v-word[data-outcome="win"] { color: var(--win); } .v-word[data-outcome="loss"] { color: var(--loss); }
+.v-word[data-outcome="guardrail_breach"] { color: var(--amber); }
+.v-detail, .v-note { font-size: 14px; line-height: 20px; color: var(--graphite); }
+.v-when { font: 400 12px/22px var(--f-mono); color: var(--graphite); white-space: nowrap; text-align: right; }
+.v-tag { display: inline-block; font: 600 11px/14px var(--f-ui); letter-spacing: .08em; text-transform: uppercase; border: 1px solid currentColor;
+  border-radius: 2px; padding: 1px 5px; margin-right: 8px; vertical-align: 2px; }
+.v-tag.refused { color: var(--loss); }
+.v-tag.here { color: var(--graphite); margin: 0 0 0 8px; }
+.v-siren { background: color-mix(in srgb, var(--flagsmith) 6%, var(--sheet)); }
+.v-siren .v-mark svg { width: 18px; height: 18px; margin-left: -1px; }
+.v-siren-line { display: flex; align-items: center; gap: 6px; font-size: 14px; line-height: 20px; color: var(--ink); }
+.v-siren-line b { color: var(--flagsmith); }
+.v-refusal .v-title { color: var(--ink); }
+.v-here { box-shadow: inset 3px 0 0 var(--ink); }
+.v-fires .v-title { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.v-cf { font-size: 14px; line-height: 20px; color: var(--ink); }
+.v-watch .v-title { color: var(--graphite); font-weight: 500; }
+@media (max-width: 639px) {
+  .voyage-list li { grid-template-columns: 22px 1fr; padding: 10px 12px; }
+  .voyage-list li::before { left: 22px; }
+  .v-when { grid-column: 2; text-align: left; line-height: 16px; }
+}
+/* overview strip */
+.voyage-strip { background: var(--sheet); border: 1px solid var(--rule); }
+.strip { list-style: none; margin: 0; padding: 0; display: flex; overflow-x: auto; border-bottom: 1px solid var(--rule); }
+.strip li { flex: 1 0 104px; border-right: 1px solid var(--hairline); }
+.strip li:last-child { border-right: 0; }
+.strip a { display: grid; gap: 2px; padding: 10px 12px; color: var(--ink); text-decoration: none; height: 100%; }
+.strip a:hover { background: color-mix(in srgb, var(--contract) 7%, var(--sheet)); }
+.s-k { font: 600 11px/14px var(--f-ui); letter-spacing: .08em; text-transform: uppercase; color: var(--graphite); }
+.s-mark svg { width: 16px; height: 16px; display: block; }
+.s-word { font: 600 14px/18px var(--f-ui); }
+.s-ctw { font-size: 13px; color: var(--graphite); }
+.s-ref { font: 600 11px/14px var(--f-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--loss); }
+.s-siren { background: color-mix(in srgb, var(--flagsmith) 6%, var(--sheet)); }
+.s-win .s-word { color: var(--win); } .s-loss .s-word { color: var(--loss); }
+.s-unbound { box-shadow: inset 0 -3px 0 var(--graphite); }
+.strip-sum { padding: 10px 14px; font-size: 14px; line-height: 21px; color: var(--ink); }
+.two-voy { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--graphite); }
+/* behind the reading */
+.behind-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; background: var(--sheet); border: 1px solid var(--rule); }
+.behind-grid > div { padding: var(--s-4) var(--s-5); }
+.behind-grid > div + div { border-left: 1px solid var(--rule); }
+.z-details { margin-top: var(--s-3); }
+.z-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 8px 0 0; font-size: 14px; line-height: 20px; }
+.z-list dt { color: var(--graphite); }
+.z-list dd { margin: 0; color: var(--ink); }
+.z-list .why { margin: 0; font-size: 15px; line-height: 22px; }
+@media (max-width: 639px) {
+  .behind-grid { grid-template-columns: 1fr; } .behind-grid > div + div { border-left: 0; border-top: 1px solid var(--rule); }
+  .z-list { grid-template-columns: 1fr; } .z-list dd { margin-bottom: 6px; }
+}
+/* the walkthrough line under the bell */
+.tour-bar { display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--rule);
+  background: var(--sheet); min-height: 52px; }
+.tour-text { font: 400 16px/22px var(--f-doc); color: var(--ink); max-width: 72ch; }
+.tour-text b { font-weight: 600; }
+.tour-text .siren-ic { margin-right: 4px; }
+.tour-btn { flex: none; font: 600 12px/1 var(--f-ui); letter-spacing: .06em; text-transform: uppercase; border: 1px solid var(--rule); border-radius: 2px;
+  background: transparent; color: var(--contract); padding: 8px 10px; cursor: pointer; min-height: 32px; }
+.tour-steps { display: flex; gap: 4px; flex: none; }
+.tour-steps i { width: 6px; height: 6px; background: var(--hairline); display: block; }
+.tour-steps i.on { background: var(--ink); }
+.plate[data-touring="true"] .chips { visibility: hidden; }
+svg.elevation .siren { fill: none; stroke: var(--flagsmith); stroke-width: 1.75px; }
+svg.elevation .siren-dot { fill: var(--flagsmith); }
+.chip.siren { border-color: var(--flagsmith); font: 500 12px/16px var(--f-ui); }
+.chip.siren svg, .chip.money svg { width: 12px; height: 12px; vertical-align: -2px; margin-right: 4px; }
+.verdict-meta .copy-btn { margin-left: 6px; }
+.tour-text svg { width: 14px; height: 14px; vertical-align: -2px; margin-right: 4px; display: inline-block; }
+@media (max-width: 639px) { .tour-steps { display: none; } .tour-text { font-size: 15px; line-height: 21px; } }

@@ -1,0 +1,75 @@
+{#- The voyage (the Siren Log): what happened to one experiment under contract, in order. Data from service/voyage.py. -#}
+
+{% macro siren_glyph(cls="siren-ic") -%}
+<svg class="{{ cls }}" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.5 14.5 8 8 14.5 1.5 8Z" fill="none" stroke="var(--flagsmith)" stroke-width="1.6"/><circle cx="8" cy="8" r="2" fill="var(--flagsmith)"/></svg>
+{%- endmacro %}
+
+{% macro mark(kind) -%}
+{%- if kind == "refusal" -%}<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.5" y="1.5" width="13" height="13" fill="var(--sheet)" stroke="var(--loss)" stroke-width="1.6"/><path d="M5 5l6 6M11 5l-6 6" stroke="var(--loss)" stroke-width="1.6"/></svg>
+{%- elif kind in ("signed", "tap") -%}<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.2" fill="var(--sheet)" stroke="var(--contract)" stroke-width="1.6"/><path d="M5 8.4l2 2 4-4.6" fill="none" stroke="var(--contract)" stroke-width="1.6"/></svg>
+{%- elif kind == "started" -%}<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4 2.5v11l9-5.5z" fill="var(--ink)"/></svg>
+{%- elif kind == "fired" -%}<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.2" fill="var(--sheet)" stroke="var(--ink)" stroke-width="2"/><circle cx="8" cy="8" r="2.6" fill="var(--ink)"/></svg>
+{%- elif kind == "executed" -%}<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.5" y="1.5" width="13" height="13" fill="var(--win)"/><path d="M4.6 8.3l2.3 2.3 4.6-5" fill="none" stroke="var(--sheet)" stroke-width="1.8"/></svg>
+{%- elif kind == "watch" -%}<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="4.5" fill="var(--sheet)" stroke="var(--ink)" stroke-width="1.3"/></svg>
+{%- else -%}<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="4.5" fill="var(--ink)"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
+{#- The full log for a card. `here`: this card's look id, so the row for it can say so. -#}
+{% macro voyage_full(v, here=none) -%}
+{%- if v and v.events %}
+<section class="after-grid voyage" id="voyage" aria-labelledby="voyage-h">
+  <div class="section-head">
+    <h2 id="voyage-h">The voyage</h2>
+    <p class="muted">Every step of this experiment under contract, in order: the looks, each request the service refused, the owner's tap.{% if v.sirens %} {{ siren_glyph() }} marks a siren: Flagsmith said Winning and the contract held.{% endif %}</p>
+  </div>
+  <div class="voyage-sum">
+    <p><b class="mono">{{ v.sirens | length }}</b> siren{{ 's' if v.sirens|length != 1 }}{% if v.sirens %} (look{{ 's' if v.sirens|length != 1 }} {{ v.sirens | join(', ') }}){% endif %} · <b class="mono">{{ v.refusals }}</b> request{{ 's' if v.refusals != 1 }} refused{% if v.tempted %}, <b class="mono">{{ v.tempted }}</b> of them right after a siren{% endif %}</p>
+    <p class="cf"><span class="cf-tag">Counterfactual, not something that happened</span> {{ v.counterfactual }} {{ v.contract_line }}</p>
+  </div>
+  {%- if v.watch %}
+  <label class="toggle"><input type="checkbox" data-toggle-refresh> Show refreshes that were not looks ({{ v.watch }})</label>
+  {%- endif %}
+  <ol class="voyage-list">
+    {%- for e in v.events %}
+    {%- set k = "watch" if e.kind == "look" and not e.counted else e.kind %}
+    <li class="v-{{ k }}{% if e.siren %} v-siren{% endif %}{% if e.current %} v-here{% endif %}{% if e.hidden %} refresh-row{% endif %}{% if e.fires %} v-fires{% endif %}" data-kind="{{ k }}">
+      <span class="v-mark">{% if e.siren %}{{ siren_glyph() }}{% else %}{{ mark(k) }}{% endif %}</span>
+      <div class="v-body">
+        <p class="v-title">
+          {%- if e.kind == "refusal" %}<span class="v-tag refused">Refused</span>{% endif -%}
+          {%- if e.kind == "look" and e.counted %}{% if e.look_id and not e.current %}<a href="/card/{{ e.look_id }}">{{ e.title }}</a>{% else %}{{ e.title }}{% endif %} · <span class="v-word" data-outcome="{{ e.outcome }}">{{ e.word }}</span>{% else %}{{ e.title }}{% endif -%}
+          {%- if e.current %} <span class="v-tag here">this card</span>{% endif -%}
+        </p>
+        <p class="v-detail">{{ e.detail }}</p>
+        {%- if e.siren %}<p class="v-siren-line">{{ siren_glyph() }}<b>Siren.</b> Flagsmith said Winning; the contract held.</p>{% endif %}
+        {%- if e.kind == "refusal" and e.after_siren %}<p class="v-note">Asked right after look {{ e.after_look }}, where Flagsmith said Winning.</p>{% endif %}
+        {%- if e.unbound %}<p class="v-cf"><span class="cf-tag">Counterfactual</span> An agent shipping at the first “Winning” would have shipped here.</p>{% endif %}
+      </div>
+      <span class="v-when">{{ e.when }}</span>
+    </li>
+    {%- endfor %}
+  </ol>
+</section>
+{%- endif %}
+{%- endmacro %}
+
+{#- One line per look for the overview: sirens, refusals, the counterfactual. -#}
+{% macro voyage_strip(v, href) -%}
+{%- if v and v.looks %}
+<div class="voyage-strip">
+  <ol class="strip" aria-label="Looks so far">
+    {%- for l in v.looks %}
+    <li class="s-{{ l.outcome }}{% if l.siren %} s-siren{% endif %}{% if l.unbound %} s-unbound{% endif %}">
+      <a href="/card/{{ l.look_id }}"><span class="s-k">Look {{ l.look_number }}</span>
+      <span class="s-mark">{% if l.siren %}{{ siren_glyph() }}{% else %}{{ mark('fired' if l.fires else 'look') }}{% endif %}</span>
+      <span class="s-word">{{ l.word }}</span>
+      <span class="s-ctw mono">{{ l.ctw or '–' }}</span>
+      {%- if l.refusals %}<span class="s-ref">{{ l.refusals }} refused</span>{% endif %}</a>
+    </li>
+    {%- endfor %}
+  </ol>
+  <p class="strip-sum"><b class="mono">{{ v.sirens | length }}</b> siren{{ 's' if v.sirens|length != 1 }} · <b class="mono">{{ v.refusals }}</b> request{{ 's' if v.refusals != 1 }} refused · <span class="cf-tag">Counterfactual</span> {{ v.counterfactual }} {{ v.contract_line }} <a href="{{ href }}#voyage">The voyage</a></p>
+</div>
+{%- endif %}
+{%- endmacro %}

@@ -45,6 +45,14 @@ export class Chips {
       const a = stage.getBoundingClientRect(), b = ctrl.getBoundingClientRect();
       placed.push({ x: b.left - a.left, y: b.top - a.top, w: b.width, h: b.height });
     }
+    // so do the axis labels ("BOLD AHEAD", "CONTROL AHEAD") pinned to the stage's left edge
+    if (stage) {
+      const a = stage.getBoundingClientRect();
+      for (const ax of stage.querySelectorAll(".plate-axis")) {
+        const b = ax.getBoundingClientRect();
+        if (b.width) placed.push({ x: b.left - a.left, y: b.top - a.top, w: b.width, h: b.height });
+      }
+    }
     const hit = (r) => placed.some((p) => r.x < p.x + p.w + 4 && r.x + r.w + 4 > p.x && r.y < p.y + p.h + 4 && r.y + r.h + 4 > p.y);
     // where the drawing is on screen: docked labels stay out of this box
     let top = h, bottom = 0;
@@ -119,6 +127,8 @@ export function flatProjector(stage) {
   };
 }
 
+export const SIREN_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 14.5 8 8 14.5 1.5 8Z" fill="none" stroke="var(--flagsmith)" stroke-width="1.6"/><circle cx="8" cy="8" r="2" fill="var(--flagsmith)"/></svg>';
+
 // Labels shared by the flat drawing and the 3D instrument.
 export function labelScene(scene, e, chips, { flat = false } = {}) {
   const dec = scene.decision;
@@ -136,7 +146,7 @@ export function labelScene(scene, e, chips, { flat = false } = {}) {
     const ring = e.rings.filter((r) => r.state !== 7).find((r) => r.k === dec.look_number);
     if (bead && dec.outcome === "hold" && dec.needs) {
       const top = bead.y >= 0 ? ring?.r ?? 0 : -(ring?.r ?? 0);
-      chips.set("dim", `has ${esc(dec.ctw)} · needs ${esc(dec.needs)} (z&nbsp;${esc(dec.bz_text)})`,
+      chips.set("dim", `has ${esc(dec.ctw)} · needs ${esc(dec.needs)}`,
         [bead.x + 0.2, (bead.y + top) / 2, 0], { align: "right", dx: 10, prio: 1 });
     }
     if (bead && scene.money) {
@@ -147,9 +157,20 @@ export function labelScene(scene, e, chips, { flat = false } = {}) {
         const [x0, y0] = run[i], [x1, y1] = run[i + 1];
         if ((Math.abs(y0) <= bannerY) !== (Math.abs(y1) <= bannerY) && Math.sign(y1) === Math.sign(y)) cx = x0 + ((y - y0) / (y1 - y0)) * (x1 - x0);
       }
-      chips.set("money", `<b>Flagsmith docs would call this ${scene.money}.</b> The contract holds.`, [cx, y, 0],
+      chips.set("money", (scene.money === "Winning" ? SIREN_SVG : "") + `<b>Flagsmith docs would call this ${scene.money}.</b> The contract holds.`, [cx, y, 0],
         { cls: "money", dock: scene.money === "Winning" ? "top" : "bottom", prio: 2 });
     }
+  }
+  // sirens: earlier looks where Flagsmith said Winning and the contract held (the current one has its own chip)
+  const sirens = (scene.history || []).filter((h) => h.siren && h.seq !== scene.current_seq);
+  if (sirens.length) {
+    const b = e.beads.find((x) => x.seq === sirens[0].seq);
+    const ks = sirens.map((h) => h.look_number).join(", ");
+    if (b && scene.money === "Winning" && chips.items.has("money")) {
+      const m = chips.items.get("money");
+      chips.set("money", m.html + ` Earlier siren${sirens.length > 1 ? "s" : ""}: look${sirens.length > 1 ? "s" : ""} ${esc(ks)}.`, m.anchor, { cls: "money", dock: m.dock, prio: 2 });
+    } else if (b) chips.set("siren", `${SIREN_SVG}Siren${sirens.length > 1 ? "s" : ""} at look${sirens.length > 1 ? "s" : ""} ${esc(ks)}: Flagsmith said Winning; the contract held`,
+      [b.x, b.y + 0.17, 0], { cls: "siren", dock: "top", prio: 3 });
   }
   if ((scene.kind === "sign" && !scene.proposed) || scene.kind === "example" || scene.kind === "calibration") {
     const fl = scene.first_look ?? (scene.planned || []).find((p) => p.z !== null)?.look;

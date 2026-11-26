@@ -30,9 +30,9 @@
   {%- if r.open and r.side %}
     {%- set gap = r.r * 0.6428 %}
     {%- if r.side > 0 %}
-  <line class="ring s{{ r.state }}" x1="{{ r.x }}" y1="{{ -gap }}" x2="{{ r.x }}" y2="{{ r.r }}" stroke-width="{{ w }}"/>
+  <line class="ring s{{ r.state }}" data-k="{{ r.k }}" x1="{{ r.x }}" y1="{{ -gap }}" x2="{{ r.x }}" y2="{{ r.r }}" stroke-width="{{ w }}"/>
     {%- else %}
-  <line class="ring s{{ r.state }}" x1="{{ r.x }}" y1="{{ -r.r }}" x2="{{ r.x }}" y2="{{ gap }}" stroke-width="{{ w }}"/>
+  <line class="ring s{{ r.state }}" data-k="{{ r.k }}" x1="{{ r.x }}" y1="{{ -r.r }}" x2="{{ r.x }}" y2="{{ gap }}" stroke-width="{{ w }}"/>
     {%- endif %}
   {%- else %}
   <line class="ring s{{ r.state }}{% if dim %} dim{% endif %}" data-k="{{ r.k }}" x1="{{ r.x }}" y1="{{ -r.r }}" x2="{{ r.x }}" y2="{{ r.r }}" stroke-width="{{ w }}"{% if r.state == 6 %} stroke-dasharray="0.12 0.1"{% elif r.state == 7 %} stroke-dasharray="0.04 0.06"{% endif %}/>
@@ -51,6 +51,7 @@
     {%- elif bd.kind in ("hollow", "current-hollow") %}<circle class="hollow" cx="{{ bd.x }}" cy="{{ -bd.y }}" r="0.07" vector-effect="non-scaling-stroke"/>
     {%- else %}<circle class="hollow" cx="{{ bd.x }}" cy="0" r="0.07" vector-effect="non-scaling-stroke"/>
     {%- endif %}
+    {%- if bd.siren and not glyph %}<path class="siren" data-seq="{{ bd.seq }}" d="M{{ bd.x }} {{ -bd.y - 0.17 }} L{{ bd.x + 0.17 }} {{ -bd.y }} L{{ bd.x }} {{ -bd.y + 0.17 }} L{{ bd.x - 0.17 }} {{ -bd.y }} Z" vector-effect="non-scaling-stroke"/>{% endif %}
   {%- endfor %}
 </svg>
 {%- endmacro %}

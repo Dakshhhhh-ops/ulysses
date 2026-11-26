@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_elevation.html" import plate, glyph, legend_key %}
+{% from "_voyage.html" import voyage_strip, siren_glyph %}
 {% set nav = "home" %}
 {% set source = hero.source if hero else none %}
 {% block title %}Experiments under contract · Ulysses{% endblock %}
@@ -52,6 +53,12 @@
     </div>
   </aside>
 </div>
+{%- if hero.voyage and hero.voyage.looks %}
+<section class="after-grid" aria-labelledby="voy-h">
+  <div class="section-head"><h2 id="voy-h">The voyage · experiment {{ s.experiment }}</h2><p class="muted">Each look, the sirens ({{ siren_glyph() }} Flagsmith said Winning, the contract held) and the requests refused after them.</p></div>
+  {{ voyage_strip(hero.voyage, "/card/" ~ d.look.id) }}
+</section>
+{%- endif %}
 {%- elif hero.sign %}
 {%- set sc = hero.scene %}
 <div class="grid-12">
@@ -93,6 +100,7 @@
       <span class="two-word">{{ WORDS.get(c.look.outcome, c.look.outcome) }}</span>
       <span class="two-nums"><span><span class="label">Flagsmith</span><b class="mono">{{ c.look.ctw or '–' }}</b></span><span><span class="label">Contract needs</span><b class="mono">{{ c.look.needs or '–' }}</b>{% if c.look.needs %}<small class="mono"> z {{ c.look.bz }}</small>{% endif %}</span></span>
       <span class="two-foot">{% if c.source %}<span class="chip-src" data-sim="{{ 'true' if c.source.simulated else 'false' }}" style="font-size:11px;padding:2px 6px">{% if c.source.simulated %}<span class="sw" aria-hidden="true"></span>{% endif %}{{ c.source.chip }}</span>{% endif %}{{ glyph(c.glyph) }}</span>
+      {%- if c.voyage and (c.voyage.sirens or c.voyage.refusals) %}<span class="two-voy">{% if c.voyage.sirens %}{{ siren_glyph() }}<b class="mono">{{ c.voyage.sirens | length }}</b> siren{{ 's' if c.voyage.sirens|length != 1 }}{% endif %}{% if c.voyage.sirens and c.voyage.refusals %} · {% endif %}{% if c.voyage.refusals %}<b class="mono">{{ c.voyage.refusals }}</b> refused{% endif %}</span>{% endif %}
       {%- if c.deviations %}<span class="dev-flag">{{ c.deviations | length }} change{{ 's' if c.deviations|length != 1 }} outside the contract</span>{% endif %}
     </a>
     {%- endfor %}

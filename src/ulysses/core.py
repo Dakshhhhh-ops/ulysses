@@ -1288,6 +1288,7 @@ class Ulysses:
         c, row = self._governing(p)
         auto = self._autonomous(p)
         if p["state"] not in ("confirmed", "failed"):
+            self.store.log_refusal("execute", "waiting for the owner's one-tap confirmation", h, self.clock())
             raise Refused("waiting for the owner's one-tap confirmation",
                           confirm_url=self.link(f"/card/{p['look_id'] or p['id']}", h))
         if not self._fully_signed(c, h):

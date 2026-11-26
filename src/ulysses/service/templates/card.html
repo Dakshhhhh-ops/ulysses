@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "_elevation.html" import plate, legend_key, icon %}
 {% from "_parts.html" import deviation_record, guardrail_table, signer_block %}
+{% from "_voyage.html" import voyage_full, siren_glyph %}
 {% set nav = "home" %}
 {% set s = d.contract.summary %}
 {% block title %}{% if d.kind == 'look' %}{{ scene.decision.word }} · experiment {{ s.experiment }}{% else %}Amendment · experiment {{ s.experiment }}{% endif %} · Ulysses{% endblock %}
@@ -16,6 +17,9 @@
     <span class="state-chip" data-s="{{ p.state }}">{{ p.state | state_word }}</span>
   </div>
   <p class="action-text">{% if p.action == 'ship_treatment' %}Complete experiment {{ s.experiment }} and serve <code>{{ arm_t }}</code> to everyone on <code>{{ s.flag }}</code>.{% else %}Complete experiment {{ s.experiment }} and keep serving <code>{{ arm_c }}</code> on <code>{{ s.flag }}</code>.{% endif %}</p>
+  {%- if p.authorised_text %}
+  <p class="key-note">{{ p.authorised_text }}</p>
+  {%- endif %}
   {%- if p.result %}
   <p class="result" role="status"><span>Flag <code>{{ p.result.flag }}</code> now serves <code>{{ p.result.serving }}</code>.</span></p>
   {%- endif %}
@@ -47,6 +51,7 @@
 {%- set err = sc.flagsmith_missing -%}
 {%- set outcome = 'error' if err else dec.outcome -%}
 {%- set needs = sc.decision.needs -%}
+{%- set sirens_by_seq = (voyage.events | selectattr("siren") | map(attribute="seq") | list) if voyage else [] -%}
 {%- set late = k and sc.decision.planned_t is not none and (sc.decision.t - sc.decision.planned_t)|abs > 0.002 -%}
 
 <section class="verdict" data-outcome="{{ outcome }}" aria-labelledby="verdict-word">
@@ -57,7 +62,7 @@
     </div>
     <div class="verdict-meta">
       <span>{% if k %}LOOK {{ k }} OF {{ N }}{% else %}REFRESH {{ d.look.seq }} · NOT A LOOK{% endif %}</span>
-      <span>CONTRACT <a href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a></span>
+      <span>CONTRACT <a class="mono" href="/sign/{{ d.contract.hash }}" data-copy-src>{{ d.contract.hash | short }}</a><button type="button" class="copy-btn" data-copy="{{ d.contract.hash }}">Copy</button></span>
       {%- if later %}<span data-later-id="{{ later.id }}"><a href="/card/{{ later.id }}">A later look exists: refresh {{ d.history[-1].seq }}</a></span>
       {%- elif not dec.fires %}<span hidden data-poll="/card/{{ ident }}"></span>{% endif %}
     </div>
@@ -68,22 +73,21 @@
   {%- elif outcome == 'hold' and srm_d and srm_d.blocks_win and dec.boundary_z and dec.z is not none and dec.z >= dec.boundary_z -%}
     The win boundary is crossed, but the traffic split is broken: Flagsmith's exposure counts do not fit the signed split (chi-square p&nbsp;{{ '%.2g' | format(srm_d.p_value) }}, below the signed {{ srm_d.threshold }}). The contract holds and ships nothing while the arms are not comparable.
   {%- elif outcome == 'hold' -%}
-    Flagsmith chance to win {{ sc.decision.ctw }}; the contract needs {{ needs }} (z&nbsp;{{ sc.decision.bz_text }}) at look {{ k }} of {{ N }}.
+    Flagsmith says {{ sc.decision.ctw }} chance to win. At look {{ k }} of {{ N }} the contract needs {{ needs }} to ship, so it holds and nothing ships.{% if sc.money == 'Winning' %} Flagsmith's docs would call this Winning: a siren the contract does not follow.{% endif %}
   {%- elif outcome == 'watch' -%}
     This refresh is not a look. The next look is at {{ dec.next_look_at_identities | count }} identities per arm{% if sc.decision.ctw %}; Flagsmith reads {{ sc.decision.ctw }} now and the contract does not act on it{% endif %}.
   {%- elif outcome == 'not_ready' -%}
     Flagsmith reports a chance to win once each arm has 50 identities (and 5 conversions for occurrence metrics). Next look at {{ dec.next_look_at_identities | count }} per arm.
   {%- elif outcome == 'win' -%}
-    Flagsmith chance to win {{ sc.decision.ctw }} crossed the contract's {{ needs }} (z&nbsp;{{ sc.decision.bz_text }}) at look {{ k }} of {{ N }}.
+    Flagsmith says {{ sc.decision.ctw }} chance to win, past the {{ needs }} the contract needs at look {{ k }} of {{ N }}. The contract fires its pre-signed action.
   {%- elif outcome == 'loss' -%}
-    Flagsmith chance to win {{ sc.decision.ctw }} fell below the contract's {{ dec.boundary_chance | bloss(dec.boundary_z) }} (z&nbsp;−{{ sc.decision.bz_text }}) at look {{ k }} of {{ N }}.
+    Flagsmith says {{ sc.decision.ctw }} chance to win, below the {{ dec.boundary_chance | bloss(dec.boundary_z) }} at which the contract calls a loss at look {{ k }} of {{ N }}. The contract keeps control.
   {%- elif outcome == 'horizon' -%}
     The horizon of {{ sc.contract.horizon | count }} identities per arm is reached without crossing the boundary.
   {%- elif outcome == 'guardrail_breach' -%}
     {{ dec.reason }}
   {%- endif -%}
   </p>
-  <details><summary>Why, in the engine's words</summary><p class="why">{{ dec.reason }}</p></details>
 </section>
 
 {% if p %}{{ action_panel(p) }}{% endif %}
@@ -109,11 +113,11 @@
           <span class="key">{{ legend_key("banner") }}Flagsmith docs: over 95% reads as Winning, under 5% as Losing</span>
           <span class="key">{{ legend_key("thread") }}Flagsmith chance to win, as z</span>
           <span class="key">{{ legend_key("hollow") }}Refresh, not a look</span>
+          {%- if voyage and voyage.sirens %}<span class="key">{{ siren_glyph("legend-siren") }}Siren: Flagsmith said Winning, the contract held</span>{% endif %}
         </div>
         <div class="title-block">
           <div><b>EXP</b> {{ s.experiment }} · {{ s.flag }}</div>
           <div><b>LOOK</b> {% if k %}{{ k }} / {{ N }}{% else %}– / {{ N }}{% endif %}</div>
-          <div><b>CONTRACT</b> <span class="mono" data-copy-src>{{ (d.contract.hash.split(':')[-1])[:12] }}</span><button type="button" class="copy-btn" data-copy="{{ d.contract.hash }}">Copy</button></div>
           <div>{{ sc.source.chip | upper }}</div>
         </div>
       </div>
@@ -126,48 +130,74 @@
   </div>
 
   <aside class="col-4 readout" aria-busy="false" aria-label="Readout">
-    <div class="readout-pair">
-      <div>
-        <p class="label read-key">{{ legend_key("thread") }}Flagsmith says</p>
-        <p class="big flag">{% if sc.decision.ctw %}{{ sc.decision.ctw }}{% elif err %}<span class="big long">no results</span>{% else %}<span class="big long">collecting data</span>{% endif %}</p>
-        {%- if sc.decision.ctw %}<p class="read-line">chance to win on <span class="mono">{{ metric }}</span> · z <span class="mono">{{ sc.decision.z_text }}</span></p>{% endif %}
-        {%- if lift %}<p class="read-line">lift <span class="mono">{{ lift }}</span> {{ arm_t }} over {{ arm_c }}</p>{% endif %}
-        {%- if arms_n %}<p class="read-line">n {% for a, n in arms_n.items() %}{{ a }} <span class="mono">{{ n | count }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
-      </div>
-      <div>
-        <p class="label read-key">{{ legend_key("contract") }}Contract needs</p>
-        {%- if needs %}
-        <p class="big{% if needs|length > 10 %} long{% endif %}">{{ needs }}<small>z {{ sc.decision.bz_text }}</small></p>
-        {%- elif dec.counted %}
-        <p class="big long">no stop possible</p>
-        {%- else %}
-        <p class="big long">not a look</p>
-        {%- endif %}
-        <p class="read-line">{% if k %}look {{ k }} of {{ N }} · <span class="mono">{{ dec.identities_per_arm | count }}</span> per arm{% else %}<span class="mono">{{ dec.identities_per_arm | count }}</span> per arm so far{% endif %}</p>
-        {%- if dec.next_look_at_identities %}<p class="read-line">next look at <span class="mono">{{ dec.next_look_at_identities | count }}</span> per arm</p>{% endif %}
-        {%- if dec.counted and dec.boundary_z %}<p class="read-line">a loss is called below <span class="mono">{{ dec.boundary_chance | bloss(dec.boundary_z) }}</span></p>{% endif %}
-      </div>
+    <div>
+      <p class="label read-key">{{ legend_key("thread") }}Flagsmith says</p>
+      <p class="big flag">{% if sc.decision.ctw %}{{ sc.decision.ctw }}{% elif err %}<span class="big long">no results</span>{% elif outcome == 'watch' %}<span class="big long">withheld</span>{% else %}<span class="big long">collecting data</span>{% endif %}</p>
+      {%- if sc.decision.ctw %}<p class="read-line">chance to win on <span class="mono">{{ metric }}</span>{% if lift %} · lift <span class="mono">{{ lift }}</span> {{ arm_t }} over {{ arm_c }}{% endif %}</p>{% elif outcome == 'watch' %}<p class="read-line">between looks the contract withholds Flagsmith's numbers</p>{% endif %}
+      {%- if sc.money == 'Winning' %}<p class="read-line siren-line">{{ siren_glyph() }}Flagsmith's docs would call this Winning</p>{% endif %}
     </div>
     <div>
-      <p class="label">Source</p>
-      <p class="read-line" style="color:var(--ink)">{{ sc.source.chip }}{% if sc.source.detail %}: {{ sc.source.detail }}{% endif %}</p>
-      {%- if results_age %}<p class="read-line">Flagsmith's results were {{ results_age }}.</p>{% endif %}
-      {%- if srm_d %}<p class="read-line"{% if srm_d.blocks_win %} style="color:var(--loss)"{% endif %}>Sample ratio against the signed split: {% if srm_d.state == 'too_few' %}not tested yet ({{ srm_d.total | count }} identities, under the signed minimum){% else %}chi-square p <span class="mono">{{ '%.4g' | format(srm_d.p_value) }}</span>, {% if srm_d.blocks_win %}mismatch: a win is held{% else %}within the signed threshold {{ srm_d.threshold }}{% endif %}{% endif %}</p>{% endif %}
-      <p class="read-line">Flagsmith's own SRM: {% if d.flagsmith and d.flagsmith.srm_p_value is not none %}p <span class="mono">{{ '%.4f' | format(d.flagsmith.srm_p_value) }}</span>{% else %}not computed by Flagsmith for this experiment{% endif %}</p>
-      {%- if guardrail_rows %}<p class="read-line">Guardrails: {% for g in guardrail_rows %}<span class="mono">{{ g.label }}</span> {{ {'breach': 'breached', 'pass': 'within rule', 'none': 'no reading yet'}[g.state] }}{% if not loop.last %}; {% endif %}{% endfor %}. <a href="#gr-h">Details</a></p>{% endif %}
+      <p class="label read-key">{{ legend_key("contract") }}Contract needs</p>
+      {%- if needs %}
+      <p class="big{% if needs|length > 10 %} long{% endif %}">{{ needs }}</p>
+      {%- elif dec.counted %}
+      <p class="big long">no stop possible</p>
+      {%- else %}
+      <p class="big long">not a look</p>
+      {%- endif %}
+      <p class="read-line">{% if k %}to ship at look {{ k }} of {{ N }} · <span class="mono">{{ dec.identities_per_arm | count }}</span> per arm{% else %}<span class="mono">{{ dec.identities_per_arm | count }}</span> per arm so far{% endif %}</p>
+      {%- if dec.next_look_at_identities %}<p class="read-line">next look at <span class="mono">{{ dec.next_look_at_identities | count }}</span> per arm</p>{% endif %}
+    </div>
+    <div>
+      <p class="label">Verdict</p>
+      <p class="verdict-short" data-outcome="{{ outcome }}">{% if err %}No reading{% else %}{{ SHORT.get(outcome, outcome) }}{% endif %}</p>
+      <p class="read-line">{% if err %}retried at the next look{% elif outcome in ('hold', 'watch', 'not_ready') %}nothing ships{% elif p and p.state == 'executed' %}{{ (arm_t if outcome == 'win' else arm_c) }} now served to everyone{% elif outcome == 'win' %}ship {{ arm_t }} after the owner's tap{% elif p %}keep {{ arm_c }} after the owner's tap{% else %}keep {{ arm_c }}{% endif %}</p>
       {%- if deviations %}<p class="read-line" style="color:var(--loss)">{{ deviations | length }} change{{ 's' if deviations|length != 1 }} outside the contract. <a href="#deviations">See below</a></p>{% endif %}
     </div>
   </aside>
 </div>
 
+{{ voyage_full(voyage) }}
+
+<section class="after-grid behind" aria-labelledby="behind-h">
+  <div class="section-head"><h2 id="behind-h">Behind this reading</h2><p class="muted">Where the numbers came from and the checks the contract ran.</p></div>
+  <div class="behind-grid">
+    <div>
+      <p class="label">Source</p>
+      <p class="read-line" style="color:var(--ink)">{{ sc.source.chip }}{% if sc.source.detail %}: {{ sc.source.detail }}{% endif %}</p>
+      {%- if results_age %}<p class="read-line">Flagsmith's results were {{ results_age }}.</p>{% endif %}
+      {%- if arms_n %}<p class="read-line">Identities: {% for a, n in arms_n.items() %}{{ a }} <span class="mono">{{ n | count }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+    </div>
+    <div>
+      <p class="label">Checks</p>
+      {%- if srm_d %}<p class="read-line"{% if srm_d.blocks_win %} style="color:var(--loss)"{% endif %}>Sample ratio against the signed split: {% if srm_d.state == 'too_few' %}not tested yet ({{ srm_d.total | count }} identities, under the signed minimum){% else %}chi-square p <span class="mono">{{ '%.4g' | format(srm_d.p_value) }}</span>, {% if srm_d.blocks_win %}mismatch: a win is held{% else %}within the signed threshold {{ srm_d.threshold }}{% endif %}{% endif %}</p>{% endif %}
+      <p class="read-line">Flagsmith's own SRM: {% if d.flagsmith and d.flagsmith.srm_p_value is not none %}p <span class="mono">{{ '%.4f' | format(d.flagsmith.srm_p_value) }}</span>{% else %}not computed by Flagsmith for this experiment{% endif %}</p>
+      {%- if guardrail_rows %}<p class="read-line">Guardrails: {% for g in guardrail_rows %}<span class="mono">{{ g.label }}</span> {{ g.word }}{% if not loop.last %}; {% endif %}{% endfor %}. <a href="#gr-h">Details</a></p>{% endif %}
+      {%- if dec.counted and dec.boundary_z %}<p class="read-line">A loss is called below <span class="mono">{{ dec.boundary_chance | bloss(dec.boundary_z) }}</span> at this look.</p>{% endif %}
+    </div>
+  </div>
+  <details class="z-details"><summary>The same numbers as z, and the engine's reasoning</summary>
+    <dl class="z-list">
+      {%- if sc.decision.ctw %}<dt>Flagsmith, as z</dt><dd class="mono">{{ sc.decision.z_text }}</dd>{% endif %}
+      {%- if dec.boundary_z %}<dt>Contract boundary at this look</dt><dd class="mono">z {{ sc.decision.bz_text }} to ship · z −{{ sc.decision.bz_text }} for a loss</dd>{% endif %}
+      {%- if alpha %}<dt>Error budget</dt><dd>{{ alpha.text }}</dd>{% endif %}
+      <dt>The engine's reason</dt><dd class="why">{{ dec.reason }}</dd>
+    </dl>
+  </details>
+</section>
+
 {{ guardrail_table(guardrail_rows) }}
 {{ deviation_record(deviations) }}
 
+{%- set n_refresh = d.history | rejectattr("counted") | rejectattr("seq", "equalto", d.look.seq) | list | length %}
 <section class="after-grid" aria-labelledby="looks-h">
   <div class="section-head">
     <h2 id="looks-h">Every look so far</h2>
-    <p class="muted">Rows are refreshes of Flagsmith's results. Only scheduled ones are looks.</p>
+    <p class="muted">Only scheduled refreshes of Flagsmith's results are looks.{% if n_refresh %} Refreshes between looks are hidden unless you show them.{% endif %}</p>
   </div>
+  {%- if n_refresh %}
+  <label class="toggle"><input type="checkbox" data-toggle-refresh> Show refreshes that were not looks ({{ n_refresh }})</label>
+  {%- endif %}
   <div class="table-wrap sticky-first" role="region" aria-label="Table of every look, scrollable" tabindex="0">
   <table data-looks>
     <thead><tr><th scope="col">Refresh</th><th scope="col">Look</th><th scope="col" class="num">Per arm</th><th scope="col" class="num">Flagsmith chance to win</th><th scope="col" class="num">Contract needs</th>{% if guardrails %}<th scope="col" class="num">Guardrail: chance worse</th>{% endif %}<th scope="col">Result</th></tr></thead>
@@ -175,20 +205,20 @@
     {%- for x in d.history %}
     {%- set lk = look_numbers.get(x.seq) %}
     {%- set say -%}{% if lk %}Look {{ lk }} of {{ N }}{% else %}Refresh {{ x.seq }}, not a look{% endif %}: Flagsmith {{ x.chance_to_win | ctw if x.chance_to_win is not none else "no result yet" }}{% if x.boundary_z is not none %}, contract {{ x.boundary_chance | bchance(x.boundary_z) }}{% endif %}, {{ SHORT.get(x.outcome, x.outcome) | lower }}.{%- endset %}
-      <tr tabindex="0" data-seq="{{ x.seq }}" data-say="{{ say }}" data-out="{% if lk %}Look {{ lk }} of {{ N }}{% else %}Refresh {{ x.seq }} · not a look{% endif %}" class="{% if x.seq == d.look.seq %}current{% elif x.seq > d.look.seq %}later{% endif %}">
+      <tr tabindex="0" data-seq="{{ x.seq }}" data-say="{{ say }}" data-out="{% if lk %}Look {{ lk }} of {{ N }}{% else %}Refresh {{ x.seq }} · not a look{% endif %}" class="{% if x.seq == d.look.seq %}current{% elif x.seq > d.look.seq %}later{% endif %}{% if not x.counted and x.seq != d.look.seq %} refresh-row{% endif %}">
         <td class="num" style="text-align:left">{{ x.seq }}</td>
         <td>{% if lk %}{{ lk }} of {{ N }}{% else %}<span class="muted">(not a look)</span>{% endif %}</td>
         <td class="num">{{ x.identities_per_arm | count }}</td>
         <td class="num">{% if x.chance_to_win is not none %}{{ x.chance_to_win | ctw }} <span class="cell-z">z {{ x.z | zval }}</span>{% else %}<span class="muted">no result yet</span>{% endif %}</td>
         <td class="num">{% if x.boundary_z is not none %}{{ x.boundary_chance | bchance(x.boundary_z) }} <span class="cell-z">z {{ x.boundary_z | zval }}</span>{% elif x.counted %}<span class="muted">no stop possible</span>{% else %}<span class="muted">–</span>{% endif %}</td>
         {%- if guardrails %}<td class="num">{% for g in guardrails_by_seq.get(x.seq, []) %}{% if g.worse %}{{ g.worse }}{% else %}<span class="muted">no result</span>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</td>{% endif %}
-        <td>{{ SHORT.get(x.outcome, x.outcome) }}{% if x.seq > d.look.seq %} <a href="/card/{{ later.id if later else '' }}" class="muted">(later)</a>{% endif %}</td>
+        <td>{% if x.seq in sirens_by_seq %}<span role="img" aria-label="Siren:">{{ siren_glyph() }}</span> {% endif %}{{ SHORT.get(x.outcome, x.outcome) }}{% if x.seq > d.look.seq %} <a href="/card/{{ later.id if later else '' }}" class="muted">(later)</a>{% endif %}</td>
       </tr>
     {%- endfor %}
     </tbody>
   </table>
   </div>
-  <p class="footnote">Contract <a class="mono" href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a> · {{ s.boundary }} · {{ s.horizon }}.{% if results_age %} Flagsmith's results were {{ results_age }}.{% endif %} A loss is called at the mirror image of each boundary.</p>
+  <p class="footnote">{{ s.boundary }} · {{ s.horizon }}. A loss is called at the mirror image of each boundary.</p>
 </section>
 
 {% elif d.origin == 'look' %}
