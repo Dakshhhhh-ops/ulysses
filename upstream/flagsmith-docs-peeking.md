@@ -14,18 +14,18 @@ The statistics glossary (`docs/docs/experimentation/statistics.md`, "Why Bayesia
 
 That is true of the chance to beat control as a description of the evidence at the moment you read it. It is not true of a decision rule a reader is likely to take from the same page: stop and ship once the chance to beat control is over 95% (the glossary's "Winning"). `compare_to_control` in `api/experimentation/stats.py` computes `chance_to_win = Phi(lift / SE)` with the delta-method SE and a flat prior, so stopping the first time it crosses 95% is a repeated one-sided z-test, and the false-call rate grows with the number of looks.
 
-What we measured with the engine unmodified (`stats.py` loaded by hash, the 50-identity and 5-conversion floors applied):
+What we measured with the engine unmodified (`stats.py` loaded by hash, the 50-identity and 5-conversion floors applied). The first figure in each line is the one that matters for shipping: how often a variation that does nothing would have been shipped.
 
-- Offline, 2,000 simulated A/A experiments, 30 looks of 100 synthetic identities per arm, 10% conversion in both arms: stopping at the first look over 95% or under 5% made a false call in 45.0% of experiments (14.1% false over-95%). Reading once at the end: 9.3%.
-- Live, on a self-hosted instance, 60 A/A experiments with synthetic identities assigned by the engine through the Python SDK and read back from the results endpoint, 8 looks five minutes apart: 21.7% (13 of 60) against 6.7% reading once at the end. Synthetic identities, not user traffic.
+- Offline, simulated A/A experiments, 30 looks of 100 synthetic identities per arm, 10% conversion in both arms: stopping at the first look over 95% shipped a do-nothing variation in [pending: `ulysses calibrate offline`] of them, against [pending] when reading once at the end. Counting false "Losing" calls as well, [pending] made some false call. False Losing runs higher than false Winning at these counts because the delta-method z on relative lift is skewed when conversions are few, not only because of peeking.
+- Live, on a self-hosted instance, A/A experiments with synthetic identities assigned by the engine through the Python SDK and read back from the results endpoint: [pending: `ulysses calibrate summarise <trace>`, with the batch size and its interval]. At this sample size the live false-Winning rate alone may not be distinguishable from 5%; the offline run is the precise one.
 
-Scripts to reproduce both: <repository link> (`ulysses calibrate offline`, `ulysses calibrate live`).
+Scripts to reproduce both: https://github.com/Dakshhhhh-ops/ulysses (`ulysses calibrate offline`, `ulysses calibrate live`).
 
-A related detail we noticed in the dashboard: the "Winning variation" card names the variant with the highest chance as soon as inference exists, with no 95% threshold (`frontend/web/components/experiments/results/derive.ts`), so the 95% rule lives only in the docs.
+A smaller related point, from reading the source rather than the running dashboard: the "Winning variation" card names the variant with the highest chance to be best, shown next to that chance, as soon as inference exists (`getWinningVariant` in `frontend/web/components/experiments/results/derive.ts`). A reader who wants the 95% rule applies it themselves.
 
 Suggested wording for the note: "The chance to beat control is a fair summary of the evidence whenever you look. If you plan to stop the experiment as soon as it passes 95%, decide the sample size and the stopping rule before you start; otherwise checking often will produce more false winners than the 95% suggests."
 
-Happy to open a docs PR with that wording. We also built a small tool that keeps the engine as it is and adds a pre-signed stopping boundary on top (<repository link>), in case it is a useful reference.
+Happy to open a docs PR with that wording. We also built a small tool that keeps the engine as it is and adds a pre-signed stopping boundary on top (https://github.com/Dakshhhhh-ops/ulysses), in case it is a useful reference.
 
 ---
 
