@@ -8,6 +8,51 @@ How often does that ship a variation that does nothing? We ran Flagsmith's own s
 
 Ulysses had himself tied to the mast before the ship came within earshot of the sirens. Here the experiment's owner signs the stop rule before any data exists, and the agent that runs the experiment can ship only when that signed rule fires and the owner taps confirm.
 
+![Two Ships: the same 100 identical A/A experiments run by an agent that ships at the first Winning (12 shipped a do-nothing variation) and by an agent under a signed Ulysses contract (3)](docs/screenshots/two-ships.png)
+
+*The calibration page. Every variation in these 100 experiments does nothing, so every red ship is a change that would have gone live for no reason. Counts from `data/paths-offline.json`, rates from `data/offline.json`, both written by `uv run ulysses calibrate offline`; simulated identities on Flagsmith's own `stats.py`, not user traffic.*
+
+## The agent tried to ship. Twice.
+
+We let the scripted agent behave the way a hurried person does: whenever a look comes back HOLD while Flagsmith reads 95% or more, it says "Flagsmith says Winning. Shipping." and calls `execute`. This is a recorded live run on self-hosted Flagsmith with synthetic identities (`data/replay-tempted.jsonl`):
+
+| Look | Flagsmith says `bold` wins | Contract needs | What the agent did | What Ulysses said |
+|---|---|---|---|---|
+| 3 | 97.39% | 99.57% | `execute ship_treatment` | 403: no look has fired this contract, so nothing authorises 'ship_treatment' |
+| 4 | 96.47% | 98.75% | `execute ship_treatment` | 403, same reason |
+| 5 (last) | 91.91% | 98.01% | | planned size reached: keep control, as signed |
+
+Flagsmith's docs would have called `bold` Winning at both sirens. At look 3 the same Flagsmith results gave the refund guardrail a 5.83% chance that `bold` lowers refunds, so about a 94% chance that it raises them. An agent shipping at the first "Winning" would have shipped that to everyone. Under the contract it shipped nothing, and the card shows every step:
+
+![The voyage on a decision card: looks 3 and 4 marked as sirens, the agent's refused ship requests right after each, and the counterfactual line saying where an agent shipping at the first Winning would have shipped](docs/screenshots/voyage.png)
+
+```sh
+uv run python scripts/judge_demo.py --replay data/replay-tempted.jsonl --open
+# 12 of 12 recorded decisions recomputed identically by this checkout's engine; 0 event(s) did not reproduce
+# 6 of 6 recorded refusals refused again for the recorded reason (2 on Flagsmith's 'Winning' reading, 95% or more, while the contract held)
+```
+
+The first time you open a card it walks you through the bell: the bar starts high at look 1 and lowers with each look, the dashed line is Flagsmith's 95%, and each siren is named as Flagsmith's line reaches it (`?tour=0` skips it).
+
+![The walk-through on the look 3 card, replayed: the bell's rings lower look by look, Flagsmith's line reaches look 3, and the caption reads: Look 3: a siren. Flagsmith says 97.39%, which its docs call Winning. The contract needs 99.57%, so it holds.](docs/screenshots/tour.png)
+
+## Where the agent stops to ask a person
+
+The owner decides that inside the signed contract, before the experiment starts:
+
+```toml
+[autonomy]
+without_confirmation = ["keep_control"]
+```
+
+With that clause the agent rolls back on its own when a guardrail breaks, the experiment loses or it reaches its planned size: keeping control changes nothing for users, and a harmful variation should stop at night without waking anyone. Shipping is never on that list. A contract that names `ship_treatment` is rejected when it is drafted, so putting a variation in front of everyone always waits for the owner's signed tap. Changing the clause is an amendment and needs both signers. Every executed action records which of the two authorised it, and `ulysses verify` fails an autonomous action the clause does not list.
+
+## What is new here, and what is not
+
+Sequential testing is not new: Optimizely, Statsig, GrowthBook and Eppo all correct for peeking, and GrowthBook and Spotify's Confidence fix decision criteria before results arrive. Agents that run experiments through MCP are not new either. What Ulysses adds is the binding: the stop rule is a file the owner signs before any data exists, its hash is written into the Flagsmith experiment, and the agent's authority is exactly "the signed rule fired and the owner tapped" (or "the owner signed this outcome as autonomous"). Anyone can re-check a decision offline with `ulysses verify`.
+
+## A live false "Winning"
+
 ![A live Ulysses decision card: experiment 358, look 6 of 10, Flagsmith chance to win 95.67%, the contract needs 99.67%, HOLD](docs/screenshots/live-hold-card.png)
 
 *Live data, not a mock-up.* Experiment 358 (flag `ulysses_fw_360424_04`) on self-hosted Flagsmith, look 6 of 10. Flagsmith's chance to win was 95.67%, which its docs would call Winning; the contract signed before the start needed 99.67% at that look, so the card says HOLD. It is an A/A experiment (both arms serve the same value) with synthetic identities sent through Flagsmith's Python SDK, so holding was right. We ran 60 such A/A experiments in two batches, each under its own signed contract. Flagsmith read over 95% while the contract held in 1 of the 60: this one, at looks 5, 6 and 9. The contracts shipped 0 do-nothing variations. It is a small live result: false "Winning" moments were rare in these batches, and the 10,000-run simulation above carries the claim about how often they happen.
@@ -152,7 +197,7 @@ The cost Ulysses removes is a shipped variation that does nothing, or does harm,
 
 ### Creativity
 
-Most agent integrations put the human approval after the agent proposes an action, at the moment the human is looking at a promising number. Ulysses moves the approval that matters to before any data exists and turns the later one into a one-tap confirmation of something already decided. The contract is a hashed, signed file whose hash lives on the experiment in Flagsmith, and anyone can re-check a decision offline with `ulysses verify`.
+Most agent integrations put the human approval after the agent proposes an action, at the moment the human is looking at a promising number. Ulysses moves the approval that matters to before any data exists and turns the later one into a one-tap confirmation of something already decided. The contract is a hashed, signed file whose hash lives on the experiment in Flagsmith, and anyone can re-check a decision offline with `ulysses verify`. The owner also signs where the agent acts alone: rolling back can be autonomous, shipping never is. The pages make the temptation visible: each look where Flagsmith said Winning and the contract held is marked as a siren, the agent's refused requests sit right after it, and the calibration page sails the same 100 do-nothing experiments twice, once per agent.
 
 ### Demo
 
@@ -186,7 +231,7 @@ Real-effect rows: `uv run ulysses verify --bundle data/verify-judge-demo-cta.jso
 |---|---|
 | Uses the Flagsmith CLI, API or MCP server | The REST API for the lifecycle and results, the audit-log webhook, the official SDK for traffic, Flagsmith's own `stats.py` in the calibration. Ulysses ships its own MCP server with six tools for agents. |
 | Saves real time | The first read at each planned count is the look, whoever makes it, and Flagsmith's numbers are withheld between looks; `ulysses serve --poll` keeps the schedule without an agent; the pre-signed action runs on one tap. On a real +25% lift it used 17.8% fewer identities than a fixed horizon with the same guarantee (simulation). It waits longer than the first-95% rule. |
-| A human approves changes | Twice: the owner signs before start (start is refused without it) and confirms the fired action with a signed tap. Amendments need a second signer. |
+| A human approves changes | Twice: the owner signs before start (start is refused without it) and confirms the fired action with a signed tap. Amendments need a second signer. The signed `[autonomy]` clause is where the agent may act alone: keeping control can be listed, shipping cannot. |
 | Clear output | One card per look: Flagsmith's chance to win, what the contract needs at this look, each guardrail's reading against its rule, hold or fire, and the pre-signed action. |
 | A working demo | `uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl` in two minutes; `uv run python scripts/judge_demo.py` live with Docker and uv. |
 
