@@ -76,7 +76,7 @@ The contract now gives each guardrail its own one-sided budget, spent with a Lan
 |---|---|---|---|
 | 0.05 | 1.6% (1.4-1.9) | 10.7% (10.1-11.4) | 10,000 |
 | 0.025 | 0.4% (0.2-0.6) | 7.3% (6.5-8.1) | 4,000 |
-| 0.01 (default) | GUARDRAIL_DEFAULT_NI | GUARDRAIL_DEFAULT_ND | GUARDRAIL_DEFAULT_RUNS |
+| 0.01 (default) | 0.1% (0.1-0.2) | 4.4% (4.0-4.8) | 10,000 |
 
 A guardrail stop only ever keeps control, so it cannot raise the false-ship rate; it costs power on experiments that were fine. By default a win also does not ship while Flagsmith has no result for a guardrail ("collecting data": fewer than 5 conversions per arm for an occurrence metric); at the horizon that becomes "no decision, keep control". A contract can turn this off with `require_guardrail_results_to_ship = false`, and the signing page shows the setting.
 
