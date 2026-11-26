@@ -76,11 +76,14 @@ def main() -> None:
         ("aa", "ulysses headline A/A", "A/A check: both headline variations are identical, so neither should win."),
     ):
         try:
-            out = lab.new_demo_experiment(cfg, name, hyp, which=which, replace=a.replace, governed=governed)
+            out = lab.new_demo_experiment(
+                cfg, name, hyp, which=which, replace=a.replace, governed=governed,
+                announce=lambda c: print(f"about to clear experiment {c['id']} (was {c['was']}): {c['action']}",
+                                         flush=True))
         except RuntimeError as exc:
             sys.exit(f"stopped: {exc}")
         for c in out["cleared"]:
-            print(f"{out['flag']}: experiment {c['id']} (was {c['was']}) {c['action']}")
+            print(f"{out['flag']}: experiment {c['id']} (was {c['was']}) {c['action']}", flush=True)
         print(f"{out['flag']}: experiment {out['experiment_id']} created (status {out['status']})")
         made[which] = out["experiment_id"]
 

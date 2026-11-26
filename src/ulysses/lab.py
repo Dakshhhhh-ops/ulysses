@@ -156,22 +156,22 @@ class Admin:
         return results_list(self.call("GET", f"/api/v1/environments/{env_key}/experiments/", params=params))
 
     def clear_active(self, env_key: str, feature_id: int, *, governed: set[int] | None = None,
-                     replace: bool = False) -> list[dict]:
+                     replace: bool = False, announce=None) -> list[dict]:
         """End the flag's unfinished experiment so a new one can be created (Flagsmith allows one per flag).
 
         A ``created`` experiment is deleted. A running or paused one is completed keeping control, but only
         with ``replace=True``, and never one a Ulysses contract governs (finish that under its contract).
-        Returns what was done, so callers can print it.
+        Every planned change is checked first and passed to ``announce`` (if given) before anything is
+        changed, so the caller can say what will happen. Returns what was done.
         """
-        done = []
+        plan = []
         for e in self.experiments(env_key):
             feat = e["feature"]["id"] if isinstance(e["feature"], dict) else e["feature"]
             if feat != feature_id or e["status"] == "completed":
                 continue
             base = f"/api/v1/environments/{env_key}/experiments/{e['id']}"
             if e["status"] == "created":
-                self.call("DELETE", f"{base}/")
-                done.append({"id": e["id"], "was": "created", "action": "deleted"})
+                plan.append(({"id": e["id"], "was": "created", "action": "deleted"}, "DELETE", f"{base}/", None))
                 continue
             if int(e["id"]) in (governed or set()):
                 raise RuntimeError(
@@ -181,8 +181,15 @@ class Admin:
                 raise RuntimeError(
                     f"experiment {e['id']} on this flag is {e['status']}; pass --replace to complete it keeping "
                     "control, or finish it first")
-            self.call("POST", f"{base}/complete/", json={"rollout_decision": "control"})
-            done.append({"id": e["id"], "was": e["status"], "action": "completed, kept control"})
+            plan.append(({"id": e["id"], "was": e["status"], "action": "completed, kept control"},
+                         "POST", f"{base}/complete/", {"rollout_decision": "control"}))
+        for info, *_ in plan:
+            if announce:
+                announce(info)
+        done = []
+        for info, method, path, body in plan:
+            self.call(method, path, **({"json": body} if body is not None else {}))
+            done.append(info)
         return done
 
     def create_experiment(self, env_key: str, *, feature_id: int, option_id: int, name: str, hypothesis: str,
@@ -251,7 +258,7 @@ def setup_demo(cfg: LabConfig) -> dict:
 
 
 def new_demo_experiment(cfg: LabConfig, name: str, hypothesis: str, *, which: str = "cta",
-                        replace: bool = False, governed: set[int] | None = None) -> dict:
+                        replace: bool = False, governed: set[int] | None = None, announce=None) -> dict:
     """A fresh experiment (status created) on the demo flag (``cta``) or the A/A flag (``aa``)."""
     d = load_state().get("demo") or setup_demo(cfg)
     if which == "aa" and "aa" not in d:
@@ -260,7 +267,8 @@ def new_demo_experiment(cfg: LabConfig, name: str, hypothesis: str, *, which: st
                                         "flag": d["flag"]}
     control_value = AA_VALUE if which == "aa" else DEMO_CONTROL_VALUE
     a = Admin(cfg)
-    cleared = a.clear_active(d["environment_key"], f["feature_id"], governed=governed, replace=replace)
+    cleared = a.clear_active(d["environment_key"], f["feature_id"], governed=governed, replace=replace,
+                             announce=announce)
     e = a.create_experiment(
         d["environment_key"], feature_id=f["feature_id"], option_id=f["variation_option_id"], name=name,
         hypothesis=hypothesis, control_value=control_value,
