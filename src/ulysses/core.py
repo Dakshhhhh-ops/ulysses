@@ -916,6 +916,31 @@ class Ulysses:
             raise Refused(f"contract is {row['state']}; this proposal cannot run now")
         return c, row
 
+    def confirm_message(self, p: dict) -> bytes:
+        """What the owner signs to confirm proposal ``p`` (the text the card shows).
+
+        For an action a look fired it covers, besides the contract, the look and the action, a hash chain over
+        every look on the experiment up to and including that look (``signing.evidence_hash``), so a later edit
+        to any of those looks' numbers, or a dropped look, breaks the owner's signature.
+        """
+        if not p["look_id"]:
+            return self._legacy_confirm_message(p)
+        lk = self.store.look(p["look_id"])
+        looks = [] if not lk else [x for x in self.store.looks(lk["environment"], lk["experiment_id"])
+                                   if x["seq"] <= lk["seq"]]
+        evidence = signing.evidence_hash((x["seq"], x["id"], x["contract_hash"], x["snapshot"]) for x in looks)
+        return signing.confirm_message(p["contract_hash"], p["look_id"], p["action"], evidence)
+
+    @staticmethod
+    def _legacy_confirm_message(p: dict) -> bytes:
+        """The earlier confirmation text: contract, look or proposal, and action, without the looks' numbers."""
+        return signing.confirm_message(p["contract_hash"], p["look_id"] or p["id"], p["action"])
+
+    def _confirm_valid(self, c: ct.Contract, p: dict, signature: str | None) -> bool:
+        """The owner's tap verifies, in the current form or the earlier one (``ulysses verify`` marks the latter)."""
+        return any(signing.is_valid(c.owner.public_key, m, signature or "")
+                   for m in (self.confirm_message(p), self._legacy_confirm_message(p)))
+
     def confirm(self, pid: str, signer: str, signature: str) -> dict:
         p = self.store.proposal(pid)
         if not p:
@@ -927,9 +952,10 @@ class Ulysses:
             raise Refused(f"this proposal is {p['state']}; there is nothing to confirm")
         if signer != c.owner.name:
             raise Refused(f"only the owner ({c.owner.name}) confirms the pre-signed action")
-        msg = signing.confirm_message(p["contract_hash"], p["look_id"] or p["id"], p["action"])
+        msg = self.confirm_message(p)
         try:
-            signing.verify(c.owner.public_key, msg, signature)
+            if not signing.is_valid(c.owner.public_key, self._legacy_confirm_message(p), signature):
+                signing.verify(c.owner.public_key, msg, signature)
         except signing.SignatureError as exc:
             self.store.log_refusal("confirm", str(exc), p["contract_hash"], self.clock())
             raise Refused(f"confirmation signature rejected: {exc}") from exc
@@ -969,8 +995,7 @@ class Ulysses:
                           confirm_url=f"{self.settings.public_url}/card/{p['look_id'] or p['id']}")
         if not self._fully_signed(c, h):
             raise Refused("the governing contract's signatures no longer verify")
-        msg = signing.confirm_message(h, p["look_id"] or p["id"], p["action"])
-        if p["confirm_signer"] != c.owner.name or not signing.is_valid(c.owner.public_key, msg, p["confirm_signature"] or ""):
+        if p["confirm_signer"] != c.owner.name or not self._confirm_valid(c, p, p["confirm_signature"]):
             raise Refused("the confirmation signature does not verify")
         if self._authorised_action(c, p["outcome"]) != p["action"]:
             raise Refused("this action is not the one the contract assigns to the outcome")
@@ -1450,9 +1475,7 @@ class Ulysses:
                 ok = self._signature_valid(c, h, "owner") and (kind != "complete" or self._fully_signed(c, h))
                 if kind == "complete":
                     p = self.store.proposal(ew["proposal_id"]) if ew["proposal_id"] else None
-                    conf_ok = bool(p) and signing.is_valid(
-                        c.owner.public_key, signing.confirm_message(h, p["look_id"] or p["id"], p["action"]),
-                        p["confirm_signature"] or "")
+                    conf_ok = bool(p) and self._confirm_valid(c, p, p["confirm_signature"])
                     row["confirmed_by"] = p["confirm_signer"] if p else None
                     row["outcome"] = p["outcome"] if p else None
                     row["shipped"] = ew["expect"].get("ship")
@@ -1539,8 +1562,7 @@ class Ulysses:
                          "planned": [p.model_dump() for p in c.boundary.planned]},
             "proposal": self._proposal_view(props[-1]) if props else None,
             "history": history,
-            "confirm_message": None if not props else signing.confirm_message(
-                lk["contract_hash"], look_id, props[-1]["action"]).decode(),
+            "confirm_message": None if not props else self.confirm_message(props[-1]).decode(),
         }
 
     def proposal_card(self, pid: str) -> dict:
@@ -1554,8 +1576,7 @@ class Ulysses:
             "origin": "amendment" if p["outcome"] == "amendment" else "look",
             "contract": {"hash": p["contract_hash"], "state": row["state"], "summary": summarise(c),
                          "owner": c.owner.name, "amendment": c.amendment.model_dump() if c.amendment else None},
-            "confirm_message": signing.confirm_message(p["contract_hash"], p["look_id"] or p["id"],
-                                                       p["action"]).decode(),
+            "confirm_message": self.confirm_message(p).decode(),
         }
 
     def _emit(self, event: str, payload: dict) -> None:

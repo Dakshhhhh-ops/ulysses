@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
@@ -23,6 +24,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+
+from .canonical import content_hash
 
 KEY_PREFIX = "ed25519:"
 
@@ -46,9 +49,35 @@ def contract_message(contract_hash: str, role: str) -> bytes:
     return message(PURPOSE_SIGN, contract_hash, role)
 
 
-def confirm_message(contract_hash: str, look_id: str, action: str) -> bytes:
-    """What the owner signs to confirm one pre-signed action after a look fires."""
-    return message(PURPOSE_CONFIRM, contract_hash, look_id, action)
+def confirm_message(contract_hash: str, look_id: str, action: str, evidence: str | None = None) -> bytes:
+    """What the owner signs to confirm one pre-signed action after a look fires.
+
+    For an action a look fired, ``evidence`` is ``evidence_hash`` over every look on the experiment up to and
+    including that look, so the owner's tap also covers the numbers the decision rests on: editing or dropping
+    any of those looks afterwards breaks the signature. Without it (an amendment's immediate action, or a tap
+    signed before evidence was added) the message names only the contract, the look or proposal, and the action.
+    """
+    fields = [contract_hash, look_id, action]
+    if evidence is not None:
+        fields.append(f"evidence {evidence}")
+    return message(PURPOSE_CONFIRM, *fields)
+
+
+EVIDENCE_SEED = "ulysses/v1/look-evidence"
+
+
+def evidence_hash(looks: Iterable[tuple[int, str, str, dict | None]]) -> str:
+    """A hash chain over looks given as ``(seq, look id, contract hash, Flagsmith snapshot)``, in seq order.
+
+    Each link is the SHA-256 of the canonical JSON of ``[previous link, seq, look id, contract hash, snapshot
+    hash]``; the snapshot is Flagsmith's numbers for that look with its ``as_of`` time left out, so the service's
+    store and a timestamp-free bundle give the same chain.
+    """
+    acc = EVIDENCE_SEED
+    for seq, look_id, contract_hash, snapshot in looks:
+        snap = None if snapshot is None else {k: v for k, v in snapshot.items() if k != "as_of"}
+        acc = content_hash([acc, seq, look_id, contract_hash, content_hash(snap)])
+    return acc
 
 
 def encode_public(pub: Ed25519PublicKey) -> str:

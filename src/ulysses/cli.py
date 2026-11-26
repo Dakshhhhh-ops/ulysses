@@ -556,6 +556,138 @@ def cmd_lab_experiment(a) -> None:
     console.print(out)
 
 
+# ---- verification -------------------------------------------------------------------------
+
+
+def _verify_sources(a):
+    """The store and the experiment's environment, for export and live verify."""
+    from .service import sources
+    from .store import Store
+
+    _env()
+    db = a.db or os.environ.get("ULYSSES_DB", ".run/ulysses.db")
+    if not Path(db).exists():
+        fail(f"no Ulysses store at {db}", "pass --db <path to the service's database>")
+    store = Store(db)
+    env = a.environment
+    if not env:
+        envs = sorted({r["environment"] for r in store.all_contracts() if r["experiment_id"] == a.experiment})
+        if not envs:
+            fail(f"the store at {db} holds no contract for experiment {a.experiment}")
+        if len(envs) > 1:
+            fail(f"experiment {a.experiment} appears in {len(envs)} environments", "pass --environment <key>")
+        env = envs[0]
+    rec = sources._read(sources.registry_path(db)).get(f"{env}:{a.experiment}")
+    return store, env, rec
+
+
+def _flagsmith_gateway():
+    from .flagsmith.rest import RestFlagsmith
+
+    key = os.environ.get("FLAGSMITH_ADMIN_KEY", "")
+    if not key:
+        fail("FLAGSMITH_ADMIN_KEY is not set; reading the experiment from Flagsmith needs a key",
+             "set it in the environment or .env, or use --bundle")
+    return RestFlagsmith(os.environ.get("FLAGSMITH_API_URL", "http://localhost:8000"), key)
+
+
+def _build_bundle(a) -> dict:
+    from . import verify as vf
+    from .flagsmith.gateway import FlagsmithError
+
+    store, env, traffic = _verify_sources(a)
+    state, missing = None, getattr(a, "no_flagsmith", None)
+    if not missing:
+        try:
+            state = vf.flagsmith_state(_flagsmith_gateway(), env, a.experiment)
+        except FlagsmithError as exc:
+            fail(f"could not read experiment {a.experiment} from Flagsmith: {exc}",
+                 "check FLAGSMITH_API_URL, or export with --no-flagsmith '<reason>'")
+    return vf.export_bundle(store, env, a.experiment, flagsmith=state, flagsmith_unavailable=missing,
+                            traffic=traffic)
+
+
+def cmd_export_bundle(a) -> None:
+    from . import verify as vf
+
+    bundle = _build_bundle(a)
+    stamps = vf.find_timestamps(bundle)
+    if stamps:
+        fail(f"the bundle would carry {len(stamps)} timestamp(s), first at {stamps[0]}; not written")
+    text = vf.dumps(bundle)
+    leaks = vf.find_secrets(text, [os.environ.get(k, "") for k in
+                                   ("FLAGSMITH_ADMIN_KEY", "ULYSSES_AGENT_TOKEN", "ULYSSES_WEBHOOK_SECRET")])
+    if leaks:
+        fail(f"the bundle would carry {leaks[0]}; not written")
+    out = Path(a.out or f"ulysses-bundle-{a.experiment}.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(text.encode("utf-8"))
+    console.print(f"[green]wrote[/] {out}: {len(bundle['contracts'])} contract(s), {len(bundle['looks'])} look(s), "
+                  f"{len(bundle['outcomes'])} outcome(s)"
+                  + ("" if bundle["flagsmith_final"] else "; no Flagsmith state (" + bundle["flagsmith_final_missing"] + ")"))
+    console.print(f"check it anywhere with: ulysses verify --bundle {out}")
+
+
+def cmd_verify(a) -> None:
+    from . import verify as vf
+    from .flagsmith.gateway import FlagsmithError
+
+    trusted = {}
+    for item in a.trust_key or []:
+        name, sep, key = item.partition("=")
+        if not sep:
+            fail(f"--trust-key takes NAME=ed25519:..., got {item!r}")
+        trusted[name.strip()] = key.strip()
+    if a.expect_hash and not vf.HASH_RE.fullmatch(a.expect_hash):
+        fail(f"--expect-hash takes sha256:<64 hex>, got {a.expect_hash!r}")
+    pre: list = []
+    if a.bundle:
+        try:
+            bundle = vf.load_bundle(a.bundle)
+        except (OSError, ValueError) as exc:
+            fail(f"cannot read the bundle {a.bundle}: {exc}")
+        ref = bundle.get("experiment") if isinstance(bundle, dict) else None
+        bundle_id = ref.get("experiment_id") if isinstance(ref, dict) else None
+        if a.experiment is not None and a.experiment != bundle_id:
+            fail(f"you asked to verify experiment {a.experiment}, but the bundle {a.bundle} is for experiment "
+                 f"{bundle_id!r}", "drop the id, or pass the bundle for that experiment")
+        live = bool(a.check_flagsmith)
+        if live:
+            env = ref.get("environment") if isinstance(ref, dict) else None
+            if not isinstance(env, str) or not isinstance(bundle_id, int):
+                fail("the bundle names no experiment to read from Flagsmith")
+            _env()
+            try:
+                state = vf.flagsmith_state(_flagsmith_gateway(), env, bundle_id)
+            except FlagsmithError as exc:
+                fail(f"could not read experiment {bundle_id} from Flagsmith: {exc}", "check FLAGSMITH_API_URL")
+            pre.append(vf.compare_flagsmith(bundle.get("flagsmith_final"), state))
+            bundle = dict(bundle, flagsmith_final=state)
+            bundle.pop("flagsmith_final_missing", None)
+            print(f"Verifying bundle {a.bundle}: hypothesis and final state read from Flagsmith now, everything "
+                  "else from the bundle")
+        else:
+            print(f"Verifying bundle {a.bundle} (offline: no service, no Flagsmith; every source is the exporter's)")
+    else:
+        if a.experiment is None:
+            fail("give an experiment id, or --bundle <path>")
+        if a.check_flagsmith:
+            fail("--check-flagsmith goes with --bundle; `ulysses verify <id>` always reads Flagsmith")
+        bundle = _build_bundle(a)
+        live = True
+        print(f"Verifying experiment {a.experiment}: hypothesis and final state read from Flagsmith now, "
+              "contract text, signatures and looks from the service's store; every one is re-checked here")
+    traffic = bundle.get("traffic") if isinstance(bundle, dict) else None
+    if isinstance(traffic, dict):
+        print(f"Traffic: {traffic.get('kind')} ({traffic.get('detail')})")
+    checks = pre + vf.verify_bundle(bundle, trusted_keys=trusted, expect_hash=a.expect_hash, flagsmith_live=live)
+    for c in checks:
+        print(c.line())
+    text, code = vf.summary(checks)
+    print(text)
+    sys.exit(code)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ulysses", description="Signed stop contracts for Flagsmith experiments.")
     p.add_argument("--version", action="version", version=f"ulysses {__version__}")
@@ -663,6 +795,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--changes", help='JSON, e.g. \'{"horizon": {"identities_per_arm": 3000}}\'')
     s.add_argument("--action-now", choices=["ship_treatment", "keep_control"])
     s.set_defaults(fn=cmd_amend)
+
+    s = sub.add_parser("verify", help="audit a decision: hashes, signatures, every look against the signed rule")
+    s.add_argument("experiment", type=int, nargs="?", help="Flagsmith experiment id (live: store + Flagsmith)")
+    s.add_argument("--bundle", help="verify an exported bundle instead; needs no service and no Flagsmith")
+    s.add_argument("--environment", help="Flagsmith environment key (default: the one the store holds)")
+    s.add_argument("--db", help="the service's store (default ULYSSES_DB or .run/ulysses.db)")
+    s.add_argument("--trust-key", action="append", metavar="NAME=KEY",
+                   help="a signer's public key you know out of band; the contract must name the same key")
+    s.add_argument("--expect-hash", metavar="sha256:...",
+                   help="the contract hash you read on the experiment yourself; the bundle's chain must hold it")
+    s.add_argument("--check-flagsmith", action="store_true",
+                   help="with --bundle: read the hypothesis and final state from Flagsmith now and compare")
+    s.set_defaults(fn=cmd_verify)
+    s = sub.add_parser("export-bundle", help="write a self-contained, timestamp-free bundle for `verify --bundle`")
+    s.add_argument("experiment", type=int)
+    s.add_argument("--environment")
+    s.add_argument("--db")
+    s.add_argument("--out", help="default ulysses-bundle-<experiment>.json")
+    s.add_argument("--no-flagsmith", metavar="REASON",
+                   help="export without Flagsmith's final state (for example the instance is gone); the reason is "
+                        "written into the bundle and `verify` marks those checks SKIP")
+    s.set_defaults(fn=cmd_export_bundle)
 
     s = sub.add_parser("boundary", help="print the O'Brien-Fleming boundary table")
     s.add_argument("--looks", type=int, default=12)

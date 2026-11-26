@@ -1,0 +1,275 @@
+{
+  "contracts": [
+    {
+      "hash": "sha256:5b93c4f74a0e5d1be591846051080751d2ca00e271f29582bf91c991780bfafd",
+      "signatures": [
+        {
+          "role": "owner",
+          "signature": "k/Re9geGost5vl2QEYW0W+R2iHDgQZbS/C7BxiIWcnmFaQ38/its/CE1+kLTK6T10G9P80hpdGW/dkuaj5zGDw==",
+          "signer": "maya"
+        }
+      ],
+      "toml": "# Ulysses stop contract.\n# Sign it before the experiment starts. Its hash is written into the\n# experiment's hypothesis field in Flagsmith. Editing any value changes the\n# hash, and a changed contract needs fresh signatures.\n\nulysses_contract = 2\nhypothesis = \"The bold call to action raises purchases without raising refund requests.\"\nguardrails = [\n    { name = \"ulysses_refund_request\", direction = \"not_increase\", alpha = 0.01 },\n]\nrequire_guardrail_results_to_ship = true\n\n[experiment]\nproject = 0\nenvironment = \"4EqiQKnevKBMuAyA2AvTdp\"\nexperiment = 1\nflag = \"ulysses_checkout_cta\"\ncontrol = \"control\"\ntreatment = \"bold\"\n\n[primary_metric]\nname = \"ulysses_purchase\"\ndirection = \"increase\"\n\n[horizon]\nidentities_per_arm = 1088\nlooks = 30\nmin_minutes_between_looks = 5\n\n[boundary]\nspending = \"lan_demets_obrien_fleming\"\nalpha = 0.05\nsides = \"two_sided\"\n\n[[boundary.planned]]\nlook = 1\nfraction = 0.033333\nidentities_per_arm = 37\n\n[[boundary.planned]]\nlook = 2\nfraction = 0.066667\nidentities_per_arm = 73\n\n[[boundary.planned]]\nlook = 3\nfraction = 0.1\nidentities_per_arm = 109\nz = 6.9913\nchance_to_win = 1.0\n\n[[boundary.planned]]\nlook = 4\nfraction = 0.133333\nidentities_per_arm = 146\nz = 6.0273\nchance_to_win = 1.0\n\n[[boundary.planned]]\nlook = 5\nfraction = 0.166667\nidentities_per_arm = 182\nz = 5.3679\nchance_to_win = 1.0\n\n[[boundary.planned]]\nlook = 6\nfraction = 0.2\nidentities_per_arm = 218\nz = 4.8821\nchance_to_win = 0.999999\n\n[[boundary.planned]]\nlook = 7\nfraction = 0.233333\nidentities_per_arm = 254\nz = 4.5062\nchance_to_win = 0.999997\n\n[[boundary.planned]]\nlook = 8\nfraction = 0.266667\nidentities_per_arm = 291\nz = 4.2049\nchance_to_win = 0.999987\n\n[[boundary.planned]]\nlook = 9\nfraction = 0.3\nidentities_per_arm = 327\nz = 3.9566\nchance_to_win = 0.999962\n\n[[boundary.planned]]\nlook = 10\nfraction = 0.333333\nidentities_per_arm = 363\nz = 3.7475\nchance_to_win = 0.999911\n\n[[boundary.planned]]\nlook = 11\nfraction = 0.366667\nidentities_per_arm = 399\nz = 3.5684\nchance_to_win = 0.99982\n\n[[boundary.planned]]\nlook = 12\nfraction = 0.4\nidentities_per_arm = 436\nz = 3.4126\nchance_to_win = 0.999678\n\n[[boundary.planned]]\nlook = 13\nfraction = 0.433333\nidentities_per_arm = 472\nz = 3.2757\nchance_to_win = 0.999473\n\n[[boundary.planned]]\nlook = 14\nfraction = 0.466667\nidentities_per_arm = 508\nz = 3.154\nchance_to_win = 0.999195\n\n[[boundary.planned]]\nlook = 15\nfraction = 0.5\nidentities_per_arm = 544\nz = 3.0449\nchance_to_win = 0.998836\n\n[[boundary.planned]]\nlook = 16\nfraction = 0.533333\nidentities_per_arm = 581\nz = 2.9464\nchance_to_win = 0.998393\n\n[[boundary.planned]]\nlook = 17\nfraction = 0.566667\nidentities_per_arm = 617\nz = 2.8569\nchance_to_win = 0.997861\n\n[[boundary.planned]]\nlook = 18\nfraction = 0.6\nidentities_per_arm = 653\nz = 2.7751\nchance_to_win = 0.997241\n\n[[boundary.planned]]\nlook = 19\nfraction = 0.633333\nidentities_per_arm = 690\nz = 2.6999\nchance_to_win = 0.996532\n\n[[boundary.planned]]\nlook = 20\nfraction = 0.666667\nidentities_per_arm = 726\nz = 2.6306\nchance_to_win = 0.995738\n\n[[boundary.planned]]\nlook = 21\nfraction = 0.7\nidentities_per_arm = 762\nz = 2.5663\nchance_to_win = 0.99486\n\n[[boundary.planned]]\nlook = 22\nfraction = 0.733333\nidentities_per_arm = 798\nz = 2.5065\nchance_to_win = 0.993903\n\n[[boundary.planned]]\nlook = 23\nfraction = 0.766667\nidentities_per_arm = 835\nz = 2.4507\nchance_to_win = 0.992871\n\n[[boundary.planned]]\nlook = 24\nfraction = 0.8\nidentities_per_arm = 871\nz = 2.3985\nchance_to_win = 0.991769\n\n[[boundary.planned]]\nlook = 25\nfraction = 0.833333\nidentities_per_arm = 907\nz = 2.3495\nchance_to_win = 0.9906\n\n[[boundary.planned]]\nlook = 26\nfraction = 0.866667\nidentities_per_arm = 943\nz = 2.3034\nchance_to_win = 0.989371\n\n[[boundary.planned]]\nlook = 27\nfraction = 0.9\nidentities_per_arm = 980\nz = 2.2598\nchance_to_win = 0.988085\n\n[[boundary.planned]]\nlook = 28\nfraction = 0.933333\nidentities_per_arm = 1016\nz = 2.2187\nchance_to_win = 0.986747\n\n[[boundary.planned]]\nlook = 29\nfraction = 0.966667\nidentities_per_arm = 1052\nz = 2.1797\nchance_to_win = 0.985362\n\n[[boundary.planned]]\nlook = 30\nfraction = 1.0\nidentities_per_arm = 1088\nz = 2.1428\nchance_to_win = 0.983934\n\n[actions]\nwin = \"ship_treatment\"\nloss = \"keep_control\"\nhorizon = \"keep_control\"\nguardrail_breach = \"keep_control\"\n\n[owner]\nname = \"maya\"\npublic_key = \"ed25519:wb/cYzPi5X4UDC/p3j5m+S0pFsnC7srJxixJzb0IxfE=\"\n\n[second_signer]\nname = \"sam\"\npublic_key = \"ed25519:oEaTwZ44SVMY49DOMALF9r2OLI5aGuBVzUZYlARRC8g=\"\n\n[validity]\nstart_within_days = 30\n\n[design]\nbaseline_rate = 0.1\nmin_relative_lift = 0.5\npower = 0.8\n"
+    }
+  ],
+  "deviations": [],
+  "experiment": {
+    "environment": "4EqiQKnevKBMuAyA2AvTdp",
+    "experiment_id": 1
+  },
+  "exported_by": "ulysses 0.1.0 export-bundle",
+  "flagsmith_final": null,
+  "flagsmith_final_missing": "the Flagsmith instance the one-command demo started was removed after the run (docker compose -p ulysses down -v)",
+  "looks": [
+    {
+      "contract_hash": "sha256:5b93c4f74a0e5d1be591846051080751d2ca00e271f29582bf91c991780bfafd",
+      "flagsmith": {
+        "identities": {},
+        "metrics": {
+          "ulysses_purchase": {
+            "chance_to_win": null,
+            "direction": "up",
+            "lift": null
+          },
+          "ulysses_refund_request": {
+            "chance_to_win": null,
+            "direction": "down",
+            "lift": null
+          }
+        },
+        "srm_p_value": null
+      },
+      "id": "L0001-f4f24e3c",
+      "recorded": {
+        "action": null,
+        "boundary_chance": null,
+        "boundary_z": null,
+        "chance_to_win": null,
+        "counted": false,
+        "fraction": 0.0,
+        "guardrail": null,
+        "guardrails": [
+          {
+            "boundary_z": null,
+            "chance_worse": null,
+            "name": "ulysses_refund_request",
+            "state": "no_result"
+          }
+        ],
+        "identities_per_arm": 0,
+        "look_number": null,
+        "outcome": "watch"
+      },
+      "seq": 1
+    },
+    {
+      "contract_hash": "sha256:5b93c4f74a0e5d1be591846051080751d2ca00e271f29582bf91c991780bfafd",
+      "flagsmith": {
+        "identities": {
+          "bold": 229,
+          "control": 224
+        },
+        "metrics": {
+          "ulysses_purchase": {
+            "chance_to_win": 0.9521315267222452,
+            "direction": "up",
+            "lift": 0.6433187772925765
+          },
+          "ulysses_refund_request": {
+            "chance_to_win": 0.24546990921376,
+            "direction": "down",
+            "lift": 0.4129063561377971
+          }
+        },
+        "srm_p_value": null
+      },
+      "id": "L0002-f6461d71",
+      "recorded": {
+        "action": null,
+        "boundary_chance": 0.9999992180337669,
+        "boundary_z": 4.8029,
+        "chance_to_win": 0.9521315267222452,
+        "counted": true,
+        "fraction": 0.205882,
+        "guardrail": null,
+        "guardrails": [
+          {
+            "boundary_z": 2.7446,
+            "chance_worse": 0.75453009078624,
+            "name": "ulysses_refund_request",
+            "state": "pass"
+          }
+        ],
+        "identities_per_arm": 224,
+        "look_number": 1,
+        "outcome": "hold"
+      },
+      "seq": 2
+    },
+    {
+      "contract_hash": "sha256:5b93c4f74a0e5d1be591846051080751d2ca00e271f29582bf91c991780bfafd",
+      "flagsmith": {
+        "identities": {
+          "bold": 450,
+          "control": 469
+        },
+        "metrics": {
+          "ulysses_purchase": {
+            "chance_to_win": 0.9591480102980332,
+            "direction": "up",
+            "lift": 0.4158490566037736
+          },
+          "ulysses_refund_request": {
+            "chance_to_win": 0.7105225985936632,
+            "direction": "down",
+            "lift": -0.1472727272727273
+          }
+        },
+        "srm_p_value": null
+      },
+      "id": "L0003-02091991",
+      "recorded": {
+        "action": null,
+        "boundary_chance": 0.999508529558255,
+        "boundary_z": 3.2954,
+        "chance_to_win": 0.9591480102980332,
+        "counted": true,
+        "fraction": 0.413603,
+        "guardrail": null,
+        "guardrails": [
+          {
+            "boundary_z": 2.7518,
+            "chance_worse": 0.2894774014063368,
+            "name": "ulysses_refund_request",
+            "state": "pass"
+          }
+        ],
+        "identities_per_arm": 450,
+        "look_number": 2,
+        "outcome": "hold"
+      },
+      "seq": 3
+    },
+    {
+      "contract_hash": "sha256:5b93c4f74a0e5d1be591846051080751d2ca00e271f29582bf91c991780bfafd",
+      "flagsmith": {
+        "identities": {
+          "bold": 674,
+          "control": 705
+        },
+        "metrics": {
+          "ulysses_purchase": {
+            "chance_to_win": 0.974814191175921,
+            "direction": "up",
+            "lift": 0.3648946949410148
+          },
+          "ulysses_refund_request": {
+            "chance_to_win": 0.43213034853063315,
+            "direction": "down",
+            "lift": 0.045994065281899206
+          }
+        },
+        "srm_p_value": null
+      },
+      "id": "L0004-0ca5a6a5",
+      "recorded": {
+        "action": null,
+        "boundary_chance": 0.9957587244109279,
+        "boundary_z": 2.6322,
+        "chance_to_win": 0.974814191175921,
+        "counted": true,
+        "fraction": 0.619485,
+        "guardrail": null,
+        "guardrails": [
+          {
+            "boundary_z": 2.7498,
+            "chance_worse": 0.5678696514693669,
+            "name": "ulysses_refund_request",
+            "state": "pass"
+          }
+        ],
+        "identities_per_arm": 674,
+        "look_number": 3,
+        "outcome": "hold"
+      },
+      "seq": 4
+    },
+    {
+      "contract_hash": "sha256:5b93c4f74a0e5d1be591846051080751d2ca00e271f29582bf91c991780bfafd",
+      "flagsmith": {
+        "identities": {
+          "bold": 913,
+          "control": 926
+        },
+        "metrics": {
+          "ulysses_purchase": {
+            "chance_to_win": 0.9964997314012384,
+            "direction": "up",
+            "lift": 0.46394841802889103
+          },
+          "ulysses_refund_request": {
+            "chance_to_win": 0.4298833474430701,
+            "direction": "down",
+            "lift": 0.04165063201207784
+          }
+        },
+        "srm_p_value": null
+      },
+      "id": "L0005-03c7ac3c",
+      "recorded": {
+        "action": "ship_treatment",
+        "boundary_chance": 0.986971084990549,
+        "boundary_z": 2.2253,
+        "chance_to_win": 0.9964997314012384,
+        "counted": true,
+        "fraction": 0.839154,
+        "guardrail": null,
+        "guardrails": [
+          {
+            "boundary_z": 2.7371,
+            "chance_worse": 0.5701166525569299,
+            "name": "ulysses_refund_request",
+            "state": "pass"
+          }
+        ],
+        "identities_per_arm": 913,
+        "look_number": 4,
+        "outcome": "win"
+      },
+      "seq": 5
+    }
+  ],
+  "note": "Ulysses verification bundle. Check it with `ulysses verify --bundle <this file>`: no service and no Flagsmith needed. It holds no timestamps and no keys other than the signers' public keys.",
+  "outcomes": [
+    {
+      "action": "ship_treatment",
+      "confirm_signature": "/H3Osh7GakaPWQlsjG8s7HXsg+Ye+FBA1DQOB8PWBXpUrine1r0UGZ+N/EpHVA0QOotYkJ4RTQrrLCZS3I5+Dg==",
+      "confirm_signer": "maya",
+      "contract_hash": "sha256:5b93c4f74a0e5d1be591846051080751d2ca00e271f29582bf91c991780bfafd",
+      "id": "P-d037c520ed05",
+      "look_id": "L0005-03c7ac3c",
+      "outcome": "win",
+      "result": {
+        "flag": "ulysses_checkout_cta",
+        "flagsmith": {
+          "request": {
+            "rollout_decision": "variant",
+            "rollout_variant": 1
+          },
+          "response_status": "completed"
+        },
+        "serving": "bold"
+      },
+      "state": "executed"
+    }
+  ],
+  "public_keys": {
+    "maya": "ed25519:wb/cYzPi5X4UDC/p3j5m+S0pFsnC7srJxixJzb0IxfE=",
+    "sam": "ed25519:oEaTwZ44SVMY49DOMALF9r2OLI5aGuBVzUZYlARRC8g="
+  },
+  "traffic": {
+    "detail": "visitors simulated by examples/shop/visitors.py; Flagsmith assigns the variations",
+    "kind": "synthetic"
+  },
+  "ulysses_bundle": 1
+}
