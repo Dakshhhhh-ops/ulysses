@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% set nav = "" %}
+{% block title %}Not found · Ulysses{% endblock %}
+{% block main %}
+<div class="grid-12">
+  <figure class="plate col-7" style="margin:0">
+    <span class="cm tl"></span><span class="cm tr"></span><span class="cm bl"></span><span class="cm br"></span>
+    <div class="plate-stage" style="height:260px" role="img" aria-label="An empty mast: no contract, no rings">
+      <svg class="elevation" viewBox="-4.664 -1.4 9.328 2.8" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
+        <line class="mast" x1="-4.2" y1="0" x2="4.2" y2="0" vector-effect="non-scaling-stroke"/>
+        {%- for i in range(1, 11) %}<line class="tick" x1="{{ -4 + 0.8 * i }}" y1="-0.06" x2="{{ -4 + 0.8 * i }}" y2="0.06" vector-effect="non-scaling-stroke"/>{% endfor %}
+      </svg>
+    </div>
+  </figure>
+  <div class="col-5 page-head" style="margin:0">
+    <p class="label">Nothing here</p>
+    <h1>No {{ what }} {{ (id.split(':')[-1])[:12] }}… on this service</h1>
+    <p class="lede">Nothing matches <code>{{ id }}</code>. Check the link, or open the <a href="/">contract list</a>.</p>
+  </div>
+</div>
+{% endblock %}

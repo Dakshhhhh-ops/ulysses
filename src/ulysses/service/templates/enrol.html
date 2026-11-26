@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% set nav = "" %}
+{% block title %}Enrol a signing key · Ulysses{% endblock %}
+{% block main %}
+{% if not name %}
+<div class="page-head">
+  <p class="label">Enrolment link</p>
+  <h1>This enrolment link has been used</h1>
+  <p class="lede">Each link works once. Ask whoever runs the contract service for a new one:</p>
+  <p class="cmd"><code>ulysses signer enrol &lt;name&gt;</code></p>
+</div>
+{% else %}
+<div class="grid-12">
+  <div class="col-7">
+    <div class="page-head" style="margin-bottom:24px">
+      <p class="label">Signing key · one per person, one per browser</p>
+      <h1>Create a signing key for {{ name }}</h1>
+      <p class="lede">The key is made in this browser and cannot be copied out of it. Ulysses only receives the public half. Use this same browser to sign contracts and confirm actions.</p>
+    </div>
+    <section class="sign-panel" style="margin-top:0" aria-labelledby="enrol-h">
+      <h2 id="enrol-h">Enrol</h2>
+      <ol class="clause-list" style="margin:0;padding-left:1.2em;font:400 17px/28px var(--f-doc)">
+        <li>This browser makes an Ed25519 key pair with WebCrypto, marked non-extractable.</li>
+        <li>The private half stays in this browser's storage under the name <code>{{ name }}</code>.</li>
+        <li>The public half is sent to the contract service and registered for {{ name }}.</li>
+      </ol>
+      <div class="mobile-bar"><button id="enrol-btn" class="big-btn" type="button">Create key for {{ name }}</button></div>
+      <p class="key-note">Signing contracts later happens on the contract's own page, in this same browser.</p>
+      <div class="msg" id="msg" hidden role="status" aria-live="polite" tabindex="-1"></div>
+    </section>
+  </div>
+  <aside class="col-5 readout">
+    <div>
+      <p class="label">What a signature here does</p>
+      <p class="read-line" style="color:var(--ink);font:400 16px/26px var(--f-doc)">A contract signed with this key lets the agent start its experiment. A confirmation signed with it lets the service make the one Flagsmith call the contract allows when it fires. Nothing else.</p>
+    </div>
+    <div>
+      <p class="label">No WebCrypto Ed25519?</p>
+      <p class="read-line">Make a key file instead: <code>ulysses keys new {{ name }}</code></p>
+    </div>
+  </aside>
+</div>
+<script type="module">
+import { webCryptoReady, createKey, keyNames, postJson, say } from "/static/ulysses.js";
+const btn = document.getElementById("enrol-btn");
+const msg = document.getElementById("msg");
+if (!webCryptoReady()) { btn.disabled = true; say(msg, "This browser cannot create an Ed25519 key. Use: ulysses keys new {{ name }}", "err"); }
+btn.addEventListener("click", async () => {
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  try {
+    if ((await keyNames()).includes({{ name | tojson }})) throw new Error("This browser already holds a key for {{ name }}.");
+    const public_key = await createKey({{ name | tojson }});
+    await postJson("/human/enrol", { token: {{ token | tojson }}, public_key });
+    say(msg, "Key created and registered. You can now sign contracts in this browser.", "ok");
+    btn.textContent = "Key created";
+    msg.focus();
+  } catch (e) { say(msg, e.message, "err"); btn.disabled = false; }
+  btn.removeAttribute("aria-busy");
+});
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% from "_elevation.html" import plate, legend_key %}
+{% set nav = "calibration" %}
+{% set source = scene.source if active and not active.error else none %}
+{% block title %}Calibration · Ulysses{% endblock %}
+{% block main %}
+{%- set off = cal.offline -%}
+{%- set live = cal.live -%}
+<div class="page-head">
+  <p class="label">A/A calibration · both arms identical, so every shipped winner is a false one</p>
+  <h1>How often does an A/A test ship a winner that does nothing?</h1>
+  <p class="lede">Flagsmith's docs read a chance to win over 95% as Winning. Read once, at a planned end, that is a sound call at the 10% level. Acted on at the first refresh where it appears, the same label ships variations that do nothing more often. A contract signed in advance acts on the same Flagsmith number, only at its signed boundaries. Every figure below is read from the calibration scripts' own output on this machine.</p>
+</div>
+
+<div class="tabs" role="tablist" aria-label="Calibration batch">
+  {%- if live and not live.error %}
+  <a role="tab" id="tab-live" href="?tab=live" aria-selected="{{ 'true' if tab == 'live' else 'false' }}" aria-controls="panel">Live self-hosted Flagsmith: synthetic identities</a>
+  {%- else %}
+  <span role="tab" id="tab-live" aria-selected="false" aria-disabled="true" tabindex="-1">Live self-hosted Flagsmith</span>
+  {%- endif %}
+  <a role="tab" id="tab-lab" href="?tab=lab" aria-selected="{{ 'true' if tab == 'lab' else 'false' }}" aria-controls="panel">Lab simulation: Flagsmith's own stats code on simulated units</a>
+</div>
+
+<section class="tabpanel" id="panel" role="tabpanel" aria-labelledby="tab-{{ tab }}">
+  {%- if active and active.error %}
+  <div class="err-panel" style="margin:16px">{{ active.error }}</div>
+  {%- elif not active %}
+    {%- if tab == 'lab' %}
+    <div class="empty" style="border:0">
+      <h2>Not run yet</h2>
+      <p>No offline calibration output on this machine. It takes about five minutes:</p>
+      <p class="cmd"><code>uv run ulysses calibrate offline --flagsmith-src ../_shared/reference/flagsmith</code></p>
+    </div>
+    {%- endif %}
+  {%- else %}
+  <div class="plate-band" data-tone="amber"><span class="tag">{{ ('LAB SIMULATION' if tab == 'lab' else 'SYNTHETIC IDENTITIES') }} · {{ active.label }}</span></div>
+  <p class="facts">{{ active.facts | join(' · ') }}</p>
+  {%- macro rate_table(rows, caption, label) %}
+  <div class="table-wrap" style="border:0" role="region" aria-label="{{ label }}" tabindex="0">
+  <table class="cal-table">
+    <caption class="cal-cap">{{ caption }}</caption>
+    <thead><tr><th scope="col">Rule</th><th scope="col" class="num">Runs</th><th scope="col" class="num">Count</th><th scope="col" class="num">Rate (95% interval)</th></tr></thead>
+    <tbody>
+    {%- for r in rows %}
+      <tr>
+        <td class="rule-cell"><span class="swatch {{ r.key }}" aria-hidden="true"></span>{{ r.label }}{% if r.level == '0.1' %} <span class="state-chip" style="margin-left:6px">same 10% level as the 95% / 5% labels</span>{% endif %}{% if r.split %}<span class="sub" style="margin-left:24px">{{ r.split }}</span>{% endif %}</td>
+        <td class="num">{{ r.n_text }}</td>
+        <td class="num">{{ r.k_text }}</td>
+        <td class="num"><span class="rate">{{ r.rate }}</span><span class="sub">{{ r.interval }}</span></td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  </div>
+  {%- endmacro %}
+  {{ rate_table(active.ship_rows, "False winners shipped: the variation does nothing, and the rule ships it", "Table of false winners shipped") }}
+  {{ rate_table(active.rows, "Any false call, winner or loser: a false Losing keeps control and ships nothing, so it is counted separately here", "Table of any false call") }}
+  {%- if tab == 'live' %}
+  <p class="facts" style="border-top:1px solid var(--rule)">{{ active.horizon_line }}{% if active.dropped %} {{ active.dropped }} runs did not finish and are not counted.{% endif %}</p>
+  {%- endif %}
+  {%- endif %}
+</section>
+
+{%- if tab == 'live' and not (live and not live.error) %}
+<p class="footnote">No live batch on this machine. <code>uv run ulysses calibrate live --experiments 60 --looks 10</code> (about an hour on the shared lab), then <code>uv run ulysses calibrate summarise .run/calibration/live-&lt;batch&gt;.jsonl</code>.</p>
+{%- endif %}
+
+<div class="after-grid">
+  {%- set pnote = none %}
+  {%- if active and not active.error and not scene.paths %}{% set pnote = "Per-run paths not exported for this batch; counts above are exact." %}{% endif %}
+  {%- if not active %}{% set pnote = "No runs to draw: the boundary of a 30-look contract at alpha 0.05, for scale." %}{% endif %}
+  {% call plate(scene, "A/A runs drawn around the signed boundary. Purple runs passed 95% or fell under 5% at some look; blue runs crossed a ring. Counts are in the tables.", height=480, axis=false, note=pnote) %}
+    {%- if scene.paths %}
+    <div class="slider" data-cal style="grid-template-columns:auto 1fr auto">
+      <span class="lab" id="cal-look-lab">Look</span>
+      <input type="range" id="cal-look" min="1" max="{{ scene.looks }}" value="{{ scene.looks }}" aria-labelledby="cal-look-lab" aria-describedby="cal-out">
+      <output id="cal-out" for="cal-look">{{ scene.looks }} of {{ scene.looks }}</output>
+    </div>
+    <div class="plate-foot" style="grid-template-columns:1fr auto">
+      <fieldset class="filter legend" style="padding:10px 14px">
+        <legend>Show</legend>
+        <label><input type="radio" name="cal-filter" value="0" checked> All runs</label>
+        <label><input type="radio" name="cal-filter" value="1"> First-look rule calls</label>
+        <label><input type="radio" name="cal-filter" value="2"> Contract calls</label>
+      </fieldset>
+      <p class="counter" id="cal-counter" aria-live="polite" style="padding:10px 14px;align-self:center">first-look rule calls so far <b>{{ active.counts.banner }}</b> · contract calls <b>{{ active.counts.contract }}</b></p>
+    </div>
+    {%- endif %}
+    <div class="plate-foot" style="grid-template-columns:1fr">
+      <div class="legend">
+        <span class="key"><span class="swatch banner" aria-hidden="true"></span>first look over 95% or under 5% (the first-look rule acts here)</span>
+        <span class="key"><span class="swatch contract" aria-hidden="true"></span>crossed a signed ring (the contract acts here)</span>
+        <span class="key"><span class="swatch final" aria-hidden="true" style="background:var(--ink);opacity:.4"></span>never left 5%–95%</span>
+        {%- set ff = fan_flat(scene) if scene.paths else none %}
+        {%- if ff and ff.total > ff.shown %}<span class="key">flat drawing shows {{ ff.shown }} of {{ ff.total }} paths; counts are from all runs</span>{% endif %}
+      </div>
+    </div>
+    <figcaption class="cap">Inspect fans each run onto its own plane through the mast; Read folds them flat into the 2D chart.</figcaption>
+  {% endcall %}
+  {%- if active and not active.error %}
+  <p class="footnote">Recompute: <code>{{ active.command }}</code></p>
+  {%- endif %}
+</div>
+{% endblock %}

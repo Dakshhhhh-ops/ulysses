@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% from "_elevation.html" import plate, glyph, legend_key %}
+{% set nav = "home" %}
+{% set source = hero.source if hero else none %}
+{% block title %}Experiments under contract · Ulysses{% endblock %}
+{% block main %}
+<div class="page-head">
+  <h1>Experiments under contract</h1>
+  <p class="lede">Each contract was signed before its experiment started. The bell is the signed rule; the thread is Flagsmith's chance to win.</p>
+</div>
+
+{%- if hero.d %}
+{%- set d = hero.d %}{% set sc = hero.scene %}{% set s = d.contract.summary %}
+<div class="grid-12 home-hero">
+  <div class="col-8">
+    {% call plate(sc, aria_label(sc), height=440, band=(sc.source.band if sc.source.simulated else none)) %}
+      <div class="plate-foot">
+        <div class="legend">
+          <span class="key">{{ legend_key("contract") }}Signed boundary</span>
+          <span class="key">{{ legend_key("banner") }}Flagsmith docs: 95% / 5%</span>
+          <span class="key">{{ legend_key("thread") }}Flagsmith chance to win</span>
+        </div>
+        <div class="title-block">
+          <div><b>EXP</b> {{ s.experiment }} · {{ s.flag }}</div>
+          <div><b>LOOK</b> {% if sc.decision.look_number %}{{ sc.decision.look_number }} / {{ sc.decision.looks_planned }}{% else %}–{% endif %}</div>
+          <div><b>CONTRACT</b> {{ (d.contract.hash.split(':')[-1])[:12] }}</div>
+          <div>{{ sc.source.chip | upper }}</div>
+        </div>
+      </div>
+    {% endcall %}
+  </div>
+  <aside class="col-4 readout" aria-label="Latest look">
+    <div>
+      <p class="label">Latest look · experiment {{ s.experiment }}</p>
+      <p class="verdict-mini" style="color:var(--ink)">{{ sc.decision.word.split(':')[0] }}</p>
+      {%- if ':' in sc.decision.word %}<p class="read-line" style="color:var(--ink)">{{ sc.decision.word.split(':')[1] | trim | capitalize }}</p>{% endif %}
+    </div>
+    <div class="readout-pair">
+      <div>
+        <p class="label read-key">{{ legend_key("thread") }}Flagsmith says</p>
+        <p class="big">{{ sc.decision.ctw or "–" }}</p>
+      </div>
+      <div>
+        <p class="label read-key">{{ legend_key("contract") }}Contract needs</p>
+        <p class="big{% if sc.decision.needs and sc.decision.needs|length > 10 %} long{% endif %}">{{ sc.decision.needs or "–" }}</p>
+        <p class="read-line">{% if sc.decision.look_number %}look {{ sc.decision.look_number }} of {{ sc.decision.looks_planned }} · z {{ sc.decision.bz_text }}{% else %}not a look{% endif %}</p>
+      </div>
+    </div>
+    <div>
+      {%- if d.proposal %}<p class="read-line" style="color:var(--ink)">Pre-signed action <span class="state-chip" data-s="{{ d.proposal.state }}">{{ d.proposal.state }}</span>{% if d.proposal.result %}: <code>{{ d.proposal.result.flag }}</code> now serves <code>{{ d.proposal.result.serving }}</code>{% endif %}</p>{% endif %}
+      <p style="margin-top:8px"><a href="/card/{{ d.look.id }}">Open the decision card</a></p>
+    </div>
+  </aside>
+</div>
+{%- elif hero.sign %}
+{%- set sc = hero.scene %}
+<div class="grid-12">
+  <div class="col-8">
+    {% call plate(sc, aria_label(sc), height=440, note="Signed. Waiting for the first look.") %}{% endcall %}
+  </div>
+  <aside class="col-4 readout"><div><p class="label">Newest contract</p><p class="read-line">Experiment {{ hero.sign.summary.experiment }} on <code>{{ hero.sign.summary.flag }}</code>. No look yet.</p>
+    <p style="margin-top:8px"><a href="/sign/{{ hero.sign.hash }}">Read the contract</a></p></div></aside>
+</div>
+{%- elif hero.example %}
+<div class="grid-12">
+  <div class="col-8">
+    {% call plate(hero.scene, aria_label(hero.scene), height=440, band=hero.scene.source.band) %}{% endcall %}
+  </div>
+  <div class="col-4 empty">
+    <h2>Nothing is bound yet</h2>
+    <p>An agent drafts a contract with the <code>sign_contract</code> tool, or run:</p>
+    <p class="cmd"><code>uv run ulysses contract draft</code><button type="button" class="copy-btn" data-copy="uv run ulysses contract draft">Copy</button></p>
+    <p class="muted">The drawing is a template boundary for 10 looks at alpha 0.05, computed by the service. No experiment, no data.</p>
+  </div>
+</div>
+{%- endif %}
+
+{%- if unreadable %}
+<div class="err-panel after-grid" role="status">
+  <p><strong>{{ unreadable | length }} contract{{ 's' if unreadable|length != 1 }} in this store could not be read.</strong> {{ unreadable[0].error }}</p>
+  <p class="muted">The rows below say which. Check <code>uv run ulysses serve</code> output; a contract written by an older version of Ulysses has to be drafted and signed again.</p>
+</div>
+{%- endif %}
+{%- if hero.unreadable %}<p class="muted">No readable contract to draw.</p>{% endif %}
+{%- set with_looks = items | rejectattr("error") | selectattr("look") | list %}
+{%- if with_looks | length > 1 %}
+<section class="after-grid" aria-labelledby="two-h">
+  <div class="section-head"><h2 id="two-h">Latest look on each experiment</h2><p class="muted">Each card is read from that experiment's own newest look.</p></div>
+  <div class="two-up">
+    {%- for c in with_looks[:3] %}
+    <a class="two-card" href="/card/{{ c.look.id }}" data-outcome="{{ c.look.outcome }}">
+      <span class="label">Experiment {{ c.experiment_id }} · {{ c.flag }}</span>
+      <span class="two-word">{{ WORDS.get(c.look.outcome, c.look.outcome) }}</span>
+      <span class="two-nums"><span><span class="label">Flagsmith</span><b class="mono">{{ c.look.ctw or '–' }}</b></span><span><span class="label">Contract needs</span><b class="mono">{{ c.look.needs or '–' }}</b>{% if c.look.needs %}<small class="mono"> z {{ c.look.bz }}</small>{% endif %}</span></span>
+      <span class="two-foot">{% if c.source %}<span class="chip-src" data-sim="{{ 'true' if c.source.simulated else 'false' }}" style="font-size:11px;padding:2px 6px">{% if c.source.simulated %}<span class="sw" aria-hidden="true"></span>{% endif %}{{ c.source.chip }}</span>{% endif %}{{ glyph(c.glyph) }}</span>
+      {%- if c.deviations %}<span class="dev-flag">{{ c.deviations | length }} change{{ 's' if c.deviations|length != 1 }} outside the contract</span>{% endif %}
+    </a>
+    {%- endfor %}
+  </div>
+</section>
+{%- endif %}
+
+{%- if items %}
+<section class="after-grid" aria-labelledby="list-h">
+  <div class="section-head"><h2 id="list-h">Contracts</h2><p class="muted">Fired and pending first, then active, then signed.</p></div>
+  <div class="table-wrap home-table" role="region" aria-label="Table of contracts, scrollable" tabindex="0">
+  <table>
+    <thead><tr><th scope="col">Contract</th><th scope="col" class="num">Experiment</th><th scope="col">Flag</th><th scope="col">State</th><th scope="col" class="num">Look</th><th scope="col" class="num">Flagsmith</th><th scope="col" class="num">Contract needs</th><th scope="col">Result</th><th scope="col">Data</th><th scope="col">Shape</th></tr></thead>
+    <tbody>
+    {%- for c in items %}
+      {%- set href = ('/card/' ~ c.look.id) if c.look else ('/sign/' ~ c.hash) %}
+      <tr tabindex="0" data-href="{{ href }}">
+        <td><a class="mono" href="/sign/{{ c.hash }}">{{ (c.hash.split(':')[-1])[:12] }}</a></td>
+        <td class="num">{{ c.experiment_id }}</td>
+        <td><code>{{ c.flag or '–' }}</code></td>
+        <td><span class="state-chip" data-s="{{ 'void' if c.error else c.state }}">{{ 'unreadable' if c.error else c.state }}</span></td>
+        {%- if c.look %}
+        <td class="num">{% if c.look.look_number %}{{ c.look.look_number }}/{{ c.looks }}{% else %}–/{{ c.looks }}{% endif %}</td>
+        <td class="num">{{ c.look.ctw or '–' }}</td>
+        <td class="num">{% if c.look.needs %}{{ c.look.needs }} <span class="cell-z">z {{ c.look.bz }}</span>{% else %}–{% endif %}</td>
+        {%- else %}
+        <td class="num" colspan="3" style="text-align:left"><span class="muted">No looks yet</span></td>
+        {%- endif %}
+        <td>{% if c.look %}{{ c.look.word }}{% else %}–{% endif %}{% if c.deviations %}<br><a href="/sign/{{ c.hash }}#deviations" class="dev-flag">{{ c.deviations | length }} outside contract</a>{% endif %}</td>
+        <td>{% if c.source %}<span class="chip-src" data-sim="{{ 'true' if c.source.simulated else 'false' }}" style="font-size:11px;padding:2px 6px">{% if c.source.simulated %}<span class="sw" aria-hidden="true"></span>{% endif %}{{ c.source.chip }}</span>{% endif %}</td>
+        <td>{{ glyph(c.glyph) }}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="cards-list">
+    {%- for c in items %}
+    <a class="sheet" style="display:grid;grid-template-columns:1fr auto;gap:4px 12px;padding:12px 14px;color:var(--ink);text-decoration:none" href="{{ ('/card/' ~ c.look.id) if c.look else ('/sign/' ~ c.hash) }}">
+      <span><span class="mono">{{ (c.hash.split(':')[-1])[:12] }}</span> <span class="state-chip" data-s="{{ c.state }}">{{ c.state }}</span></span>
+      <span style="grid-row:span 2;align-self:center">{{ glyph(c.glyph) }}</span>
+      <span class="mono" style="font-size:14px">{% if c.look %}<b style="font-family:var(--f-ui)">{{ c.look.word }}</b> · {% endif %}{% if c.deviations %}<span style="color:var(--loss)">{{ c.deviations | length }} outside contract</span> · {% endif %}{% if c.look and c.look.ctw %}{{ c.look.ctw }} / needs {{ c.look.needs or '–' }}{% if c.look.needs %} (z {{ c.look.bz }}){% endif %}{% else %}<span class="muted">No looks yet</span>{% endif %}</span>
+    </a>
+    {%- endfor %}
+  </div>
+</section>
+{%- endif %}
+{% endblock %}

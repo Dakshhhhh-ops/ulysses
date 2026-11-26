@@ -1,0 +1,17 @@
+{
+  "name": "ulysses-web",
+  "private": true,
+  "type": "module",
+  "description": "Front-end source for the Ulysses contract service: the boundary-bell instrument (three.js), bundled into src/ulysses/service/static/dist.",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test src/parity.test.js"
+  },
+  "devDependencies": {
+    "three": "0.180.0",
+    "esbuild": "0.25.5",
+    "@fontsource/ibm-plex-sans-condensed": "5.2.5",
+    "@fontsource/ibm-plex-mono": "5.2.5",
+    "@fontsource-variable/source-serif-4": "5.2.5"
+  }
+}

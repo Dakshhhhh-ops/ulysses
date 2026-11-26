@@ -1,0 +1,71 @@
+{#- Shared page parts: deviations, guardrails, and the signer's identity. -#}
+
+{% macro deviation_record(devs, horizon_looks=none) -%}
+{%- if devs %}
+<section class="dev after-grid" id="deviations" aria-labelledby="dev-h">
+  <div class="section-head">
+    <h2 id="dev-h">Changed outside the contract</h2>
+    <p class="muted">From Flagsmith's audit log. No signature from this contract covers these changes.</p>
+  </div>
+  <ol class="dev-list">
+    {%- for d in devs %}
+    <li>
+      <span class="state-chip" data-s="deviated">deviation</span>
+      <span class="dev-what">{{ d.log }}</span>
+      <span class="dev-meta">by {% if d.author %}<span class="mono">{{ d.author }}</span>{% else %}an API key (Flagsmith records no user for API-key changes){% endif %} · {{ d.when }}{% if d.audit_id %} · audit entry <span class="mono">{{ d.audit_id }}</span>{% endif %}</span>
+    </li>
+    {%- endfor %}
+  </ol>
+</section>
+{%- endif %}
+{%- endmacro %}
+
+{% macro guardrail_table(rows) -%}
+{%- if rows %}
+<section class="after-grid" aria-labelledby="gr-h">
+  <div class="section-head">
+    <h2 id="gr-h">Guardrails at this refresh</h2>
+    <p class="muted">Checked at the counted looks. A guardrail stop never ships anything.</p>
+  </div>
+  <div class="table-wrap" role="region" aria-label="Table of guardrails, scrollable" tabindex="0">
+  <table>
+    <thead><tr><th scope="col">Metric</th><th scope="col">Signed rule</th><th scope="col" class="num">Flagsmith: chance it got worse</th><th scope="col" class="num">Contract stops at</th><th scope="col">Status</th></tr></thead>
+    <tbody>
+    {%- for g in rows %}
+      <tr>
+        <td><code>{{ g.name }}</code><span class="sub" style="display:block;color:var(--graphite);font-size:13px">should {{ g.direction }}</span></td>
+        <td style="font-size:13px">{{ g.rule }}</td>
+        <td class="num">{% if g.worse %}{{ g.worse }}{% if g.worse_z %} <span class="cell-z">z {{ g.worse_z }}</span>{% endif %}{% else %}<span class="muted">no result yet</span>{% endif %}</td>
+        <td class="num">{% if g.stop_at %}{{ g.stop_at }}{% else %}<span class="muted">–</span>{% endif %}</td>
+        <td><span class="state-chip" data-s="{{ {'breach': 'deviated', 'pass': 'signed'}.get(g.state, 'superseded') }}">{{ g.word }}</span></td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  </div>
+  {%- if rows | selectattr("state", "equalto", "no_result") | list %}
+  <p class="footnote">No reading yet: Flagsmith reports a metric once each arm has 50 identities and, for occurrence metrics, 5 conversions. A guardrail with no reading cannot stop the experiment at this look.</p>
+  {%- endif %}
+  {%- if rows | selectattr("state", "equalto", "unrecorded") | list %}
+  <p class="footnote">This look was taken before the service recorded guardrail boundaries per look, so only Flagsmith's reading is shown.</p>
+  {%- endif %}
+</section>
+{%- endif %}
+{%- endmacro %}
+
+{#- Who is signing, with which key. The browser check is filled in by the page script. -#}
+{% macro signer_block(keys, roles, authorises) -%}
+<div class="who" aria-labelledby="who-h">
+  <p class="label" id="who-h">Who is signing, with which key</p>
+  <dl class="who-grid">
+    {%- for r in roles %}
+    <div class="who-row" data-role-row="{{ r }}"{% if not loop.first %} hidden{% endif %}>
+      <dt>Signer</dt><dd><strong>{{ keys[r].name }}</strong> ({{ r | replace('_', ' ') }})</dd>
+      <dt>Key named in the contract</dt><dd class="mono" title="{{ keys[r].key }}">ed25519 {{ keys[r].fp }}</dd>
+      <dt>Key in this browser</dt><dd class="mono" data-browser-key="{{ keys[r].name }}" data-expect="{{ keys[r].key }}">checking…</dd>
+    </div>
+    {%- endfor %}
+    <div class="who-row"><dt>Authorises</dt><dd>{{ authorises }}</dd></div>
+  </dl>
+</div>
+{%- endmacro %}

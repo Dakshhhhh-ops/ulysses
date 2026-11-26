@@ -1,0 +1,134 @@
+{#- The flat front view of the instrument: the fallback, the pre-load placeholder and the table glyphs.
+    Same constants and the same projection as the WebGL Read view (see service/scene.py). -#}
+{% macro elevation_svg(scene, cls="elevation", glyph=false) -%}
+{%- set e = elevation(scene) -%}
+{%- set b = e.box -%}
+{%- set wire = scene.wire or not scene.signed -%}
+{%- set cur = scene.decision -%}
+<svg class="{{ cls }}" viewBox="{{ b[0] }} {{ b[1] }} {{ b[2] }} {{ b[3] }}" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
+  {%- if not glyph %}
+  <path class="banner-fill" d="M{{ e.mast[0] + 0.2 }} {{ -e.banner }} H{{ e.mast[1] - 0.2 }} V{{ e.banner }} H{{ e.mast[0] + 0.2 }} Z"/>
+  {%- endif %}
+  {%- if e.profile and not wire and not glyph %}
+  <path class="env" d="{{ envelope_path(e.profile) }}"/>
+  {%- endif %}
+  {%- if not glyph %}
+  <line class="banner" x1="{{ e.mast[0] + 0.2 }}" y1="{{ -e.banner }}" x2="{{ e.mast[1] - 0.2 }}" y2="{{ -e.banner }}" vector-effect="non-scaling-stroke"/>
+  <line class="banner" x1="{{ e.mast[0] + 0.2 }}" y1="{{ e.banner }}" x2="{{ e.mast[1] - 0.2 }}" y2="{{ e.banner }}" vector-effect="non-scaling-stroke"/>
+  {%- endif %}
+  <line class="mast" x1="{{ e.mast[0] }}" y1="0" x2="{{ e.mast[1] }}" y2="0" vector-effect="non-scaling-stroke"/>
+  {%- if e.profile and not glyph %}
+  <path class="edge" d="{{ svg_path(e.profile, 1) }}" vector-effect="non-scaling-stroke"/>
+  <path class="edge" d="{{ svg_path(e.profile, -1) }}" vector-effect="non-scaling-stroke"/>
+  {%- endif %}
+  {%- for s in e.proposed %}
+  <line class="sup" x1="{{ s.x }}" y1="{{ -s.r }}" x2="{{ s.x }}" y2="{{ s.r }}" stroke-width="0.03"{% if s.dashed %} stroke-dasharray="0.12 0.08"{% endif %}/>
+  {%- endfor %}
+  {%- for r in e.rings %}
+  {%- set w = 0.068 if r.state in (3, 4) else (0.052 if r.state == 2 else (0.02 if r.state == 7 else 0.04)) %}
+  {%- set dim = scene.dim_after and cur and cur.look_number is none and r.state in (0, 6) %}
+  {%- if r.open and r.side %}
+    {%- set gap = r.r * 0.6428 %}
+    {%- if r.side > 0 %}
+  <line class="ring s{{ r.state }}" x1="{{ r.x }}" y1="{{ -gap }}" x2="{{ r.x }}" y2="{{ r.r }}" stroke-width="{{ w }}"/>
+    {%- else %}
+  <line class="ring s{{ r.state }}" x1="{{ r.x }}" y1="{{ -r.r }}" x2="{{ r.x }}" y2="{{ gap }}" stroke-width="{{ w }}"/>
+    {%- endif %}
+  {%- else %}
+  <line class="ring s{{ r.state }}{% if dim %} dim{% endif %}" data-k="{{ r.k }}" x1="{{ r.x }}" y1="{{ -r.r }}" x2="{{ r.x }}" y2="{{ r.r }}" stroke-width="{{ w }}"{% if r.state == 6 %} stroke-dasharray="0.12 0.1"{% elif r.state == 7 %} stroke-dasharray="0.04 0.06"{% endif %}/>
+  {%- endif %}
+  {%- endfor %}
+  {%- if scene.paths %}{% set ff = fan_flat(scene) %}
+  <g class="fan">{% for l in ff.lines %}<polyline class="fan-{{ l.cat }}" points="{{ l.d }}" vector-effect="non-scaling-stroke"/>{% endfor %}</g>
+  <g class="fan-dots">{% for d in ff.dots %}<circle class="dot-{{ d.cat }}" cx="{{ d.x }}" cy="{{ d.y }}" r="0.045"/>{% endfor %}</g>
+  {%- endif %}
+  {%- for run in e.thread %}
+  <polyline class="thread" points="{% for p in run %}{{ p[0] }},{{ -p[1] }} {% endfor %}" vector-effect="non-scaling-stroke"/>
+  {%- endfor %}
+  {%- for bd in e.beads %}
+    {%- if bd.kind == "bead" %}<circle class="bead" cx="{{ bd.x }}" cy="{{ -bd.y }}" r="0.05"/>
+    {%- elif bd.kind == "current" %}<circle class="bead" cx="{{ bd.x }}" cy="{{ -bd.y }}" r="0.08"/>{% if not glyph %}<circle class="halo" cx="{{ bd.x }}" cy="{{ -bd.y }}" r="0.118" vector-effect="non-scaling-stroke"/><line class="needle" x1="{{ bd.x }}" y1="0" x2="{{ bd.x }}" y2="{{ -bd.y }}" vector-effect="non-scaling-stroke"/>{% endif %}
+    {%- elif bd.kind in ("hollow", "current-hollow") %}<circle class="hollow" cx="{{ bd.x }}" cy="{{ -bd.y }}" r="0.07" vector-effect="non-scaling-stroke"/>
+    {%- else %}<circle class="hollow" cx="{{ bd.x }}" cy="0" r="0.07" vector-effect="non-scaling-stroke"/>
+    {%- endif %}
+  {%- endfor %}
+</svg>
+{%- endmacro %}
+
+{% macro glyph(g) -%}
+{%- set b = g.box -%}
+<svg class="glyph" viewBox="{{ b[0] }} {{ b[1] }} {{ b[2] }} {{ b[3] }}" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+  <line x1="{{ g.mast[0] }}" y1="0" x2="{{ g.mast[1] }}" y2="0" stroke="var(--ink)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+  {%- if g.profile %}
+  <path d="{{ svg_path(g.profile, 1) }}" fill="none" stroke="var(--contract)" stroke-width="1.25" vector-effect="non-scaling-stroke"/>
+  <path d="{{ svg_path(g.profile, -1) }}" fill="none" stroke="var(--contract)" stroke-width="1.25" vector-effect="non-scaling-stroke"/>
+  {%- endif %}
+  {%- for bd in g.beads %}{% if bd.kind != "tick" %}<line x1="{{ bd.x }}" y1="0" x2="{{ bd.x }}" y2="{{ -bd.y }}" stroke="var(--ink)" stroke-width="1" vector-effect="non-scaling-stroke"/><rect x="{{ bd.x - 0.09 }}" y="{{ -bd.y - 0.32 }}" width="0.18" height="0.64" fill="var(--ink)"/>{% endif %}{% endfor %}
+</svg>
+{%- endmacro %}
+
+{% macro data_chip(src) -%}
+{%- if src %}
+<span class="chip-src" data-sim="{{ 'true' if src.simulated else 'false' }}" title="Where this page's numbers come from">
+  {%- if src.simulated %}<span class="sw" aria-hidden="true"></span>{% else %}<span class="dot" aria-hidden="true"></span>{% endif %}
+  <span><span class="visually-hidden">Data source: </span>{{ src.chip }}</span>
+</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro icon(name) -%}
+{%- if name == "mast" -%}
+<svg viewBox="0 0 22 22" aria-hidden="true" focusable="false"><path d="M1 11h20" stroke="currentColor" stroke-width="1.5"/><path d="M4 3v16M8 5v12M12 7v8M16 8.5v5" stroke="var(--contract)" stroke-width="1.5"/><circle cx="12" cy="9" r="1.6" fill="currentColor"/></svg>
+{%- elif name == "up" -%}
+<svg viewBox="0 0 10 12" aria-hidden="true" focusable="false"><path d="M5 11V2M1.5 5L5 1.5 8.5 5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+{%- elif name == "down" -%}
+<svg viewBox="0 0 10 12" aria-hidden="true" focusable="false"><path d="M5 1v9M1.5 7L5 10.5 8.5 7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+{%- elif name == "prev" -%}
+<svg viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M7 1L3 5l4 4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+{%- elif name == "next" -%}
+<svg viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M3 1l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+{%- elif name == "ring" -%}
+<svg class="ring-ic" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="2.5 2"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro legend_key(kind) -%}
+{%- if kind == "contract" -%}<svg viewBox="0 0 28 10" aria-hidden="true"><path d="M2 1v8M9 2v6M16 3v4" stroke="var(--contract)" stroke-width="2"/><path d="M2 1L16 3M2 9l14-2" stroke="var(--contract)" stroke-width="1"/></svg>
+{%- elif kind == "banner" -%}<svg viewBox="0 0 28 10" aria-hidden="true"><path d="M0 5h28" stroke="var(--flagsmith)" stroke-width="1.5" stroke-dasharray="4 3"/></svg>
+{%- elif kind == "thread" -%}<svg viewBox="0 0 28 10" aria-hidden="true"><path d="M1 8l9-4 9 2 8-5" stroke="var(--ink)" stroke-width="2" fill="none"/><circle cx="10" cy="4" r="2" fill="var(--ink)"/><circle cx="19" cy="6" r="2" fill="var(--ink)"/></svg>
+{%- elif kind == "hollow" -%}<svg viewBox="0 0 28 10" aria-hidden="true"><circle cx="14" cy="5" r="3" fill="none" stroke="var(--ink)" stroke-width="1.25"/></svg>
+{%- elif kind == "amber" -%}<svg viewBox="0 0 28 10" aria-hidden="true"><path d="M4 1v8M12 2v6M20 3v4" stroke="var(--amber)" stroke-width="1.5"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
+{#- One instrument plate. `controls`: show Inspect/Read. `foot`: caller() content under the stage. -#}
+{% macro plate(scene, label, height=520, band=none, title=none, controls=true, axis=true, note=none, tall=false, extra_cls="") -%}
+<figure class="plate {{ extra_cls }}" data-instrument>
+  <span class="cm tl"></span><span class="cm tr"></span><span class="cm bl"></span><span class="cm br"></span>
+  {%- if band %}
+  <div class="plate-band" data-tone="{{ 'amber' if scene.source and scene.source.simulated and scene.source.kind != 'example' else 'ink' }}"><span class="tag">{{ band }}</span></div>
+  {%- endif %}
+  <div class="plate-stage-wrap">
+    {%- if controls %}
+    <div class="plate-controls">
+      <div class="seg rv" role="group" aria-label="View">
+        <button type="button" data-view="inspect" aria-pressed="false">Inspect</button>
+        <button type="button" data-view="read" aria-pressed="true">Read</button>
+      </div>
+      <button type="button" class="quiet turn-btn" data-turn aria-pressed="false">Turn</button>
+    </div>
+    {%- endif %}
+    <div class="plate-stage{% if tall %} tall{% endif %}" style="height:{{ height }}px" role="img" aria-label="{{ label }}"{% if scene.expired %} data-dim="true"{% endif %}>
+      {{ elevation_svg(scene) }}
+      <div class="chips" aria-hidden="true"></div>
+      {%- if axis %}
+      <span class="plate-axis up" aria-hidden="true">{{ icon("up") }}{{ (scene.contract.arms[1] if scene.contract and scene.contract.arms else "variation") }} ahead</span>
+      <span class="plate-axis down" aria-hidden="true">{{ icon("down") }}{{ (scene.contract.arms[0] if scene.contract and scene.contract.arms else "control") }} ahead</span>
+      {%- endif %}
+      {%- if note %}<p class="plate-note">{{ note }}</p>{% endif %}
+    </div>
+  </div>
+  {%- if caller is defined %}{{ caller() }}{% endif %}
+  <script type="application/json" class="instrument-data">{{ scene_json(scene) | safe }}</script>
+</figure>
+{%- endmacro %}

@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% from "_elevation.html" import plate, legend_key, icon %}
+{% from "_parts.html" import deviation_record, guardrail_table, signer_block %}
+{% set nav = "home" %}
+{% set s = d.contract.summary %}
+{% block title %}{% if d.kind == 'look' %}{{ scene.decision.word }} · experiment {{ s.experiment }}{% else %}Amendment · experiment {{ s.experiment }}{% endif %} · Ulysses{% endblock %}
+{% block main %}
+{%- set arm_c = s.arms[0] -%}
+{%- set arm_t = s.arms[1] -%}
+{%- set p = d.proposal -%}
+{%- macro action_panel(p, executed_sentence) -%}
+<section class="action" id="confirm-panel" data-proposal="{{ p.id }}" aria-labelledby="action-h">
+  <div class="action-head">
+    <h2 id="action-h">Pre-signed action</h2>
+    <span class="state-chip" data-s="{{ p.state }}">{{ p.state }}</span>
+  </div>
+  <p class="action-text">{% if p.action == 'ship_treatment' %}Complete experiment {{ s.experiment }} and serve <code>{{ arm_t }}</code> to everyone on <code>{{ s.flag }}</code>.{% else %}Complete experiment {{ s.experiment }} and keep serving <code>{{ arm_c }}</code> on <code>{{ s.flag }}</code>.{% endif %}</p>
+  {%- if p.result %}
+  <p class="result" role="status"><span>Flag <code>{{ p.result.flag }}</code> now serves <code>{{ p.result.serving }}</code>.</span></p>
+  {%- endif %}
+  {%- if p.state == 'pending' %}
+  {%- set what = "One Flagsmith call: complete experiment " ~ s.experiment ~ " and serve " ~ (arm_t if p.action == 'ship_treatment' else arm_c) ~ " to everyone on " ~ s.flag ~ ". Nothing else." %}
+  {{ signer_block(keys, ['owner'], what) }}
+  <div class="action-grid">
+    <div class="mobile-bar">
+      <button id="confirm-btn" class="big-btn" type="button">Confirm as {{ d.contract.owner }}</button>
+    </div>
+    <p class="key-note" id="key-note">Your tap signs the text below with the key held in this browser; the service then makes one Flagsmith call.</p>
+  </div>
+  <details open><summary>The exact text your key signs</summary><pre class="mono" id="confirm-text">{{ d.confirm_message }}</pre></details>
+  <details><summary>Confirm from the command line</summary><p class="cmd"><code>ulysses confirm {{ p.id }} --as {{ d.contract.owner }}</code></p></details>
+  {%- elif p.state == 'failed' %}
+  <p class="key-note">The Flagsmith call failed; the agent may retry the same pre-signed action.</p>
+  {%- endif %}
+  <div class="msg" id="msg" hidden role="status" aria-live="polite" tabindex="-1"></div>
+</section>
+{%- endmacro -%}
+
+{% if d.kind == 'look' %}
+{%- set sc = scene -%}
+{%- set dec = d.decision -%}
+{%- set k = dec.look_number -%}
+{%- set N = dec.looks_planned -%}
+{%- set err = sc.flagsmith_missing -%}
+{%- set outcome = 'error' if err else dec.outcome -%}
+{%- set needs = sc.decision.needs -%}
+{%- set late = k and sc.decision.planned_t is not none and (sc.decision.t - sc.decision.planned_t)|abs > 0.002 -%}
+
+<section class="verdict" data-outcome="{{ outcome }}" aria-labelledby="verdict-word">
+  <div class="verdict-top">
+    <div>
+      <p class="label">Experiment {{ s.experiment }} · <span class="mono">{{ s.flag }}</span> · {{ arm_c }} vs {{ arm_t }}</p>
+      <h1 class="verdict-word" id="verdict-word">{% if err %}FLAGSMITH RESULTS UNAVAILABLE{% else %}{{ sc.decision.word }}{% endif %}</h1>
+    </div>
+    <div class="verdict-meta">
+      <span>{% if k %}LOOK {{ k }} OF {{ N }}{% else %}REFRESH {{ d.look.seq }} · NOT A LOOK{% endif %}</span>
+      <span>CONTRACT <a href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a></span>
+      {%- if later %}<span data-later-id="{{ later.id }}"><a href="/card/{{ later.id }}">A later look exists: refresh {{ d.history[-1].seq }}</a></span>
+      {%- elif not dec.fires %}<span hidden data-poll="/card/{{ ident }}"></span>{% endif %}
+    </div>
+  </div>
+  <p class="verdict-sentence">
+  {%- if err -%}
+    The service could not read Flagsmith's results for this refresh. It retries at the next scheduled look; run <code>ulysses look {{ d.contract.hash | short }}</code> to retry now.
+  {%- elif outcome == 'hold' -%}
+    Flagsmith chance to win {{ sc.decision.ctw }}; the contract needs {{ needs }} (z&nbsp;{{ sc.decision.bz_text }}) at look {{ k }} of {{ N }}.
+  {%- elif outcome == 'watch' -%}
+    This refresh is not a look. The next look is at {{ dec.next_look_at_identities | count }} identities per arm{% if sc.decision.ctw %}; Flagsmith reads {{ sc.decision.ctw }} now and the contract does not act on it{% endif %}.
+  {%- elif outcome == 'not_ready' -%}
+    Flagsmith reports a chance to win once each arm has 50 identities (and 5 conversions for occurrence metrics). Next look at {{ dec.next_look_at_identities | count }} per arm.
+  {%- elif outcome == 'win' -%}
+    Flagsmith chance to win {{ sc.decision.ctw }} crossed the contract's {{ needs }} (z&nbsp;{{ sc.decision.bz_text }}) at look {{ k }} of {{ N }}.
+  {%- elif outcome == 'loss' -%}
+    Flagsmith chance to win {{ sc.decision.ctw }} fell below the contract's {{ dec.boundary_chance | bloss(dec.boundary_z) }} (z&nbsp;−{{ sc.decision.bz_text }}) at look {{ k }} of {{ N }}.
+  {%- elif outcome == 'horizon' -%}
+    The horizon of {{ sc.contract.horizon | count }} identities per arm is reached without crossing the boundary.
+  {%- elif outcome == 'guardrail_breach' -%}
+    {{ dec.reason }}
+  {%- endif -%}
+  </p>
+  <details><summary>Why, in the engine's words</summary><p class="why">{{ dec.reason }}</p></details>
+</section>
+
+{% if p %}{{ action_panel(p) }}{% endif %}
+
+<div class="grid-12 card-grid">
+  <div class="col-8">
+    {%- set band = sc.source.band if sc.source.simulated else none -%}
+    {%- if err %}{% set pnote = "No current bead: Flagsmith returned no results for this refresh." %}{% elif outcome == 'not_ready' %}{% set pnote = "Collecting data: no chance to win yet, so no bead is drawn." %}{% else %}{% set pnote = none %}{% endif %}
+    {% call plate(sc, aria_label(sc), height=520, band=band, note=pnote) %}
+      {%- set hist = sc.history -%}
+      {%- if hist|length > 1 %}
+      <div class="slider" data-slider>
+        <span class="lab" id="look-lab">Refresh</span>
+        <button type="button" class="step" data-step="-1" aria-label="Previous refresh">{{ icon("prev") }}</button>
+        <input type="range" id="look-range" min="1" max="{{ hist|length }}" value="{{ hist|length }}" step="1" aria-labelledby="look-lab" aria-describedby="look-out">
+        <button type="button" class="step" data-step="1" aria-label="Next refresh">{{ icon("next") }}</button>
+        <output id="look-out" for="look-range">{% if k %}Look {{ k }} of {{ N }}{% else %}Refresh {{ d.look.seq }}{% endif %}</output>
+      </div>
+      {%- endif %}
+      <div class="plate-foot">
+        <div class="legend">
+          <span class="key">{{ legend_key("contract") }}Signed boundary (rings)</span>
+          <span class="key">{{ legend_key("banner") }}Flagsmith docs: over 95% reads as Winning, under 5% as Losing</span>
+          <span class="key">{{ legend_key("thread") }}Flagsmith chance to win, as z</span>
+          <span class="key">{{ legend_key("hollow") }}Refresh, not a look</span>
+        </div>
+        <div class="title-block">
+          <div><b>EXP</b> {{ s.experiment }} · {{ s.flag }}</div>
+          <div><b>LOOK</b> {% if k %}{{ k }} / {{ N }}{% else %}– / {{ N }}{% endif %}</div>
+          <div><b>CONTRACT</b> <span class="mono" data-copy-src>{{ (d.contract.hash.split(':')[-1])[:12] }}</span><button type="button" class="copy-btn" data-copy="{{ d.contract.hash }}">Copy</button></div>
+          <div>{{ sc.source.chip | upper }}</div>
+        </div>
+      </div>
+      <figcaption class="cap">{{ aria_label(sc) }} The shell joins the signed boundaries; the rule applies only at the rings.</figcaption>
+    {% endcall %}
+    <p class="visually-hidden" aria-live="polite" id="look-say"></p>
+    {%- if late %}
+    <p class="footnote">Look {{ k }} landed at <span class="mono">{{ dec.identities_per_arm | count }}</span> per arm, after its planned <span class="mono">{{ sc.planned[k-1].n | count }}</span>; its boundary was recomputed from the same signed rule. The planned ring is drawn dotted.</p>
+    {%- endif %}
+  </div>
+
+  <aside class="col-4 readout" aria-busy="false" aria-label="Readout">
+    <div class="readout-pair">
+      <div>
+        <p class="label read-key">{{ legend_key("thread") }}Flagsmith says</p>
+        <p class="big flag">{% if sc.decision.ctw %}{{ sc.decision.ctw }}{% elif err %}<span class="big long">no results</span>{% else %}<span class="big long">collecting data</span>{% endif %}</p>
+        {%- if sc.decision.ctw %}<p class="read-line">chance to win on <span class="mono">{{ metric }}</span> · z <span class="mono">{{ sc.decision.z_text }}</span></p>{% endif %}
+        {%- if lift %}<p class="read-line">lift <span class="mono">{{ lift }}</span> {{ arm_t }} over {{ arm_c }}</p>{% endif %}
+        {%- if arms_n %}<p class="read-line">n {% for a, n in arms_n.items() %}{{ a }} <span class="mono">{{ n | count }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+      </div>
+      <div>
+        <p class="label read-key">{{ legend_key("contract") }}Contract needs</p>
+        {%- if needs %}
+        <p class="big{% if needs|length > 10 %} long{% endif %}">{{ needs }}<small>z {{ sc.decision.bz_text }}</small></p>
+        {%- elif dec.counted %}
+        <p class="big long">no stop possible</p>
+        {%- else %}
+        <p class="big long">not a look</p>
+        {%- endif %}
+        <p class="read-line">{% if k %}look {{ k }} of {{ N }} · <span class="mono">{{ dec.identities_per_arm | count }}</span> per arm{% else %}<span class="mono">{{ dec.identities_per_arm | count }}</span> per arm so far{% endif %}</p>
+        {%- if dec.next_look_at_identities %}<p class="read-line">next look at <span class="mono">{{ dec.next_look_at_identities | count }}</span> per arm</p>{% endif %}
+        {%- if dec.counted and dec.boundary_z %}<p class="read-line">a loss is called below <span class="mono">{{ dec.boundary_chance | bloss(dec.boundary_z) }}</span></p>{% endif %}
+      </div>
+    </div>
+    <div>
+      <p class="label">Source</p>
+      <p class="read-line" style="color:var(--ink)">{{ sc.source.chip }}{% if sc.source.detail %}: {{ sc.source.detail }}{% endif %}</p>
+      {%- if as_of %}<p class="read-line">Flagsmith computed these results<br><span class="mono" style="white-space:nowrap">{{ as_of }}</span></p>{% endif %}
+      <p class="read-line">SRM: {% if d.flagsmith and d.flagsmith.srm_p_value is not none %}p <span class="mono">{{ '%.4f' | format(d.flagsmith.srm_p_value) }}</span>{% else %}not computed by Flagsmith for this experiment{% endif %}</p>
+      {%- if guardrail_rows %}<p class="read-line">Guardrails: {% for g in guardrail_rows %}<span class="mono">{{ g.name }}</span> {{ {'breach': 'breached', 'pass': 'within rule', 'none': 'no reading yet'}[g.state] }}{% if not loop.last %}; {% endif %}{% endfor %}. <a href="#gr-h">Details</a></p>{% endif %}
+      {%- if deviations %}<p class="read-line" style="color:var(--loss)">{{ deviations | length }} change{{ 's' if deviations|length != 1 }} outside the contract. <a href="#deviations">See below</a></p>{% endif %}
+    </div>
+  </aside>
+</div>
+
+{{ guardrail_table(guardrail_rows) }}
+{{ deviation_record(deviations) }}
+
+<section class="after-grid" aria-labelledby="looks-h">
+  <div class="section-head">
+    <h2 id="looks-h">Every look so far</h2>
+    <p class="muted">Rows are refreshes of Flagsmith's results. Only scheduled ones are looks.</p>
+  </div>
+  <div class="table-wrap sticky-first" role="region" aria-label="Table of every look, scrollable" tabindex="0">
+  <table data-looks>
+    <thead><tr><th scope="col">Refresh</th><th scope="col">Look</th><th scope="col" class="num">Per arm</th><th scope="col" class="num">Flagsmith chance to win</th><th scope="col" class="num">Contract needs</th>{% if guardrails %}<th scope="col" class="num">Guardrail: chance worse</th>{% endif %}<th scope="col">Result</th></tr></thead>
+    <tbody>
+    {%- for x in d.history %}
+    {%- set lk = look_numbers.get(x.seq) %}
+    {%- set say -%}{% if lk %}Look {{ lk }} of {{ N }}{% else %}Refresh {{ x.seq }}, not a look{% endif %}: Flagsmith {{ x.chance_to_win | ctw if x.chance_to_win is not none else "no result yet" }}{% if x.boundary_z is not none %}, contract {{ x.boundary_chance | bchance(x.boundary_z) }}{% endif %}, {{ SHORT.get(x.outcome, x.outcome) | lower }}.{%- endset %}
+      <tr tabindex="0" data-seq="{{ x.seq }}" data-say="{{ say }}" data-out="{% if lk %}Look {{ lk }} of {{ N }}{% else %}Refresh {{ x.seq }} · not a look{% endif %}" class="{% if x.seq == d.look.seq %}current{% elif x.seq > d.look.seq %}later{% endif %}">
+        <td class="num" style="text-align:left">{{ x.seq }}</td>
+        <td>{% if lk %}{{ lk }} of {{ N }}{% else %}<span class="muted">(not a look)</span>{% endif %}</td>
+        <td class="num">{{ x.identities_per_arm | count }}</td>
+        <td class="num">{% if x.chance_to_win is not none %}{{ x.chance_to_win | ctw }} <span class="cell-z">z {{ x.z | zval }}</span>{% else %}<span class="muted">no result yet</span>{% endif %}</td>
+        <td class="num">{% if x.boundary_z is not none %}{{ x.boundary_chance | bchance(x.boundary_z) }} <span class="cell-z">z {{ x.boundary_z | zval }}</span>{% elif x.counted %}<span class="muted">no stop possible</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+        {%- if guardrails %}<td class="num">{% for g in guardrails_by_seq.get(x.seq, []) %}{% if g.worse %}{{ g.worse }}{% else %}<span class="muted">no result</span>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</td>{% endif %}
+        <td>{{ SHORT.get(x.outcome, x.outcome) }}{% if x.seq > d.look.seq %} <a href="/card/{{ later.id if later else '' }}" class="muted">(later)</a>{% endif %}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="footnote">Contract <a class="mono" href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a> · {{ s.boundary }} · {{ s.horizon }}.{% if as_of %} Flagsmith computed these results <span class="mono">{{ as_of }}</span>.{% endif %} A loss is called at the mirror image of each boundary.</p>
+</section>
+
+{% else %}
+{#- a proposal card: an amendment that authorises an action now -#}
+<section class="verdict" data-outcome="amendment" aria-labelledby="verdict-word">
+  <div class="verdict-top">
+    <div>
+      <p class="label">Experiment {{ s.experiment }} · <span class="mono">{{ s.flag }}</span></p>
+      <h1 class="verdict-word" id="verdict-word">AMENDMENT</h1>
+    </div>
+    <div class="verdict-meta"><span>CONTRACT <a href="/sign/{{ d.contract.hash }}">{{ d.contract.hash | short }}</a></span></div>
+  </div>
+  {%- if d.contract.amendment %}<p class="pull">{{ d.contract.amendment.reason }}</p>{% endif %}
+  <p class="verdict-sentence">Signed by the owner and the second signer. It authorises: {{ p.action | replace('_', ' ') }} on <code>{{ s.flag }}</code>.</p>
+</section>
+{{ action_panel(p) }}
+{% call plate(scene, aria_label(scene), height=440, band=(scene.source.band if scene.source.simulated else none), controls=true) %}
+  <figcaption class="cap">The signed boundary this amendment acts under.</figcaption>
+{% endcall %}
+{% endif %}
+
+<script type="module">
+import { webCryptoReady, keyNames, publicKeyOf, signText, postJson, say } from "/static/ulysses.js";
+const btn = document.getElementById("confirm-btn");
+if (btn) {
+  const owner = {{ d.contract.owner | tojson }};
+  const msg = document.getElementById("msg");
+  const note = document.getElementById("key-note");
+  const have = webCryptoReady() ? await keyNames() : [];
+  const cell = document.querySelector(`[data-browser-key="${owner}"]`);
+  let mismatch = false;
+  if (cell) {
+    const mine = have.includes(owner) ? await publicKeyOf(owner) : null;
+    const fp = (k) => { const b = k.split(":").pop(); return `${b.slice(0, 8)}…${b.slice(-8)}`; };
+    mismatch = !!mine && mine !== cell.dataset.expect;
+    cell.textContent = !mine ? "none for " + owner : (mismatch ? `ed25519 ${fp(mine)}: a different key; the service would refuse it` : `ed25519 ${fp(mine)}: the same key`);
+    cell.dataset.state = !mine ? "none" : (mismatch ? "bad" : "ok");
+  }
+  if (mismatch) { btn.disabled = true; btn.textContent = "This browser's key is not the contract's"; }
+  else if (!have.includes(owner)) {
+    btn.disabled = true;
+    btn.textContent = `No key for ${owner} in this browser`;
+    note.textContent = `This browser holds no signing key for ${owner}. Confirm with the command line below, or open ${owner}'s enrolment link in this browser first.`;
+    const cli = document.querySelectorAll("#confirm-panel details");
+    if (cli.length) cli[cli.length - 1].open = true;
+  }
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    const label = btn.textContent;
+    btn.textContent = "Signing in this browser…";
+    try {
+      const text = document.getElementById("confirm-text").textContent;
+      const signature = await signText(owner, text);
+      const out = await postJson("/human/confirm", {
+        proposal_id: document.getElementById("confirm-panel").dataset.proposal, signer: owner, signature });
+      say(msg, `Done. ${out.result ? "Flag " + out.result.flag + " now serves " + out.result.serving + "." : out.state}`, "ok");
+      msg.focus();
+      btn.removeAttribute("aria-busy");
+      btn.textContent = "Confirmed";
+      const played = out.state === "executed"
+        ? new Promise((res) => document.dispatchEvent(new CustomEvent("ulysses:executed", { detail: { done: res, result: out.result } })))
+        : Promise.resolve();
+      await Promise.race([played, new Promise((r) => setTimeout(r, 2500))]);
+      setTimeout(() => location.reload(), 600);
+    } catch (e) {
+      say(msg, e.message, "err");
+      btn.removeAttribute("aria-busy");
+      btn.textContent = label;
+      btn.disabled = false;
+    }
+  });
+}
+</script>
+{% endblock %}

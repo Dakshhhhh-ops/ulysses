@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% from "_elevation.html" import plate, legend_key, icon %}
+{% from "_parts.html" import deviation_record, signer_block %}
+{% set s = c.summary %}
+{% set nav = "home" %}
+{% block title %}{% if s.amendment %}Amendment{% else %}Sign contract{% endif %} {{ h | short }} · Ulysses{% endblock %}
+{% block main %}
+{%- set hexh = h.split(':')[-1] -%}
+{%- set am = s.amendment -%}
+{%- set needs = c.needs -%}
+{%- macro diff(field, new_html, old_html) -%}
+  {%- if field in changed and old -%}<span class="changed-label">changed</span><del>{{ old_html }}</del>{{ new_html }}{%- else -%}{{ new_html }}{%- endif -%}
+{%- endmacro -%}
+
+<div class="page-head">
+  <p class="label">{% if am %}Amendment · needs both signers{% else %}Stop contract · signed before any data exists{% endif %}</p>
+  <h1>{% if am %}Amendment to experiment {{ s.experiment }}{% else %}Stop contract for experiment {{ s.experiment }}{% endif %}</h1>
+  <p class="hash-line" aria-label="Contract hash">sha256 {{ hexh[0:16] }} {{ hexh[16:32] }} {{ hexh[32:48] }} {{ hexh[48:64] }} <button type="button" class="copy-btn" data-copy="{{ h }}">Copy</button></p>
+  {%- if am %}
+  <p class="lede">Amends <a class="mono" href="/sign/{{ am.supersedes }}">{{ am.supersedes | short }}</a>. It takes effect only when the owner and the second signer have both signed it.</p>
+  <blockquote class="pull">{{ am.reason }}</blockquote>
+  {%- else %}
+  <p class="lede">Read it before any data exists. Once signed, the agent can start the experiment, and it can only complete it and ship when one of these rules fires.</p>
+  {%- endif %}
+</div>
+
+<div class="grid-12">
+  <div class="col-7">
+    <article class="doc" aria-label="The contract">
+      <div class="clause"><span class="no">§1</span><div><p class="h">Experiment and flag</p>
+        <p class="t">Experiment {{ s.experiment }} runs on flag <code>{{ s.flag }}</code>: <code>{{ s.arms[0] }}</code> against <code>{{ s.arms[1] }}</code>.
+        <span class="state-chip" data-s="{{ c.state }}">{{ c.state }}</span>{% if c.expired %} <span class="state-chip" data-s="expired">expired</span>{% endif %}</p></div></div>
+      <div class="clause"><span class="no">§2</span><div><p class="h">Hypothesis</p><p class="t">{{ s.hypothesis }}</p></div></div>
+      <div class="clause{% if 'primary_metric' in changed %} changed{% endif %}"><span class="no">§3</span><div><p class="h">Primary metric and direction</p>
+        <p class="t">{{ diff('primary_metric', s.primary_metric, old.primary_metric if old else '') }}. Flagsmith's chance to win on this metric is the only number the stop rule reads.</p></div></div>
+      <div class="clause{% if 'guardrails' in changed %} changed{% endif %}"><span class="no">§4</span><div><p class="h">Guardrails</p>
+        <div class="t">{% if s.guardrails %}<ul>{% for g in s.guardrails %}<li>{{ g }}</li>{% endfor %}</ul>{% else %}None. Only the primary metric is watched.{% endif %}
+        {%- if 'guardrails' in changed and old %}<del>{{ old.guardrails | join('; ') or 'none' }}</del>{% endif %}
+        <p>Checked on every refresh. A guardrail stop never ships anything.</p></div></div></div>
+      <div class="clause{% if 'horizon' in changed %} changed{% endif %}"><span class="no">§5</span><div><p class="h">Horizon and looks</p>
+        <p class="t">{{ diff('horizon', s.horizon, old.horizon if old else '') }}. A refresh counts as a look only when the smaller arm reaches the next planned count; refreshes in between change nothing.</p></div></div>
+      <div class="clause{% if 'boundary' in changed %} changed{% endif %}"><span class="no">§6</span><div><p class="h">Stop rule</p>
+        <p class="t">{{ s.boundary }}.
+        {%- if s.first_reachable_look %} The earliest possible stop is look {{ s.first_reachable_look.look }} ({{ s.first_reachable_look.identities_per_arm | count }} per arm), needing a Flagsmith chance to win of {{ s.first_reachable_look.chance_to_win | bchance(s.first_reachable_look.z) }} (z&nbsp;{{ s.first_reachable_look.z | zval }}).{% endif %}
+        At the final look it needs {{ s.final_look.chance_to_win | bchance(s.final_look.z) }} (z&nbsp;{{ s.final_look.z | zval }}). A loss is called at the mirror image.</p>
+        <div class="table-wrap sticky-first" role="region" aria-label="Boundary for each look" tabindex="0" style="margin-top:16px">
+        <table data-boundary>
+          <thead><tr><th scope="col">Look</th><th scope="col" class="num">Identities per arm</th><th scope="col" class="num">Win needs chance to win of</th><th scope="col" class="num">z</th></tr></thead>
+          <tbody>
+          {%- for p in scene.rows %}
+            <tr tabindex="0" data-look="{{ p.look }}" data-leader="Look {{ p.look }} · {{ p.n | count }} per arm · {% if p.z is not none %}needs {{ p.needs }} · z {{ p.z_text }}{% else %}no stop possible{% endif %}">
+              <td>{{ p.look }}</td><td class="num">{{ p.n | count }}</td>
+              <td class="num">{% if p.z is not none %}{{ p.needs }}{% else %}<span class="muted">no stop possible</span>{% endif %}</td>
+              <td class="num">{% if p.z is not none %}{{ p.z_text }}{% else %}<span class="muted">–</span>{% endif %}</td>
+            </tr>
+          {%- endfor %}
+          </tbody>
+        </table>
+        </div>
+        <p class="footnote">If a look lands a little after its planned count, its boundary is recomputed for the identities actually there, from the same signed spending rule.</p>
+      </div></div>
+      <div class="clause{% if 'actions' in changed %} changed{% endif %}"><span class="no">§7</span><div><p class="h">Pre-signed actions</p>
+        <div class="t"><ul>
+          <li>If it wins: {{ s.on_win | replace('_', ' ') }}{% if s.on_win == 'ship_treatment' %} (serve <code>{{ s.arms[1] }}</code> to everyone){% endif %}.</li>
+          <li>If it loses: {{ s.on_loss | replace('_', ' ') }}.</li>
+          <li>Horizon with no decision: {{ s.on_horizon | replace('_', ' ') }}.</li>
+          <li>Guardrail breach: {{ s.on_guardrail_breach | replace('_', ' ') }}.</li>
+          {%- if am and am.action_now %}<li><span class="changed-label">now</span>This amendment authorises one action immediately: <strong>{{ am.action_now | replace('_', ' ') }}</strong>.</li>{% endif %}
+        </ul><p>Each runs only after the owner confirms it with one tap.</p></div></div></div>
+      <div class="clause{% if 'validity' in changed %} changed{% endif %}"><span class="no">§8</span><div><p class="h">Signers and validity</p>
+        <p class="t">Owner <strong>{{ s.owner }}</strong>{% if c.signatures.owner %}, signed{% if not c.signatures.owner.verified %} (signature does not verify){% endif %}{% endif %}. Second signer <strong>{{ s.second_signer }}</strong>, needed for any amendment{% if c.signatures.second_signer %}, signed{% endif %}.
+        Valid for {{ diff('validity', s.expires_after_days ~ ' days', (old.expires_after_days ~ ' days') if old else '') }} from the owner's signature.</p></div></div>
+    </article>
+
+    <section class="sign-panel" id="sign-panel" data-hash="{{ h }}" aria-labelledby="sign-h">
+      <h2 id="sign-h">Sign</h2>
+      {%- if c.expired %}
+      <p><span class="state-chip" data-s="expired">expired</span> This contract has expired and can no longer start an experiment. Draft and sign a new one.</p>
+      {%- elif not needs %}
+      <p>This contract has every signature it needs.</p>
+      {%- else %}
+      {%- if am %}
+      {%- set have = (2 - needs|length) %}
+      <p class="status-strip"><span><b>{{ have }} of 2 signatures.</b> Needs {% for r in needs %}{{ s.owner if r == 'owner' else s.second_signer }} ({{ r | replace('_', ' ') }}){% if not loop.last %} and {% endif %}{% endfor %}.</span></p>
+      {%- endif %}
+      {%- if am %}{% set what = "Replacing contract " ~ (am.supersedes.split(':')[-1])[:12] ~ " with this one" ~ ((", and now: " ~ am.action_now | replace('_', ' ')) if am.action_now else "") ~ ". It takes effect only with both signatures." %}
+      {%- else %}{% set what = "An agent may start experiment " ~ s.experiment ~ " under this contract. From then on it can complete the experiment only by a pre-signed action in §7, and each one still waits for the owner's tap." %}{% endif %}
+      {{ signer_block(keys, needs, what) }}
+      <div>
+        <label class="field" for="role">Signing as</label>
+        <select id="role">
+          {% for r in needs %}<option value="{{ r }}" {% if r == role %}selected{% endif %}>{{ s.owner if r == 'owner' else s.second_signer }} ({{ r | replace('_', ' ') }})</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <p class="label" style="margin-bottom:6px">You are signing this exact text with the key held in this browser</p>
+        {% for r in needs %}<pre class="mono" data-message-for="{{ r }}" {% if r != (role if role in needs else needs[0]) %}hidden{% endif %}>{{ c.messages[r] }}</pre>{% endfor %}
+      </div>
+      <div class="mobile-bar">
+        <button id="sign-btn" class="big-btn" type="button">Sign contract</button>
+      </div>
+      <p class="key-note" id="key-note"></p>
+      <details id="cli-fallback">
+        <summary>No key in this browser? Sign from the command line</summary>
+        <p class="footnote">Run this with your key file; it signs and sends the signature here.</p>
+        <p class="cmd"><code>ulysses sign {{ h }} --as &lt;your name&gt; --role &lt;role&gt;</code></p>
+      </details>
+      <div class="msg" id="msg" hidden role="status" aria-live="polite" tabindex="-1"></div>
+      {%- endif %}
+    </section>
+
+    {{ deviation_record(deviations) }}
+    <details style="margin-top:24px">
+      <summary>The contract file (its SHA-256 is the contract id)</summary>
+      <pre>{{ c.toml }}</pre>
+    </details>
+  </div>
+
+  <div class="col-5 sticky-col order-phone-first">
+    {%- set band = scene.source.band if scene.source.simulated and has_looks else none -%}
+    {% call plate(scene, aria_label(scene), height=360, band=band, axis=false, tall=true) %}
+      <div class="sig-slots">
+        {%- for r, name in [('owner', s.owner), ('second_signer', s.second_signer)] %}
+        {%- set sg = c.signatures[r] %}
+        <div class="sig" data-state="{% if sg and sg.verified %}signed{% elif sg %}bad{% else %}open{% endif %}">
+          {{ icon("ring") }}
+          <span><strong>{{ 'Owner' if r == 'owner' else 'Second signer' }}</strong> · {{ name }} ·
+          {% if sg and sg.verified %}signed{% elif sg %}signature does not verify{% elif r == 'second_signer' and not am %}needed only for amendments{% else %}not signed{% endif %}</span>
+        </div>
+        {%- endfor %}
+      </div>
+      <div class="plate-foot">
+        <div class="legend">
+          <span class="key">{{ legend_key("contract") }}Signed boundary, one ring per look</span>
+          <span class="key">{{ legend_key("banner") }}Flagsmith docs: 95% / 5%</span>
+          {%- if scene.proposed %}<span class="key">{{ legend_key("amber") }}Proposed by this amendment</span>{% endif %}
+        </div>
+      </div>
+      <div class="plate-foot" style="grid-template-columns:1fr">
+        <div class="title-block" style="border-left:0">
+          <div><b>EXP</b> {{ s.experiment }} · {{ s.flag }}</div>
+          <div><b>LOOKS</b> {{ scene.rows | length }}</div>
+          <div><b>CONTRACT</b> {{ hexh[:12] }}</div>
+          <div><b>ALPHA</b> {{ scene.contract.alpha }}</div>
+        </div>
+      </div>
+      <figcaption class="cap">{% if scene.proposed %}The signed original is the cast bell; this amendment's rings are drawn in amber wire.{% elif scene.signed %}Signed: the shell is cast between the rings.{% else %}Before signing the bell is a pencil drawing: rings, edge and banner only.{% endif %} Face it square on (Read) and it is the boundary chart.</figcaption>
+    {% endcall %}
+  </div>
+</div>
+
+<script type="module">
+import { webCryptoReady, keyNames, publicKeyOf, signText, postJson, say } from "/static/ulysses.js";
+const panel = document.getElementById("sign-panel");
+const btn = document.getElementById("sign-btn");
+if (btn) {
+  const roleSel = document.getElementById("role");
+  const msg = document.getElementById("msg");
+  const isAmendment = {{ (am is not none) | tojson }};
+  const names = { owner: {{ s.owner | tojson }}, second_signer: {{ s.second_signer | tojson }} };
+  const showMessage = () => {
+    document.querySelectorAll("[data-message-for]").forEach((el) => el.hidden = el.dataset.messageFor !== roleSel.value);
+    document.querySelectorAll("[data-role-row]").forEach((el) => el.hidden = el.dataset.roleRow !== roleSel.value);
+  };
+  showMessage();
+  const fp = (k) => { const b = k.split(":").pop(); return `${b.slice(0, 8)}…${b.slice(-8)}`; };
+  roleSel.addEventListener("change", async () => { showMessage(); await checkKey(); });
+  const label = () => {
+    const who = names[roleSel.value];
+    return isAmendment && roleSel.value === "second_signer" ? `Countersign amendment as ${who}` : `Sign as ${who}`;
+  };
+  async function checkKey() {
+    const note = document.getElementById("key-note");
+    btn.textContent = label();
+    if (!webCryptoReady()) {
+      note.textContent = "This browser cannot hold an Ed25519 key; use the command line below.";
+      btn.disabled = true; document.getElementById("cli-fallback").open = true; return;
+    }
+    const have = await keyNames();
+    const who = names[roleSel.value];
+    const cell = document.querySelector(`[data-role-row="${roleSel.value}"] [data-browser-key]`);
+    const mine = have.includes(who) ? await publicKeyOf(who) : null;
+    const mismatch = !!mine && !!cell && mine !== cell.dataset.expect;
+    if (cell) {
+      cell.textContent = !mine ? "none for " + who : (mismatch ? `ed25519 ${fp(mine)}: a different key; the service would refuse it` : `ed25519 ${fp(mine)}: the same key`);
+      cell.dataset.state = !mine ? "none" : (mismatch ? "bad" : "ok");
+    }
+    btn.disabled = !have.includes(who) || mismatch;
+    if (mismatch) { note.textContent = `This browser's key for ${who} is not the key named in the contract. Signing is disabled.`; return; }
+    note.textContent = have.includes(who) ? `Key for ${who} found in this browser. One tap signs the text above.` : `No key for ${who} in this browser. Use ${who}'s enrolment link first, or sign from the command line.`;
+    document.getElementById("cli-fallback").open = !have.includes(who);
+  }
+  await checkKey();
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    btn.textContent = "Signing in this browser…";
+    const role = roleSel.value;
+    try {
+      const text = document.querySelector(`[data-message-for="${role}"]`).textContent;
+      const signature = await signText(names[role], text);
+      const out = await postJson("/human/sign", { hash: panel.dataset.hash, role, signer: names[role], signature });
+      say(msg, `Signed. Contract is now ${out.state}.`, "ok");
+      msg.focus();
+      btn.removeAttribute("aria-busy");
+      btn.textContent = "Signed";
+      const cast = new Promise((res) => document.dispatchEvent(new CustomEvent("ulysses:signed", { detail: { done: res, needs: out.needs || [] } })));
+      await Promise.race([cast, new Promise((r) => setTimeout(r, 2000))]);
+      setTimeout(() => location.reload(), 700);
+    } catch (e) { say(msg, e.message, "err"); btn.removeAttribute("aria-busy"); btn.textContent = label(); btn.disabled = false; }
+  });
+}
+</script>
+{% endblock %}
