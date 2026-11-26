@@ -12,6 +12,8 @@ keys/
 .env
 .env.*
 !.env.example
+# Written by `ulysses init`; holds the agent token
+ulysses.mcp.json
 
 # Python
 __pycache__/

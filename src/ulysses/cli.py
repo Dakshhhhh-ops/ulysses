@@ -720,7 +720,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    args.fn(args)
+    try:
+        args.fn(args)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as exc:  # noqa: BLE001 - one readable line, not a traceback
+        if os.environ.get("ULYSSES_DEBUG"):
+            raise
+        detail = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+        if isinstance(exc, httpx.HTTPError):
+            hint = "check that Flagsmith and the contract service are running and reachable"
+        elif isinstance(exc, (FileNotFoundError, PermissionError)):
+            hint = "check the path, or run `ulysses init` in this folder first"
+        else:
+            hint = None
+        fail(f"{type(exc).__name__}: {detail}"[:400], (hint + "; " if hint else "") + "set ULYSSES_DEBUG=1 for the traceback")
 
 
 if __name__ == "__main__":
