@@ -31,7 +31,7 @@ def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat()
 
 
-def _recorded_run(tmp_path: Path, keys) -> Path:
+def _recorded_run(tmp_path: Path, keys, siren: bool = False) -> Path:
     """A small finished run over the test double of Flagsmith: refused start, sign, start, hold, win, refused
     wrong action, the owner's signed confirmation."""
     clock = Clock(T0)
@@ -52,8 +52,12 @@ def _recorded_run(tmp_path: Path, keys) -> Path:
     clock.advance(4)
     svc.start_under_contract(h)
     clock.advance(400)
-    fs.set_results(1, 210, 205, 0.93, as_of=_iso(clock() - 30))
+    fs.set_results(1, 210, 205, 0.97 if siren else 0.93, as_of=_iso(clock() - 30))
     assert svc.look(h)["decision"]["outcome"] == "hold"
+    if siren:  # the tempted agent: Flagsmith reads "Winning", the contract holds, the service refuses
+        clock.advance(1)
+        with pytest.raises(Refused):
+            svc.execute_for_contract(h, "ship_treatment")
     clock.advance(400)
     fs.set_results(1, 620, 610, 0.9999999, as_of=_iso(clock() - 20))
     out = svc.look(h)
@@ -171,6 +175,23 @@ def test_a_refused_attempt_must_be_refused_for_the_recorded_reason(tmp_path, key
     assert "different reason" in r.mismatches[0].text
 
 
+def test_a_siren_refusal_is_exported_and_refused_again(tmp_path, keys):
+    db = _recorded_run(tmp_path, keys, siren=True)
+    lines = export_store(db, title="t", flagsmith="test double")
+    assert lines[0]["not_replayed"]["refusal_notes"] == 0
+    sirens = [x for x in lines if x.get("event") == "attempt" and x["recorded_reason"].startswith("no fired")]
+    assert [(x["call"], x["action"]) for x in sirens] == [("execute", "ship_treatment")]
+    r, steps = _play(lines[0], lines[1:], tmp_path / "ok")
+    assert r.mismatches == [], [m.text for m in r.mismatches]
+    assert len(r.sirens) == 1 and "Winning" in r.sirens[0].text and "97.00%" in r.sirens[0].text
+
+    # If the service accepted that call, or refused it for another reason, the replay says so.
+    x = next(x for x in lines if x.get("event") == "attempt" and x["recorded_reason"].startswith("no fired"))
+    x["recorded_reason"] = "no fired outcome authorises keep_control"
+    r, _ = _play(lines[0], lines[1:], tmp_path / "b")
+    assert [m.kind for m in r.mismatches] == ["attempt"] and r.sirens == []
+
+
 def test_calibration_traces_are_not_replay_traces():
     with pytest.raises(TraceError):
         load_trace(ROOT / "data" / "live-72e1bc.jsonl")
@@ -209,3 +230,19 @@ def test_every_page_says_it_is_a_replay(tmp_path):
     j = c.get("/healthz")
     assert j.json() == {"ok": True}
     assert c.get("/replay/status").json()["finished"] is True
+
+
+TEMPTED = ROOT / "data" / "replay-tempted.jsonl"
+
+
+@pytest.mark.skipif(not TEMPTED.exists(), reason="the tempted-agent recording is not shipped")
+def test_tempted_trace_replays_every_siren_refusal(tmp_path):
+    header, events = load_trace(TEMPTED)
+    for line in TEMPTED.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        free = {k: v for k, v in row.items() if k not in ("signature", "public_key", "canonical", "hash")}
+        assert not DATE_OR_TIME.search(json.dumps(free)), free
+    r, steps = _play(header, events, tmp_path)
+    assert r.mismatches == [], [s.text for s in r.mismatches]
+    assert len(r.sirens) >= 1
+    assert all(s.ok for s in steps if s.kind == "attempt")

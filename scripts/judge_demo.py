@@ -25,7 +25,11 @@ service database, the signer keys or the demo shop's server-side key. The shop a
 visitors then run here, on the service's side, since they need that key.
 
     uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down]
-                                        [--agent-in-container] [--llm]
+                                        [--agent-in-container] [--llm] [--no-temptation]
+
+The scripted agent is tempted on purpose: whenever a look holds while Flagsmith reads "Winning" (chance to
+win 95% or more), it asks to ship anyway, and the service refuses with 403 and logs the refusal; a replay
+repeats every such refusal. ``--no-temptation`` turns that off.
 
 Two minutes, no Docker: ``--replay data/replay-judge-demo.jsonl`` plays a recorded run (format in
 docs/REPLAY.md) through the real contract service, a fresh store under ``.run/replay/`` and the real
@@ -172,12 +176,16 @@ def choose_agent(want_llm: bool, environ: dict | None = None, sdk_installed: boo
                    "acting only through the Ulysses MCP tools (Ulysses agent token only)")
 
 
-def agent_command(mode: str, py: str, shop_port: int) -> list[str]:
-    """The agent process for a mode from ``choose_agent``. No key ever goes on the command line."""
+def agent_command(mode: str, py: str, shop_port: int, temptation: bool = True) -> list[str]:
+    """The agent process for a mode from ``choose_agent``. No key ever goes on the command line.
+
+    The scripted agent is tempted by default: it asks to ship whenever a look holds while Flagsmith reads
+    "Winning" (95% or more), and the service refuses; ``temptation=False`` passes ``--no-temptation``."""
     if mode in ("gemini", "llm"):
         return [py, str(ROOT / "examples/llm_agent/run.py"), "live", "--model",
                 "gemini" if mode == "gemini" else "anthropic", "--with-traffic", "--shop-port", str(shop_port)]
-    return [py, str(ROOT / "scripts/agent_session.py"), "--with-traffic", "--shop-port", str(shop_port)]
+    return [py, str(ROOT / "scripts/agent_session.py"), "--with-traffic", "--shop-port", str(shop_port),
+            *([] if temptation else ["--no-temptation"])]
 
 
 def main() -> None:
@@ -193,6 +201,9 @@ def main() -> None:
     ap.add_argument("--llm", action="store_true",
                     help="use the LLM agent (examples/llm_agent): Gemini when GEMINI_API_KEY is set, else Claude "
                          "when ANTHROPIC_API_KEY is set; else the scripted one")
+    ap.add_argument("--no-temptation", action="store_true",
+                    help="the scripted agent does not try to ship on Flagsmith's 'Winning' reading while the "
+                         "contract holds (by default it tries, and the service refuses)")
     ap.add_argument("--serve-only", action="store_true",
                     help="after a run: serve the cards and the signing pages again (Ctrl+C to stop)")
     ap.add_argument("--replay", metavar="TRACE", help="play a recorded run (data/replay-*.jsonl) instead of a live one")
@@ -322,7 +333,7 @@ def main() -> None:
                               "ULYSSES_DB": env_vals["ULYSSES_DB"], "SHOP_PORT": str(a.shop_port)})
             if mode != "scripted":
                 (RUN / "llm-agent-result.json").unlink(missing_ok=True)
-            rc = subprocess.run(agent_command(mode, py, a.shop_port), cwd=ROOT, env=agent_env).returncode
+            rc = subprocess.run(agent_command(mode, py, a.shop_port, not a.no_temptation), cwd=ROOT, env=agent_env).returncode
         if rc != 0:
             stop("the agent session did not finish (see above); rerun this command to continue from a fresh setup")
         ok = summarise(time.time() - started, api, a.port, "scripted" if mode == "scripted" else "llm")
@@ -361,7 +372,8 @@ def run_agent_container(a, env_vals: dict, procs: list) -> int:
                    "ULYSSES_AGENT_TOKEN": env_vals["ULYSSES_AGENT_TOKEN"]}
     compose_env = {k: v for k, v in compose_env.items() if not k.startswith("FLAGSMITH_")}
     cmd = ["docker", "compose", "-p", "ulysses", "-f", str(ROOT / "docker-compose.yml"), "--profile", "agent",
-           "run", "--rm", "--build", "--no-deps", "agent", "--demo", json.dumps(view)]
+           "run", "--rm", "--build", "--no-deps", "agent", "--demo", json.dumps(view),
+           *(["--no-temptation"] if getattr(a, "no_temptation", False) else [])]
     proc = subprocess.Popen(cmd, cwd=ROOT, env=compose_env, stdout=subprocess.PIPE, text=True,
                             encoding="utf-8", errors="replace")
     result = None
@@ -452,6 +464,10 @@ def summarise(seconds: float, api: str, port: int, mode: str = "scripted", run: 
               f"{r.get('minutes_from_start_to_decision')} min "
               f"({r.get('manual_refreshes_avoided_at_one_per_5_min')} five-minute manual checks nobody made)",
               flush=True)
+        for sr in r.get("siren_refusals") or []:
+            print(f"    tempted: Flagsmith read Winning at {sr['chance_to_win'] * 100:.2f}% while the contract held "
+                  f"(look {sr.get('look_number')}); execute ship_treatment -> {sr.get('status')} {sr.get('detail')}",
+                  flush=True)
     complete = mode != "llm" or done == expected
     if complete:
         print(f"  Flagsmith dashboard: {api} (the experiments are completed there with the contract in the hypothesis)")
@@ -542,6 +558,12 @@ def replay(a) -> None:
     step(f"{tag} replay finished: {len(events)} recorded events played at {speed:.1f}x")
     print(f"{tag} {len(looks) - bad_looks} of {len(looks)} recorded decisions recomputed identically by this checkout's "
           f"engine; {len(r.mismatches)} event(s) did not reproduce", flush=True)
+    attempts = [e for e in events if e["event"] == "attempt"]
+    bad_attempts = sum(1 for m in r.mismatches if m.kind == "attempt")
+    notes = sum(1 for e in events if e["event"] == "refusal_note")
+    print(f"{tag} {len(attempts) - bad_attempts} of {len(attempts)} recorded refusals refused again for the recorded "
+          f"reason ({len(r.sirens)} on Flagsmith's 'Winning' reading, 95% or more, while the contract held)"
+          + (f"; {notes} recorded refusal(s) not replayable, printed only" if notes else ""), flush=True)
     for m in r.mismatches:
         print(f"{tag} [1;31mdid not reproduce:[0m {m.text}", flush=True)
     if not a.no_hold:
