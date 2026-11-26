@@ -1,158 +1,195 @@
 # When is a Flagsmith winner really a winner?
 
-Flagsmith's statistics glossary calls a variation Winning when its chance to beat control is over 95%, and says you can check as often as you like. The dashboard goes further: its "Winning variation" card names whichever variant leads as soon as there is enough data, with no threshold at all. If you ship the first time the chance passes 95%, you will ship a lot of variations that do nothing. We ran Flagsmith's own statistics code on 2,000 simulated A/A experiments (two identical arms) with 30 looks each: stopping at the first look over 95% or under 5% called a winner or loser in 45% of them.
+Ulysses lets the owner of a Flagsmith experiment sign the stop rule before any data exists. An agent then watches the experiment and can complete it and ship the winner only when that signed rule fires, not at the first look where Flagsmith's chance to win passes 95%.
 
-Ulysses keeps Flagsmith's number and adds a decision rule you sign before the data arrives. The owner signs a stop contract for the experiment: the horizon, the number of looks, an O'Brien-Fleming boundary for each look, and what happens on a win, a loss, no decision, or a guardrail breach. An agent then refreshes Flagsmith's results on schedule and can complete the experiment and ship the winner only when the contract fires, after one tap from the owner. On the same A/A experiments the contract made a false call in 4.9% of them.
+Flagsmith's chance to beat control is a fair summary of the evidence each time you read it. The trouble starts when "over 95%" becomes the moment to ship and someone, or an agent, checks every five minutes. Ulysses keeps Flagsmith's number exactly as it is and adds the rule that makes acting on it safe.
 
-It is an MCP extension (four tools), a small contract service that holds the only Flagsmith write key, a signing page and decision cards, and a calibration harness that reproduces the numbers on Flagsmith's own engine.
+How often a variation that does nothing gets shipped, measured on Flagsmith's own `stats.py` (offline simulation, synthetic units, [pending: N] A/A experiments, 30 looks of 100 per arm):
 
-## Quick start
+<!-- headline-table:start -->
+| Rule | Error level it is meant to have | Ships a do-nothing variation |
+|---|---|---|
+| Stop at the first look over 95% | 10% two-sided, read 30 times | [pending: `uv run ulysses calibrate offline`] |
+| Read once at the end, ship if over 95% | 10% two-sided | [pending] |
+| Ulysses contract, alpha 0.10 (same level as the 95% rule) | 10% two-sided | [pending] |
+| Ulysses contract, alpha 0.05 (the default) | 5% two-sided | [pending] |
 
-You need `uv` and a Flagsmith with Experimentation (Cloud, or self-hosted with `EXPERIMENTATION_ENABLED=true`).
+Counting false losers as well (a false Losing call keeps control, so it ships nothing), any-direction false calls were: first look over 95% or under 5% [pending]; contract at alpha 0.10 [pending]; contract at alpha 0.05 [pending]. Full tables are under [Impact](#impact).
+<!-- headline-table:end -->
+
+![The signing page: the owner reads the contract and its boundary, then signs with a key that lives in their browser](docs/screenshots/sign-contract.png)
+
+What makes this different from an agent that asks "may I ship?": the approval that matters comes before the experiment starts, when nobody has a result to be excited about. The owner signs the horizon, the number of looks, the boundary at each look and the action for each outcome. Later, when the contract fires, the owner confirms with one tap, and that tap can only confirm the action already signed. The agent holds one token. It has no Flagsmith key and no signing key, so it cannot start an unsigned experiment, ship early, or ship the other arm.
+
+## Try it: one command
+
+You need Docker and [uv](https://docs.astral.sh/uv/). Nothing else, no Flagsmith account.
+
+macOS or Linux:
 
 ```sh
-git clone https://github.com/Dakshhhhh-ops/ulysses && cd ulysses
-uv run ulysses init --flagsmith-url http://localhost:8000   # writes .env, a contract template, MCP client config
-# put your organisation admin API key in .env (FLAGSMITH_ADMIN_KEY, FLAGSMITH_ORGANISATION_ID)
-uv run ulysses lab setup                                    # demo flag, metrics, audit webhook
-uv run python scripts/demo_setup.py                         # a fresh experiment and two signers (maya, sam)
-uv run ulysses serve                                        # contract service on http://127.0.0.1:8200
-uv run python scripts/agent_session.py --with-traffic       # in a second terminal
+git clone https://github.com/Dakshhhhh-ops/ulysses && cd ulysses && uv run python scripts/judge_demo.py
 ```
 
-`agent_session.py` is a scripted agent with no LLM: it starts the Ulysses MCP server over stdio, calls the four tools in order, and does the two human steps with the owner's key file (pass `--wait-for-human` to sign and confirm in the browser instead). `--with-traffic` starts the demo shop and its simulated visitors. Because Flagsmith refreshes results at most every five minutes, a run takes 15 to 35 minutes.
+Windows PowerShell:
 
-Unit tests need nothing running: `uv run pytest -q`. The integration test against a live Flagsmith: `ULYSSES_LIVE=1 uv run pytest tests/test_live_flagsmith.py -q`.
+```powershell
+git clone https://github.com/Dakshhhhh-ops/ulysses; cd ulysses; uv run python scripts/judge_demo.py
+```
 
-To use it from your own agent, paste `ulysses.mcp.json` (written by `ulysses init`) into your MCP client next to Flagsmith's official MCP server. The package is published under the name `flagsmith-ulysses` (the name `ulysses` is taken on PyPI), so once released the install is `uvx --from flagsmith-ulysses ulysses init`; the command stays `ulysses`.
+What that command does, in order:
+
+1. Starts a stock open-source Flagsmith 2.295.2, pinned by digest, with `EXPERIMENTATION_ENABLED=true` (`docker-compose.yml`, compose project `ulysses`, dashboard on http://localhost:8280). No Flagsmith code is changed.
+2. Signs up the first user on that fresh instance, creates an organisation and an organisation admin API key, and writes them to `.run/judge.env` (git-ignored) with a new agent token and webhook secret.
+3. Creates the demo flags, a purchase metric and a refund-request guardrail, and the signed audit-log webhook (`ulysses lab setup`). Then two experiments: an A/A experiment on `ulysses_headline_aa`, whose two variations show the same headline, and a real-effect experiment on `ulysses_checkout_cta` (classic against bold). It also creates two signers, owner `maya` and second signer `sam`, with passphrase-encrypted key files in your user profile, outside the project folder.
+4. Starts the contract service (the only process with the Flagsmith key), the demo shop and its simulated visitors, a stand-in for the owner's browser taps (a separate process holding maya's key), and the scripted agent, which gets only the Ulysses agent token.
+5. Prints every look for both experiments, with each guardrail's reading, and at the end a summary of what shipped, how many looks it took and how many five-minute checks nobody had to make.
+
+Flagsmith refreshes results at most every five minutes, so a run takes a while: [pending: minutes measured by `scripts/judge_demo.py` from a clean clone]. Afterwards, `uv run python scripts/judge_demo.py --serve-only` serves the decision cards again, and `docker compose -p ulysses down -v` removes Flagsmith and its data.
+
+Port already taken? `--flagsmith-port`, `--port` (contract service, default 8240) and `--shop-port` (default 8241) move them. If you already run a Flagsmith with Experimentation on, `--flagsmith http://your-host:port` uses it instead of starting one (the bootstrap step creates a first user, so point it only at a throwaway instance).
+
+To sign and confirm yourself instead of the stand-in, run the pieces by hand (next section) and open the links the agent prints.
+
+## Set it up against your own Flagsmith
+
+Self-hosted Flagsmith needs `EXPERIMENTATION_ENABLED=true`, and `SSRF_ALLOWED_HOSTS=host.docker.internal` if Flagsmith runs in Docker and the contract service runs on the host (Flagsmith refuses webhooks to private addresses otherwise). Tested on self-hosted 2.295.2 only. Flagsmith Cloud is untested, and its webhook would need a public URL for the service.
+
+```sh
+uv run ulysses init --flagsmith-url http://localhost:8000
+```
+
+`init` writes `.env` with a fresh agent token and webhook secret, a contract template, and `ulysses.mcp.json` for your MCP client. Both `.env` and `ulysses.mcp.json` are added to `.gitignore`, because both hold the agent token. Put an organisation admin API key and the organisation id in `.env`: in the Flagsmith dashboard, Organisation settings, API Keys, create a key with admin rights; the organisation id is the number in that page's URL.
+
+```sh
+uv run ulysses lab setup                       # demo flags, metrics, signed audit webhook (--no-webhook to skip)
+uv run python scripts/demo_setup.py            # the A/A and real-effect experiments, signers maya and sam
+uv run ulysses serve                           # contract service on http://127.0.0.1:8200
+uv run python scripts/agent_session.py --with-traffic      # second terminal: the scripted agent
+```
+
+`demo_setup.py` lists every experiment it will clear on the two demo flags before it touches any of them. It deletes an experiment that has not started, refuses to end a running one unless you pass `--replace`, and never ends one a Ulysses contract governs.
+
+The agent session prints a signing link and waits. Open it in a browser and sign (the first visit on a new browser uses an enrolment link from `uv run ulysses signer enrol maya`), or run the stand-in in a third terminal: `uv run python scripts/human_stand_in.py --owner maya`. If the session stops, `--resume <hash>,<hash>` continues the same contracts, and `uv run ulysses watch <hash>` looks on schedule from the command line. Both retry 429, 502, 503 and timeouts with backoff and say so in one line.
+
+Tests need nothing running: `uv run pytest -q`. The integration test against a live Flagsmith:
+
+```sh
+ULYSSES_LIVE=1 uv run pytest tests/test_live_flagsmith.py -q          # macOS / Linux
+```
+
+```powershell
+$env:ULYSSES_LIVE=1; uv run pytest tests/test_live_flagsmith.py -q   # Windows PowerShell
+```
+
+The package's distribution name is `flagsmith-ulysses` (`ulysses` is taken on PyPI). It is not on PyPI; install from the repository: `uvx --from git+https://github.com/Dakshhhhh-ops/ulysses ulysses init`.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  subgraph agent side
-    A[Any MCP client] -- reads --> F1[Flagsmith MCP server]
-    A -- sign_contract / start_under_contract / look / execute --> M[Ulysses MCP server<br/>agent token only]
+  subgraph agent["Agent side: Ulysses agent token only"]
+    A[Any MCP client or the scripted agent] -- "sign_contract, start_under_contract,<br/>look, execute, read_experiment" --> M[Ulysses MCP server]
   end
-  M -- HTTP, bearer token --> S[Contract service<br/>holds the only write key]
-  O[Owner and second signer<br/>Ed25519 keys in their browser] -- sign, one-tap confirm --> S
-  S -- PATCH hypothesis, start,<br/>results/refresh, complete --> FS[(Flagsmith)]
-  FS -- results: chance to win per metric --> S
-  FS -- audit-log webhook --> S
+  subgraph human["Human side"]
+    O[Owner and second signer<br/>Ed25519 key in the browser]
+  end
+  M -- HTTP + bearer token --> S[Contract service<br/>the only Flagsmith key]
+  O -- sign before start,<br/>one-tap confirm --> S
+  S -- "PATCH hypothesis, start,<br/>results/refresh, complete" --> FS[(Flagsmith)]
+  FS -- "results: chance to win<br/>per metric and guardrail" --> S
+  FS -- "audit-log webhook (HMAC)" --> S
+  SH[Demo shop, Python SDK] -- "get_experiment_flag,<br/>track_event" --> FS
 ```
 
-1. `sign_contract` reads the experiment from Flagsmith, sizes the horizon from the baseline and the smallest lift the owner cares about, drafts the contract and returns a signing link. The contract is a TOML file; its id is the SHA-256 of its canonical JSON form, so reformatting does not change it and any edited value does.
-2. The owner reads the contract and signs it. The key is created in their browser by WebCrypto as non-extractable, or kept in a key file for the `ulysses sign` command. The service checks the Ed25519 signature against the signer it registered.
-3. `start_under_contract` is refused until that signature verifies. Then the service writes the contract hash into the experiment's hypothesis in Flagsmith and starts the experiment.
-4. `look` asks Flagsmith to refresh the results (respecting the five-minute floor), reads Flagsmith's chance to win, turns it back into Flagsmith's own `lift / SE` with an inverse normal, and compares that with the signed boundary for this look. Guardrails are checked on the same read.
-5. When a look fires, the service creates a proposal holding exactly the action the contract assigns to that outcome. `execute` is refused until the owner confirms with a signed tap, and refused outright for any other action. Then the service calls Flagsmith's `complete` with `rollout_decision`, which completes the experiment and serves the winning variation (or control) to everyone on the same flag in one call.
-6. Changing a signed contract (ship early, extend the horizon, swap the metric) is an amendment: it needs the owner and the second signer, and it is appended to the experiment's hypothesis. Flagsmith's audit-log webhook tells the service about lifecycle changes it did not make; each becomes a recorded deviation, also written on the experiment.
+1. `sign_contract` reads the experiment from Flagsmith, sizes the horizon from the baseline rate and the smallest lift the owner cares about, drafts the contract and returns a signing link. The contract is TOML; its id is the SHA-256 of its canonical JSON form, so reformatting does not change it and any edited value does.
+2. The owner reads the contract and signs it. In the browser the key is created by WebCrypto as non-extractable; the `ulysses sign` command uses an encrypted key file instead. The service checks the Ed25519 signature against the key it registered for that signer.
+3. `start_under_contract` is refused until the signature verifies. Then the service writes the contract hash into the experiment's hypothesis in Flagsmith and starts the experiment.
+4. `look` asks Flagsmith to refresh the results (respecting the five-minute floor), reads Flagsmith's chance to win, turns it back into Flagsmith's own `lift / SE`, and compares that with the signed boundary for this look. Each guardrail gets the same treatment against its own one-sided signed rule. By default a win cannot fire while a guardrail has no Flagsmith result yet (Flagsmith needs 5 conversions per arm before it reports one).
+5. When a look fires, the service creates a proposal holding exactly the action the contract assigns to that outcome. `execute` is refused until the owner confirms with a signed tap, and refused outright for any other action. Then the service calls Flagsmith's `complete` with `rollout_decision`, which ends the experiment and serves the winner (or control) to everyone on the same flag.
+6. Changing a signed contract (ship early, extend the horizon, swap the metric) is an amendment. It needs the owner and the second signer and is appended to the experiment's hypothesis. Lifecycle changes the service did not make, seen through the audit-log webhook or at the next look, are recorded as deviations and written on the experiment.
 
-The statistics, what the contract guarantees and what it does not, are in [docs/STATISTICS.md](docs/STATISTICS.md).
+The statistics, and what the contract does and does not guarantee, are in [docs/STATISTICS.md](docs/STATISTICS.md).
 
 ## Use of Flagsmith
 
-Flagsmith does the assignment, the measurement, the inference and the rollout. Ulysses does not compute a single result: the card's number is Flagsmith's chance to win from `GET /experiments/<id>/results/`, and the only arithmetic Ulysses adds is the boundary it is compared with.
+Flagsmith does the assignment, the measurement, the inference and the rollout. Ulysses computes no result of its own: the number on every card is Flagsmith's chance to win from `GET /experiments/<id>/results/`, and the only arithmetic Ulysses adds is the boundary it is compared with.
 
 | Flagsmith feature | Where Ulysses uses it |
 |---|---|
-| Experiments REST API: `start`, `results/refresh`, `complete` with `rollout_decision` | The three lifecycle calls, made only by the contract service. Flagsmith keeps them out of its MCP server on purpose; Ulysses puts a signed contract in front of them. |
-| Results endpoint and `chance_to_win` | The input to every look. |
-| Experiment `hypothesis` field | Shows the governing contract hash, every amendment, deviations and the executed outcome inside Flagsmith's own UI. Written with `PATCH` on the experiment endpoint. The official MCP server's `update_experiment` tool targets the same endpoint but sends `PUT`, which this Flagsmith build rejects (400 without `feature`, 400 with it), so Ulysses uses `PATCH`; the bug is in our upstream draft. |
-| Guardrail metrics (`not_increase` / `not_decrease`) | Checked on every look; a breach stops and keeps control. |
+| Experiments REST API: `start`, `results/refresh`, `complete` with `rollout_decision` | The lifecycle calls, made only by the contract service, only under a signed contract. |
+| Results endpoint, `chance_to_win` and lift per metric | The input to every look, for the primary metric and each guardrail. |
+| Guardrail metrics (`not_increase` / `not_decrease`) | Each look reads Flagsmith's chance that the guardrail got worse; a breach of the signed rule stops and keeps control. |
+| Experiment `hypothesis` field | Carries the governing contract hash, amendments, deviations and the executed outcome, so they show inside Flagsmith's own UI. |
+| Organisation audit-log webhook with `X-Flagsmith-Signature` | Deviation detection and `ulysses audit replay`. The service refuses unsigned deliveries. |
 | Exposures timeseries | The horizon helper's exposure rate. |
-| Organisation audit-log webhook (`AUDIT_LOG_CREATED`, `X-Flagsmith-Signature`) | Deviation detection and the audit replay. |
 | Official Python SDK (`get_experiment_flag`, `track_event`, local evaluation) | The demo shop and the live calibration traffic. |
 | `api/experimentation/stats.py` | The offline calibration loads Flagsmith's file unmodified, pinned by SHA-256. |
-| Official MCP server | Reads for the agent (`get_experiment`, `get_experiment_results`, `get_experiment_exposures`), alongside the four Ulysses tools. By design it has no start, refresh or complete tool. |
-| CLI v2 | Has no experiment commands, only the raw `flagsmith api` passthrough; useful to check the shipped flag (`flagsmith flag get`). Ulysses calls the REST API directly. |
+| Self-hosting with Docker | The one-command demo runs a stock, pinned image. |
+
+The official Flagsmith MCP server is deliberately not wired to the agent; the reasons are under [Limitations](#limitations). The Ulysses `read_experiment` tool covers the agent's reads through the contract service.
 
 ## Impact
 
-The cost Ulysses removes is a shipped variation that does nothing, or does harm, because someone acted on an early 95%. The calibration below measures how often that happens on Flagsmith's own engine, and how often it happens under a contract.
+The cost Ulysses removes is a shipped variation that does nothing, or does harm, because someone acted on an early 95%. The tables below measure how often that happens on Flagsmith's own engine, and how often under a contract. Every figure comes from a script in this repository, and each table says what produced it.
 
 ### Offline: Flagsmith's stats.py on simulated A/A experiments
 
-Produced by `uv run ulysses calibrate offline` (`.run/calibration/offline.md`). Simulated synthetic units, not user traffic.
+Produced by `uv run ulysses calibrate offline` (writes `.run/calibration/offline.md`). Simulated synthetic units, not user traffic.
 
 <!-- offline-table:start -->
-Flagsmith `stats.py` (v2.295.2, sha256 `97c5ebfca7c8`) on 2000 simulated A/A experiments, 30 looks of 100 synthetic identities per arm, base rate 10%, seed 62944. Simulated units, not user traffic. Rates with 95% Wilson intervals.
-
-| Rule (A/A, no real difference) | False Winning | False Losing | Any false call |
-|---|---|---|---|
-| Act at the first look over 95% or under 5% | 14.1% (12.6-15.6) | 30.9% (29.0-33.0) | 45.0% (42.8-47.2) |
-| Read once, at the final look | 4.6% (3.8-5.6) | 4.7% (3.9-5.7) | 9.3% (8.1-10.7) |
-| Ulysses contract, alpha 0.05 two-sided | 1.4% (0.9-2.0) | 3.5% (2.8-4.5) | 4.9% (4.0-5.9) |
-| Ulysses contract, alpha 0.1 two-sided | 3.5% (2.7-4.3) | 6.0% (5.0-7.1) | 9.4% (8.2-10.8) |
-
-Same engine and design with a true relative lift of +25% (10% to 12.5%), 2000 runs:
-
-| Rule (real effect) | Calls the win | Mean look of the first call | Wrong-way call |
-|---|---|---|---|
-| Act at the first look over 95% or under 5% | 91.0% (89.6-92.1) | 9.58 | 5.3% (4.4-6.4) |
-| Ulysses contract, alpha 0.05 | 80.2% (78.4-81.9) | 21.68 of 30 | 0.0% (0.0-0.2) |
-| Ulysses contract, alpha 0.1 | 88.0% (86.5-89.4) | 19.75 of 30 | 0.0% (0.0-0.2) |
+[pending: paste the tables from `uv run ulysses calibrate offline`: false ships first, then any false call, then the real-lift table and the identities saved against a fixed horizon]
 <!-- offline-table:end -->
-
-The contract waits longer than the 95% rule (it calls a real +25% lift at look 22 of 30 on average, against look 10) and catches it less often at alpha 0.05. That is the price of the guarantee. At alpha 0.10, which allows the same 5% false-win rate a single read at 95% implies, it catches 88% of real lifts and never called one the wrong way in these runs; stopping at the first 95% called 5.3% of them the wrong way.
-
-Under the contract, false Losing (3.5%) runs above false Winning (1.4%). That comes from Flagsmith's delta-method z on relative lift, which is skewed at these counts; the expensive error, shipping a variation that does nothing, stays under half of alpha. See docs/STATISTICS.md.
 
 ### Live: A/A experiments on self-hosted Flagsmith
 
-Produced by `uv run ulysses calibrate live`, recomputed from the captured trace by `uv run ulysses calibrate summarise`. Every number is read from Flagsmith's results endpoint. The identities are synthetic, assigned by Flagsmith's engine through the Python SDK; they are not user traffic.
+Produced by `uv run ulysses calibrate live` and recomputed from its trace by `uv run ulysses calibrate summarise <trace>`. Every number is read from Flagsmith's results endpoint. The identities are synthetic, assigned by Flagsmith's engine through the Python SDK; they are not user traffic.
 
 <!-- live-table:start -->
-Live engine calibration on self-hosted Flagsmith (batch `d11c7f`): 60 A/A experiments, every number read from Flagsmith's results endpoint; 8 looks at least five minutes apart; at least 100 synthetic identities per arm per look, assigned by Flagsmith's engine (Python SDK, local evaluation); conversion probability 10% in both arms. 0 of 480 reads did not return in time and count as looks not taken. Synthetic identities, not user traffic. 95% Wilson intervals.
-
-| Rule (A/A, no real difference) | False Winning | False Losing | Any false call |
-|---|---|---|---|
-| Act at the first look over 95% or under 5% | 4/60 = 6.7% (3-16) | 9/60 = 15.0% (8-26) | 13/60 = 21.7% (13-34) |
-| Read once, at the final look | 1/60 = 1.7% (0-9) | 3/60 = 5.0% (2-14) | 4/60 = 6.7% (3-16) |
-| Ulysses contract, alpha 0.05 two-sided | 0/60 = 0.0% (0-6) | 3/60 = 5.0% (2-14) | 3/60 = 5.0% (2-14) |
-
-The contract reached the horizon with no decision in 23 of 60; in the other 34, Flagsmith had counted fewer than 800 identities in one arm by the last look (exposures still arriving or quarantined), so they were still holding when the run ended.
-
-A smaller, noisier sample than the offline run, read from a real Flagsmith. It shows the same pattern: one in five A/A experiments would have been called at the first 95%, the contract called 3 of 60, all as losses (keep control). Under load the SDK dropped some event batches after three timed-out tries, so Flagsmith's counts trailed the identities sent by about 56 per arm at the last look; the table uses Flagsmith's counts throughout. A first, larger batch was cut short when the shared lab restarted and is not reported.
+[pending: tables from `uv run ulysses calibrate summarise .run/calibration/live-<batch>.jsonl`, with the batch size, looks and per-arm counts]
 <!-- live-table:end -->
 
-### The demo experiment
+### Time saved
 
-One run of `scripts/agent_session.py --with-traffic` against the self-hosted lab. Traffic: simulated visitors from `examples/shop/visitors.py` opening the demo shop, which asks Flagsmith for the variation with `get_experiment_flag` and reports purchases with `track_event`. The visitors are synthetic and their behaviour is drawn by the script (purchase probability 10% after seeing classic, 17% after seeing bold); every number below was read from Flagsmith's results endpoint by the service. Contract: 6 looks, horizon 1,066 identities per arm, alpha 0.05.
+Against a fixed-horizon test with the same false-ship level and the same power, the contract at alpha 0.05 used [pending: percentage from `uv run ulysses calibrate offline`, "Mean identities per arm used"] fewer identities on a real +25% lift (offline simulation). The first-95% rule stops earlier still, and that early stop is exactly where its false winners come from.
 
-| Look | Identities per arm (Flagsmith) | Flagsmith chance to win | Contract needs | Card |
-|---|---|---|---|---|
-| 1 | 201 | 86.91% | 99.99998% | HOLD |
-| 2 | 429 | 99.48% | 99.959% | HOLD, though a 95% reader would have shipped |
-| 3 | 668 | 99.94% | 99.55% | WIN |
+In the demo run, the agent ran [pending: refreshes, from `.run/agent-session-result.json`] results refreshes on schedule and reached a decision on the real-effect experiment after [pending: counted looks] counted looks, in [pending: minutes]. A person checking the results page every five minutes over that time would have refreshed it [pending: manual checks] times.
 
-The agent then asked to execute before the owner confirmed (refused, 403), asked for `keep_control` (refused, 403: the contract assigns `ship_treatment` to a win), and after maya's signed tap the service called `complete` with `rollout_decision: variant`. Flagsmith's experiment shows `completed`, `rollout_decision: variant`, the contract hash and the outcome in its hypothesis, and a brand-new identity is served `bold`. `ulysses audit replay` maps both lifecycle changes (start and completion) to the signed contract, with no deviations.
+### The demo run
 
-An earlier run of the same script on the same design held through four looks while Flagsmith's number sat between 97.7% and 98.9% (over 95% each time), and fired the win at the horizon with 99.71% against a boundary of 97.89%.
+[pending: the looks of both experiments from a run of `scripts/judge_demo.py`: identities per arm, Flagsmith's chance to win, what the contract needed, the guardrail reading and the card, labelled synthetic visitors]
+
+The real-effect experiment uses simulated visitors who buy 10% of the time after classic and 17% after bold, a 70% relative lift, while its horizon is sized for 50%. If it holds at a look where Flagsmith shows over 95%, that hold is the cost of the guarantee, and the table says so. The A/A experiment is where holding is plainly right: both arms show the same page, so any winner Flagsmith reports there is noise.
 
 ## Creativity
 
-Most agent integrations ask a human to approve an action after the agent proposes it. Ulysses moves the approval to before any data exists, when nobody has a result to be excited about, and makes the later approval a one-tap confirmation of something already decided. The contract is a hashed, signed file whose hash lives on the experiment in Flagsmith, so anyone looking at the experiment can see which rule governs it. The agent cannot ship early because the service will not let it; a person can still press Complete in the dashboard, and that shows up on the experiment as a deviation.
+Most agent integrations put a human approval after the agent proposes an action, at the moment the human is looking at a promising number. Ulysses moves the real approval to before any data exists and turns the later one into a one-tap confirmation of something already decided. The contract is a hashed, signed file, and its hash lives on the experiment in Flagsmith, so anyone who opens the experiment can see which rule governs it. The calibration harness runs Flagsmith's own `stats.py`, unmodified and pinned by hash, so the claim about peeking is tested on the engine Flagsmith users actually get.
 
-## Demo video
+## Demo
 
-The video follows one experiment: the owner signs the contract, the hash appears on the experiment in Flagsmith, Flagsmith puts the chance to win above 95% (and its winner card already names bold) while the Ulysses card says hold, the contract fires, one tap ships the variation on the same flag, and the A/A count closes it. The statistics stay in this README.
+The demo video shows both experiments side by side. On the A/A experiment, Flagsmith's chance to win wanders and the card holds, then reaches the horizon and keeps control. On the real-effect experiment the contract fires, the agent's early and wrong-action `execute` calls are refused on screen, the owner taps confirm, and Flagsmith serves bold to everyone. Every card shows the guardrail reading. Any judge can reproduce the same run with the one command above.
+
+![Confirming a fired contract in the browser](docs/screenshots/confirm-in-browser.png)
+
+![The calibration page](docs/screenshots/calibration.png)
 
 ## Track 02 checklist
 
 | Requirement | How Ulysses meets it |
 |---|---|
-| Uses the Flagsmith CLI, API or MCP server | REST API for the lifecycle and results, the official MCP server for agent reads, the official SDK in the demo app. The Ulysses MCP server adds four tools. CLI v2 has no experiment command, so it is only used to check the shipped flag (`flagsmith flag get`). |
-| Saves real time | Nobody refreshes the results page every five minutes; looks run on schedule and the pre-signed action runs on one tap. The bigger saving is not shipping a variation that does nothing. Honest cost: a contract often waits longer than stopping at the first 95% would. |
-| A human approves changes | Twice: the owner signs before start (start is refused without it), and confirms the fired action with a signed tap. Amendments need a second signer. |
-| Clear output | One card per look: Flagsmith's chance to win, what the contract needs at this look, hold or fire, and the pre-signed action. |
+| Uses the Flagsmith CLI, API or MCP server | The REST API for the lifecycle and results, the official SDK in the demo shop, Flagsmith's own `stats.py` in the calibration. Ulysses ships its own MCP server (four action tools and one read tool) for agents. |
+| Saves real time | Looks run on schedule, so nobody refreshes the results page; the pre-signed action runs on one tap. Against a fixed horizon with the same guarantee, [pending] fewer identities in simulation. Honest cost: the contract waits longer than the first-95% rule would. |
+| A human approves changes | Twice: the owner signs before start (start is refused without it) and confirms the fired action with a signed tap. Amendments need a second signer. |
+| Clear output | One card per look: Flagsmith's chance to win, what the contract needs at this look, each guardrail's reading against its rule, hold or fire, and the pre-signed action. |
+| A working demo | `uv run python scripts/judge_demo.py` on a machine with Docker and uv. |
 
 ## Commands
 
 ```
-ulysses serve                      contract service (port 8200)
+ulysses init                       .env, contract template, MCP client config
+ulysses serve                      contract service (port from ULYSSES_PUBLIC_URL, default 8200)
 ulysses mcp                        the MCP extension over stdio
-ulysses keys new <name>            create a signing key file
+ulysses keys new <name>            create an encrypted signing key file
 ulysses signer enrol <name>        one-time link that creates a key in the signer's browser
 ulysses contract verify <file>     validate a contract and print its hash and boundary
 ulysses sign <hash> --as <name>    sign with your key file
@@ -163,16 +200,20 @@ ulysses horizon --min-lift 0.1 --baseline-rate 0.05 [--rate-per-hour 120]
 ulysses boundary --looks 12
 ulysses audit replay --project <id>
 ulysses calibrate offline | live | summarise
+ulysses lab setup [--no-webhook]
 ```
+
+Errors print one line and a next step. `ULYSSES_DEBUG=1` shows the traceback.
 
 ## Limitations
 
-- Ulysses binds the agent. It cannot stop someone with dashboard rights from completing an experiment or editing its flag (Flagsmith does not lock the flag through the API while an experiment runs). Through the audit-log webhook it detects, and writes on the experiment, any start, pause, completion, rollout change, deletion or hypothesis edit on a governed experiment that the service did not make itself. It does not currently flag direct edits to the flag's values or weights (they arrive as feature-state entries), and someone with dashboard rights can edit the hypothesis afterwards; the service's own log and the replay still hold the record. If Flagsmith is unreachable when a deviation arrives, the deviation is recorded by the service but the line on the experiment is not written; there is no retry for that write yet.
-- On open-source Flagsmith every key that can read experiments can also write them, so giving the agent the official MCP server means giving it an admin key. The `look` tool already returns Flagsmith's numbers; in production we would leave the official server out, or use a read-only role on Enterprise.
-- The audit-log list API returns nothing on an unlicensed self-hosted instance, so the replay works from the entries Flagsmith's webhook delivered to the service. Entries from before the webhook was registered are not covered.
-- The offline numbers are simulations on synthetic units. The live numbers come from Flagsmith's results endpoint but with synthetic identities whose behaviour this repository draws. Neither is user traffic.
-- The guarantee is asymptotic and covers one treatment against control on one primary metric. Details in docs/STATISTICS.md.
-- Flagsmith's SDK retries event batches on a 3-second timeout and can store a batch twice. That cannot change exposures or Occurrence metrics, which the demo and calibration use, but it can inflate Count, Sum and Mean metrics.
+- Ulysses binds the agent, not a dashboard admin. Someone with dashboard rights can still complete an experiment or edit its flag; Flagsmith does not lock the flag while an experiment runs. Ulysses records that as a deviation (from the audit-log webhook, or at the next look when it compares the experiment with what it started) and writes it on the experiment, retrying the write if Flagsmith is down. It cannot prevent it.
+- The boundary between agent and human is a process and key boundary. In the one-command demo the agent process gets only its token, and the signer keys sit encrypted in your user profile, but everything runs as one OS user on one machine. For real use, run the contract service, its `.env` and the signer keys where the agent cannot read them: another OS user, a container or another host. An agent that can read `.env` can call Flagsmith directly.
+- The official Flagsmith MCP server is not given to the agent. On open-source Flagsmith there is no read-only key: every key that can read experiments can also write flags, so handing the agent that server would hand it a way around the contract. Its `update_experiment` tool also fails on 2.295.2 (it sends `PUT`, which the endpoint rejects with or without `feature`), so Ulysses writes the hypothesis with `PATCH`. Both are written up in `upstream/`. `ulysses init --with-flagsmith-mcp` adds the server for people who accept the trade, and warns.
+- Offline numbers are simulations on synthetic units. Live numbers come from Flagsmith's results endpoint, but the identities are synthetic and their behaviour is drawn by scripts in this repository. Neither is user traffic, and every table says which it is.
+- The audit-log list API returns nothing on an unlicensed self-hosted instance, so the replay works from the entries Flagsmith's webhook delivered. Entries from before the webhook was registered are not covered.
+- The guarantee is asymptotic and covers one treatment against control on one primary metric. At low base rates and short horizons false Losing runs over its nominal share; the contract warns the signer when the design is in that range. Details in docs/STATISTICS.md.
+- Flagsmith's SDK can store an event batch twice after a timeout. That cannot change exposures or Occurrence metrics, which the demo and calibration use, but it can inflate Count, Sum and Mean metrics.
 
 ## Related work
 
@@ -180,7 +221,7 @@ GrowthBook offers sequential testing as an engine feature (confidence sequences,
 
 ## Upstream
 
-A docs issue for Flagsmith is drafted in [upstream/flagsmith-docs-peeking.md](upstream/flagsmith-docs-peeking.md). It proposes wording that keeps the glossary's point about the posterior and adds the condition under which peeking is safe.
+[upstream/flagsmith-docs-peeking.md](upstream/flagsmith-docs-peeking.md) holds two drafted issues for Flagsmith, not posted: suggested wording for the statistics glossary's note on peeking, and the MCP `update_experiment` PUT problem.
 
 ## License
 
