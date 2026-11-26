@@ -47,7 +47,7 @@ What that command does, in order:
 4. Starts the contract service (the process that holds the Flagsmith key), the demo shop and its simulated visitors, a stand-in for the owner's browser taps (a separate process holding maya's key), and the scripted agent, which gets only the Ulysses agent token.
 5. Prints every look for both experiments, with each guardrail's reading, and at the end a summary of what shipped, how many looks it took and how many five-minute checks nobody had to make.
 
-Flagsmith refreshes results at most every five minutes, so a run takes a while: [pending: minutes measured by `scripts/judge_demo.py` from a clean clone]. Afterwards, `uv run python scripts/judge_demo.py --serve-only` serves the decision cards again, and `docker compose -p ulysses down -v` removes Flagsmith and its data.
+Flagsmith refreshes results at most every five minutes, so a run takes a while. From a fresh clone on a Windows laptop, with the Flagsmith image already downloaded, the command finished in 32.4 minutes (its own summary said 32.2); a first run also downloads the image. Afterwards, `uv run python scripts/judge_demo.py --serve-only` serves the decision cards again, and `docker compose -p ulysses down -v` removes Flagsmith and its data.
 
 Port already taken? `--flagsmith-port`, `--port` (contract service, default 8240) and `--shop-port` (default 8241) move them. If you already run a Flagsmith with Experimentation on, `--flagsmith http://your-host:port` uses it instead of starting one (the bootstrap step creates a first user, so point it only at a throwaway instance).
 
@@ -222,13 +222,34 @@ Both traces ship with timestamps removed, so the tables can be recomputed from a
 
 Against a fixed-horizon test with the same false-ship level and the same power, the contract at alpha 0.05 used 17.8% fewer identities on a real +25% lift (2,350 per arm on average against 2,858; offline simulation, `uv run ulysses calibrate offline`). The first-95% rule stops earlier still, and that early stop is exactly where its false winners come from.
 
-In the demo run, the agent ran [pending: refreshes, from `.run/agent-session-result.json`] results refreshes on schedule and reached a decision on the real-effect experiment after [pending: counted looks] counted looks, in [pending: minutes]. A person checking the results page every five minutes over that time would have refreshed it [pending: manual checks] times.
+In the demo run below (from `.run/agent-session-result.json`), the agent ran 5 results refreshes on schedule and reached a decision on the real-effect experiment after 4 counted looks, 21.1 minutes after the start; the A/A experiment took 6 refreshes, 5 counted looks and 26.2 minutes. Nobody refreshed a page or watched a number in that time. The saving per experiment is small in minutes; what it removes is the person deciding at each refresh whether 95% is enough.
 
 ### The demo run
 
-[pending: the looks of both experiments from a run of `scripts/judge_demo.py`: identities per arm, Flagsmith's chance to win, what the contract needed, the guardrail reading and the card, labelled synthetic visitors]
+One run of `uv run python scripts/judge_demo.py` from a fresh clone, against the stock Flagsmith that `docker-compose.yml` starts. Traffic: simulated visitors from `examples/shop/visitors.py` (90 a minute; purchase 10% after classic, 17% after bold; 30% of purchases ask for a refund in both arms). The visitors are synthetic; every number below was read from Flagsmith's results endpoint by the contract service. Both contracts: horizon 1,088 identities per arm, up to 30 looks, Lan-DeMets O'Brien-Fleming, alpha 0.05; guardrail `ulysses_refund_request` (not increase) under its own one-sided rule.
 
-The real-effect experiment uses simulated visitors who buy 10% of the time after classic and 17% after bold, a 70% relative lift, while its horizon is sized for 50%. If it holds at a look where Flagsmith shows over 95%, that hold is the cost of the guarantee, and the table says so. The A/A experiment is where holding is plainly right: both arms show the same page, so any winner Flagsmith reports there is noise.
+Real effect (`ulysses_checkout_cta`, classic against bold):
+
+| Look | Identities per arm | Flagsmith chance to win | Contract needs | Refund guardrail: chance worse (stop rule) | Card |
+|---|---|---|---|---|---|
+| 1 | 224 | 95.21% | 99.9999% | 75.5% (99.70%) | HOLD, though the docs would call it Winning |
+| 2 | 450 | 95.91% | 99.95% | 28.9% (99.70%) | HOLD, Winning by the docs |
+| 3 | 674 | 97.48% | 99.58% | 56.8% (99.70%) | HOLD, Winning by the docs |
+| 4 | 913 | 99.65% | 98.70% | 57.0% (99.69%) | WIN: ship bold |
+
+A/A (`ulysses_headline_aa`, two identical variations):
+
+| Look | Identities per arm | Flagsmith chance to win | Contract needs | Refund guardrail: chance worse (stop rule) | Card |
+|---|---|---|---|---|---|
+| 1 | 212 | 35.44% | 99.999962% | 44.7% (99.71%) | HOLD |
+| 2 | 439 | 59.60% | 99.96% | 48.6% (99.70%) | HOLD |
+| 3 | 653 | 46.88% | 99.63% | 55.6% (99.71%) | HOLD |
+| 4 | 887 | 29.39% | 98.82% | 57.6% (99.69%) | HOLD |
+| 5 | 1,123 | 31.35% | 97.91% | 59.3% (99.71%) | NO DECISION: keep control |
+
+On the real-effect experiment the agent then asked to execute before the owner confirmed (refused, 403 "waiting for the owner's one-tap confirmation") and asked for `keep_control` (refused, 403: the contract authorises `ship_treatment` for a win). After the owner's signed tap the service called `complete` with `rollout_decision: variant`. In Flagsmith afterwards, experiment 1 is `completed` with `rollout_decision: variant` and experiment 2 `completed` with `rollout_decision: control`, and each hypothesis holds exactly two Ulysses lines: the governing contract and the executed outcome. `ulysses audit replay --project 1` reported 4 lifecycle changes on governed experiments, 4 mapped to a signed contract, 0 deviations.
+
+The three holds on the real-effect experiment were on a real effect (a 70% relative lift; the horizon was sized for 50%), so there the contract waited three more looks, about 15 minutes, than someone shipping at the first 95% would have. That is the price of capping false ships. In this run the A/A experiment never went over 95%, as in most A/A runs (in the offline table, stopping at the first look over 95% shipped a do-nothing variation in 13.4% of them); when one does go over, the contract treats it like look 1 above and holds. The A/A experiment is where holding is plainly right: both arms show the same page, so any winner Flagsmith reports there is noise.
 
 ## Creativity
 
