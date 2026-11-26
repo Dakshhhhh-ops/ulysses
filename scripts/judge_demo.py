@@ -18,7 +18,11 @@ Needs only Docker and uv. It:
 
 Flagsmith refreshes results at most every five minutes; a measured run from a fresh clone took about half an hour.
 
-    uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down]
+    uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down] [--llm]
+
+``--llm`` puts a language model in the agent's seat instead of the scripted agent: Gemini when
+GEMINI_API_KEY is set, else Claude when ANTHROPIC_API_KEY is set, else the scripted agent; it says which.
+The model still holds only the Ulysses token and acts only through the MCP tools.
 """
 
 from __future__ import annotations
@@ -101,6 +105,27 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
+def pick_agent(llm: bool, environ=os.environ) -> tuple[str, str]:
+    """Which agent drives the run, and why, for ``--llm``: Gemini, then Claude, then the scripted agent."""
+    if not llm:
+        return "scripted", "the scripted agent (no --llm)"
+    if environ.get("GEMINI_API_KEY"):
+        return "gemini", "Gemini through the Google Gen AI SDK (GEMINI_API_KEY is set)"
+    if environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic", "Claude through the Anthropic SDK (ANTHROPIC_API_KEY is set)"
+    return "scripted", "the scripted agent (--llm, but neither GEMINI_API_KEY nor ANTHROPIC_API_KEY is set)"
+
+
+def agent_command(kind: str, py: str, shop_port: int) -> list[str]:
+    if kind == "gemini":
+        return [py, str(ROOT / "examples/llm_agent/run_gemini.py"), "live", "--with-traffic",
+                "--shop-port", str(shop_port)]
+    if kind == "anthropic":
+        return [py, str(ROOT / "examples/llm_agent/run.py"), "live", "--with-traffic", "--model", "anthropic",
+                "--shop-port", str(shop_port)]
+    return [py, str(ROOT / "scripts/agent_session.py"), "--with-traffic", "--shop-port", str(shop_port)]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--flagsmith", help="use this running Flagsmith instead of starting docker-compose.yml")
@@ -109,6 +134,9 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8240, help="contract service port (8200-8299)")
     ap.add_argument("--shop-port", type=int, default=8241)
     ap.add_argument("--down", action="store_true", help="remove the Flagsmith containers at the end")
+    ap.add_argument("--llm", action="store_true",
+                    help="a language model plays the agent: Gemini if GEMINI_API_KEY is set, else Claude if "
+                         "ANTHROPIC_API_KEY is set, else the scripted agent")
     ap.add_argument("--serve-only", action="store_true",
                     help="after a run: serve the cards and the signing pages again (Ctrl+C to stop)")
     a = ap.parse_args()
@@ -205,17 +233,21 @@ def main() -> None:
                           "ULYSSES_DB": env_vals["ULYSSES_DB"], "ULYSSES_KEY_DIR": env_vals["ULYSSES_KEY_DIR"]})
         procs.append(subprocess.Popen([py, str(ROOT / "scripts/human_stand_in.py"), "--owner", "maya"],
                                       cwd=ROOT, env=human_env))
-        step("running the scripted agent (Ulysses agent token only)")
+        kind, why = pick_agent(a.llm)
+        step(f"running {why}; the agent holds the Ulysses agent token only")
         agent_env = {k: v for k, v in os.environ.items()
                      if not k.startswith(("FLAGSMITH_", "ULYSSES_KEY"))}
         agent_env.update({"ULYSSES_URL": env_vals["ULYSSES_PUBLIC_URL"],
                           "ULYSSES_AGENT_TOKEN": env_vals["ULYSSES_AGENT_TOKEN"],
                           "ULYSSES_DB": env_vals["ULYSSES_DB"], "SHOP_PORT": str(a.shop_port)})
-        rc = subprocess.run([py, str(ROOT / "scripts/agent_session.py"), "--with-traffic",
-                             "--shop-port", str(a.shop_port)], cwd=ROOT, env=agent_env).returncode
+        rc = subprocess.run(agent_command(kind, py, a.shop_port), cwd=ROOT, env=agent_env).returncode
         if rc != 0:
             stop("the agent session did not finish (see above); rerun this command to continue from a fresh setup")
-        summarise(time.time() - started, api, a.port)
+        if kind == "scripted":
+            summarise(time.time() - started, api, a.port)
+        else:
+            step(f"done in {(time.time() - started) / 60:.1f} minutes; the {kind} agent's result is in "
+                 ".run/llm-agent-result.json and its transcript under .run/llm_agent/")
     finally:
         for p in procs:
             p.terminate()
