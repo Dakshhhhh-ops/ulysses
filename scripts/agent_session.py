@@ -12,6 +12,12 @@ By default it governs both demo experiments from ``scripts/demo_setup.py`` at
 once: the A/A experiment (where any winner is noise, so holding is right) and
 the experiment with a real effect (where the contract should fire and ship).
 
+The agent is tempted on purpose. Whenever a look holds while Flagsmith's chance to
+win is 95% or more (where Flagsmith's results page says "Winning"), it says so and
+asks to ship the treatment anyway; the service refuses (403, logged in its refusals
+table, repeated by a replay), and the agent goes on looking. ``--no-temptation``
+turns that off.
+
     uv run python scripts/agent_session.py --with-traffic
     uv run python scripts/agent_session.py --resume <hash>[,<hash>]   # after an interruption
 """
@@ -43,6 +49,8 @@ for _stream in (sys.stdout, sys.stderr):
 ROOT = Path(__file__).resolve().parents[1]
 DIM, GREEN, RED, YELLOW, BOLD, END = "\033[2m", "\033[32m", "\033[31m", "\033[33m", "\033[1m", "\033[0m"
 REFRESH_FLOOR = 300
+# Flagsmith's results page labels a variation "Winning" from this chance to win.
+WINNING = 0.95
 
 
 class SessionError(Exception):
@@ -169,6 +177,7 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
     tag = f"AGENT {label}"
     t0 = time.time()
     looks_taken = refreshes = 0
+    sirens: list[dict] = []
     if h is None:
         out = await agent.tool("sign_contract", environment=demo["environment"], experiment_id=exp["id"],
                                owner=demo["owner"], second_signer=demo["second_signer"],
@@ -222,6 +231,10 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
         if out.get("proposal"):
             fired = out
         else:
+            if agent.a.temptation:
+                siren = await tempted(agent, tag, h, out)
+                if siren:
+                    sirens.append(siren)
             await asyncio.sleep(REFRESH_FLOOR + 5)
     p = fired["proposal"]
     if p["state"] == "pending":
@@ -247,9 +260,31 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
                  or f"{agent.url}/card/{p['look_id'] or p['id']}"),
         "minutes_from_start_to_decision": round(elapsed / 60, 1),
         "results_refreshes_run_by_agent": refreshes, "counted_looks": looks_taken,
+        "siren_refusals": sirens,
         # What "saves real time" means here: the refreshes a person would have made checking every five minutes.
         "manual_refreshes_avoided_at_one_per_5_min": math.ceil(elapsed / REFRESH_FLOOR),
     }
+
+
+async def tempted(agent: Agent, tag: str, h: str, out: dict) -> dict | None:
+    """The naive move: ship because Flagsmith reads "Winning", though the look held. The service must refuse.
+
+    Returns what happened when the agent gave in, or None when the look gave no such reading."""
+    d = out.get("decision") or {}
+    ctw = d.get("chance_to_win")
+    if d.get("outcome") != "hold" or ctw is None or ctw < WINNING:
+        return None
+    say(tag, f"Flagsmith says Winning at {ctw * 100:.2f}%. Shipping.", YELLOW)
+    res = await agent.tool("execute", contract_hash=h, action="ship_treatment")
+    if res.get("ok"):
+        # Only a fired look may authorise an action; an accepted call here is a broken service.
+        raise SessionError(f"execute ship_treatment was ACCEPTED on a look that held (look {out.get('look_id')})")
+    say(tag, f"execute ship_treatment -> {res.get('status')} {res.get('detail')}", RED)
+    say(tag, f"Refused: the signed contract holds at look {d.get('look_number') or '(not counted)'} "
+             f"(z {d.get('z')}, boundary z {d.get('boundary_z')}). Not shipping; looking again.", DIM)
+    return {"look_id": out.get("look_id"), "look_number": d.get("look_number"), "chance_to_win": ctw,
+            "z": d.get("z"), "boundary_z": d.get("boundary_z"), "status": res.get("status"),
+            "detail": res.get("detail")}
 
 
 # What the agent needs to know about the demo: names and ids only. The rest of .run/demo.json (the
@@ -326,7 +361,8 @@ async def run(a) -> None:
     for w, r in results.items():
         say("AGENT", f"{r.get('kind', w)}: {r.get('outcome')} after {r.get('minutes_from_start_to_decision')} min; "
                      f"{r.get('results_refreshes_run_by_agent')} refreshes run by the agent, "
-                     f"{r.get('manual_refreshes_avoided_at_one_per_5_min')} manual five-minute checks avoided")
+                     f"{r.get('manual_refreshes_avoided_at_one_per_5_min')} manual five-minute checks avoided; "
+                     f"{len(r.get('siren_refusals') or [])} times tempted by 'Winning' and refused")
 
 
 def main() -> None:
@@ -336,6 +372,8 @@ def main() -> None:
     ap.add_argument("--min-lift", type=float, default=0.5)
     ap.add_argument("--baseline-rate", type=float, default=0.10)
     ap.add_argument("--with-traffic", action="store_true", help="start the demo shop and simulated visitors")
+    ap.add_argument("--no-temptation", dest="temptation", action="store_false",
+                    help="do not try to ship when a look holds while Flagsmith reads 'Winning' (95%% or more)")
     ap.add_argument("--demo", help="the demo's names and ids as JSON (environment, owner, second_signer, "
                     "experiments); default: read from .run/demo.json. The agent container gets it this way.")
     ap.add_argument("--shop-port", type=int, default=int(os.environ.get("SHOP_PORT", "8210")))

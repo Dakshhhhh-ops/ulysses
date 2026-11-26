@@ -156,7 +156,8 @@ def export_store(db_path: str | Path, *, title: str, flagsmith: str, note: str |
 
     for r in refusals:
         h = r["contract_hash"]
-        m = re.fullmatch(r"asked for (\w+), contract says (\w+)", r["reason"] or "")
+        m = re.fullmatch(r"asked for (\w+), contract says (\w+)", r["reason"] or "") or \
+            re.fullmatch(r"no fired outcome authorises (\w+)", r["reason"] or "")
         if r["what"] == "start" and r["reason"] == "no valid owner signature":
             ev = {"event": "attempt", "call": "start_under_contract", "hash": h, "expect": "refused",
                   "recorded_reason": r["reason"]}
@@ -314,6 +315,9 @@ class ReplayStore(Store):
         return pid
 
 
+# Flagsmith's results page labels a variation "Winning" from this chance to win.
+SIREN_CHANCE = 0.95
+
 DECISION_FIELDS = ("outcome", "action", "counted", "look_number", "identities_per_arm", "chance_to_win", "z",
                    "boundary_z", "fires")
 
@@ -348,6 +352,10 @@ class Replayer:
         self.mismatches: list[Step] = []
         self.done = 0
         self._finished = False
+        # The decision of the last look played on each contract, to say what an execute attempt was made on.
+        self.last_decision: dict[str, dict] = {}
+        # Execute attempts refused while the last look held and Flagsmith read 95% or more ("Winning").
+        self.sirens: list[Step] = []
 
     def _source(self, ev: dict) -> None:
         rec = ev.get("source") or {}
@@ -416,6 +424,18 @@ class Replayer:
         self.mismatches.append(step)
         return step
 
+    def _siren(self, ev: dict) -> float | None:
+        """Flagsmith's chance to win when this execute attempt followed a look that held at 95% or more.
+
+        95% is where Flagsmith's own results page calls a variation "Winning"; the contract had not fired."""
+        if ev.get("call") != "execute" or not str(ev.get("recorded_reason", "")).startswith("no fired outcome"):
+            return None
+        d = self.last_decision.get(ev["hash"]) or {}
+        ctw = d.get("chance_to_win")
+        if d.get("outcome") == "hold" and ctw is not None and ctw >= SIREN_CHANCE:
+            return float(ctw)
+        return None
+
     def _short(self, h: str) -> str:
         return h.split(":", 1)[-1][:12]
 
@@ -443,8 +463,17 @@ class Replayer:
             else:
                 refused, why = self._expect_refused(ev, svc.execute_for_contract, ev["hash"], ev["action"])
                 label = f"agent asks to execute {ev['action']}"
+                siren = self._siren(ev)
+                if siren is not None:
+                    label = (f"agent, tempted by Flagsmith's 'Winning' reading ({siren * 100:.2f}% chance to win) "
+                             f"while the contract held, asks to execute {ev['action']}")
             verdict = "refused" if refused else ("ACCEPTED" if why == "the service accepted it" else "NOT AS RECORDED")
-            return Step(t, k, f"{label} -> {verdict}: {why}", ok=refused)
+            step = Step(t, k, f"{label} -> {verdict}: {why}", ok=refused)
+            if ev["call"] == "execute" and self._siren(ev) is not None:
+                step.detail["siren"] = True
+                if refused:
+                    self.sirens.append(step)
+            return step
         if k == "refusal_note":
             return Step(t, k, f"(recorded refusal, not replayed) {ev['what']}: {ev['recorded_reason']}")
         if k == "signature":
@@ -475,6 +504,7 @@ class Replayer:
             overrun = (set(diff) == {"boundary_z"} and got.get("counted") and got.get("fraction") == 1.0
                        and (got.get("identities_per_arm") or 0) > c.horizon.identities_per_arm)
             ok = (not diff or overrun) and out.get("look_id") == ev["look_id"]
+            self.last_decision[ev["hash"]] = got
             ctw = got.get("chance_to_win")
             same = "; same decision as recorded"
             if overrun:
