@@ -103,12 +103,36 @@ def start_traffic(a, procs: list) -> None:
                  f"classic, {a.bold:.0%} after bold; the headline flag is A/A)", DIM)
 
 
+def guardrail_lines(decision: dict) -> list[str]:
+    """What the engine did with each guardrail at this look, from the decision it stored."""
+    out = []
+    for g in decision.get("guardrails") or []:
+        worse = g.get("chance_worse")
+        need = g.get("boundary_chance")
+        if worse is None:
+            reading = "no Flagsmith result yet (Flagsmith needs 5 conversions per arm)"
+        else:
+            reading = f"Flagsmith chance it got worse {worse:.1%}"
+        rule = f", stop rule {need:.2%}" if need is not None else ""
+        direction = str(g.get("direction", "")).replace("_", " ")
+        out.append(f"  guardrail {g.get('name')} ({direction}): {reading}{rule} -> {str(g.get('state', '?')).upper()}")
+    return out
+
+
 class Agent:
-    def __init__(self, session: ClientSession, url: str, a):
+    def __init__(self, session: ClientSession, url: str, a, procs: list | None = None):
         self.s = session
         self.url = url
         self.a = a
         self.http = httpx.Client(base_url=url, timeout=60)
+        self.procs = procs or []
+
+    def check_traffic(self) -> None:
+        """Stop with one line if the shop or the simulated visitors died: with no traffic it would HOLD forever."""
+        for pr, what in zip(self.procs, ("demo shop", "simulated visitors")):
+            if pr.poll() is not None:
+                raise SessionError(f"the {what} stopped (exit code {pr.returncode}), so no traffic reaches "
+                                   "Flagsmith; fix it and rerun with --resume <hash>")
 
     async def tool(self, name: str, **args) -> dict:
         for attempt in range(1, 11):
@@ -160,6 +184,7 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
         say(tag, "start_under_contract -> running; the contract hash is now in the experiment's hypothesis", GREEN)
     fired = None
     while fired is None:
+        agent.check_traffic()
         out = await agent.tool("look", contract_hash=h)
         if not out.get("ok"):
             raise SessionError(f"look failed: {out.get('detail')}")
@@ -184,7 +209,7 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
         card = out.get("card", "")
         first = card.splitlines()[0] if card else ""
         colour = GREEN if "WIN" in first else RED if ("LOSS" in first or "GUARDRAIL" in first) else YELLOW
-        say(tag, "look ->\n" + card, colour)
+        say(tag, "look ->\n" + "\n".join([card, *guardrail_lines(out.get("decision") or {})]), colour)
         if out.get("proposal"):
             fired = out
         else:
@@ -253,7 +278,7 @@ async def run(a) -> None:
                 say("AGENT", f"connected to the Ulysses MCP server; tools: {', '.join(tools)}")
                 say("AGENT", "keys this process holds: Ulysses agent token only "
                              f"(Flagsmith key in the MCP server's environment: {any(k.startswith('FLAGSMITH_') for k in env)})")
-                agent = Agent(s, url, a)
+                agent = Agent(s, url, a, procs)
                 await asyncio.gather(*(govern(agent, demo, w, resume.get(w), results) for w in which))
     finally:
         for pr in procs:
