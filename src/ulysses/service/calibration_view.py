@@ -86,10 +86,18 @@ def _fan(run_dir: Path, aa: dict, alpha: str) -> dict:
                           f"{fmt.count(aa['banner_every_look']['runs'])}."}
 
 
+COMMITTED_OFFLINE = two_ships.SAMPLE.parent / "offline.json"
+
+
 def offline_view(run_dir: Path) -> dict | None:
+    """The run's own offline.json, else the committed copy in data/ made by the same command."""
     p = run_dir / "offline.json"
+    origin = "run"
+    committed = COMMITTED_OFFLINE
     if not p.exists():
-        return None
+        if committed is None or not committed.exists():
+            return None
+        p, origin = committed, "committed"
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         aa = data["aa"]
@@ -105,6 +113,9 @@ def offline_view(run_dir: Path) -> dict | None:
                               .model_dump()["boundary"]["planned"])
     return {
         "label": aa.get("label", ""),
+        "origin": origin,
+        "source_note": None if origin == "run" else
+            "Read from data/offline.json, the committed output of the command below; rerun it to replace it.",
         "facts": [f"{fmt.count(par['runs'])} runs", f"{looks} looks",
                   f"{fmt.count(par['identities_per_arm_per_look'])} per arm per look",
                   f"base rate {par['base_rate']:.0%}", "seed " + (", ".join(str(x) for x in par["seed"]) if isinstance(par["seed"], list) else str(par["seed"])),

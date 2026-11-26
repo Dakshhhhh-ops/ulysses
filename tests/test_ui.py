@@ -123,7 +123,8 @@ def test_calibration_exit_points_equal_the_table_counts(tmp_path):
     assert len(view["paths"]) == 4                 # every experiment is kept, as summarise_trace does
 
 
-def test_calibration_without_files_shows_no_figures(tmp_path):
+def test_calibration_without_files_shows_no_figures(tmp_path, monkeypatch):
+    monkeypatch.setattr(calibration_view, "COMMITTED_OFFLINE", None)
     assert calibration_view.calibration_page(tmp_path) == {"offline": None, "live": None, "run_dir": str(tmp_path)}
 
 
@@ -158,12 +159,23 @@ def test_pages_keep_their_ids_and_label_the_source(client, keys, clock):
     assert not re.search(r">\s*100(\.0+)?%", card)
 
 
-def test_calibration_page_with_no_files_has_no_numbers(client):
+def test_calibration_page_with_no_files_has_no_numbers(client, monkeypatch):
+    monkeypatch.setattr(calibration_view, "COMMITTED_OFFLINE", None)
     c, _, _ = client
     page = c.get("/calibration?tab=lab").text
     assert "Not run yet" in page and "calibrate offline" in page
     body = page.split('<main id="main">', 1)[1]
     assert not re.search(r"\d+\.\d%", body)
+
+
+def test_fresh_clone_reads_the_committed_calibration(client):
+    c, _, _ = client                                   # the run folder is empty, as on a fresh clone
+    page = c.get("/calibration?tab=lab").text
+    assert 'id="two-ships"' in page and "Not run yet" not in page
+    assert "data/offline.json" in page                 # the page says where the figures came from
+    aa = json.loads(calibration_view.COMMITTED_OFFLINE.read_text(encoding="utf-8"))["aa"]
+    rate = aa["banner_every_look"]["winning"] / aa["banner_every_look"]["runs"]
+    assert f"{rate:.1%}" in page
 
 
 def test_built_bundle_is_current():

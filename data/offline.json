@@ -1,0 +1,474 @@
+{
+  "aa": {
+    "label": "Offline engine calibration on simulated synthetic units (not user traffic)",
+    "engine": {
+      "constants.py": {
+        "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\constants.py",
+        "sha256": "d77d20ab300a198ca3ebacbace2c5ac22fc61529bff64ad166e9c55f10d4564d",
+        "tag": "v2.295.2"
+      },
+      "stats.py": {
+        "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\stats.py",
+        "sha256": "97c5ebfca7c81a52ee234af24db5a831ec5f57bc9b461d23b50e5388d83bb880",
+        "tag": "v2.295.2"
+      }
+    },
+    "parameters": {
+      "runs": 10000,
+      "looks": 30,
+      "identities_per_arm_per_look": 100,
+      "base_rate": 0.1,
+      "relative_lift": 0.0,
+      "seed": [
+        62944,
+        101,
+        202,
+        303,
+        404
+      ],
+      "guardrail_rate": 0.1,
+      "floors": {
+        "min_identities_per_variant": 50,
+        "min_conversions_per_variant": 5
+      },
+      "banner_thresholds": {
+        "winning_over": 0.95,
+        "losing_under": 0.05
+      }
+    },
+    "banner_every_look": {
+      "runs": 10000,
+      "winning": 1337,
+      "losing": 3129,
+      "any_call": 4466,
+      "winning_rate": 0.1337,
+      "losing_rate": 0.3129,
+      "any_call_rate": 0.4466,
+      "mean_stop_look": 7.82,
+      "mean_identities_per_arm_used": 2009.3
+    },
+    "banner_final_look_only": {
+      "runs": 10000,
+      "winning": 389,
+      "losing": 593,
+      "any_call": 982,
+      "winning_rate": 0.0389,
+      "losing_rate": 0.0593,
+      "any_call_rate": 0.0982,
+      "mean_stop_look": null,
+      "mean_identities_per_arm_used": null
+    },
+    "contract": {
+      "0.05": {
+        "runs": 10000,
+        "winning": 134,
+        "losing": 401,
+        "any_call": 535,
+        "winning_rate": 0.0134,
+        "losing_rate": 0.0401,
+        "any_call_rate": 0.0535,
+        "mean_stop_look": 23.1,
+        "mean_identities_per_arm_used": 2963.1
+      },
+      "0.1": {
+        "runs": 10000,
+        "winning": 300,
+        "losing": 710,
+        "any_call": 1010,
+        "winning_rate": 0.03,
+        "losing_rate": 0.071,
+        "any_call_rate": 0.101,
+        "mean_stop_look": 21.91,
+        "mean_identities_per_arm_used": 2918.3
+      }
+    },
+    "guardrail_false_stops": {
+      "not_increase": {
+        "old_fixed_97_5_every_look": 605,
+        "signed_pocock": 13,
+        "guardrail_alpha": 0.01,
+        "runs": 10000
+      },
+      "not_decrease": {
+        "old_fixed_97_5_every_look": 2204,
+        "signed_pocock": 436,
+        "guardrail_alpha": 0.01,
+        "runs": 10000
+      }
+    },
+    "seconds": 542.9
+  },
+  "power": {
+    "label": "Offline engine calibration on simulated synthetic units (not user traffic)",
+    "engine": {
+      "constants.py": {
+        "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\constants.py",
+        "sha256": "d77d20ab300a198ca3ebacbace2c5ac22fc61529bff64ad166e9c55f10d4564d",
+        "tag": "v2.295.2"
+      },
+      "stats.py": {
+        "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\stats.py",
+        "sha256": "97c5ebfca7c81a52ee234af24db5a831ec5f57bc9b461d23b50e5388d83bb880",
+        "tag": "v2.295.2"
+      }
+    },
+    "parameters": {
+      "runs": 10000,
+      "looks": 30,
+      "identities_per_arm_per_look": 100,
+      "base_rate": 0.1,
+      "relative_lift": 0.25,
+      "seed": [
+        62945,
+        102,
+        203,
+        304,
+        405
+      ],
+      "guardrail_rate": null,
+      "floors": {
+        "min_identities_per_variant": 50,
+        "min_conversions_per_variant": 5
+      },
+      "banner_thresholds": {
+        "winning_over": 0.95,
+        "losing_under": 0.05
+      }
+    },
+    "banner_every_look": {
+      "runs": 10000,
+      "winning": 9097,
+      "losing": 497,
+      "any_call": 9594,
+      "winning_rate": 0.9097,
+      "losing_rate": 0.0497,
+      "any_call_rate": 0.9594,
+      "mean_stop_look": 9.62,
+      "mean_identities_per_arm_used": 1044.5
+    },
+    "banner_final_look_only": {
+      "runs": 10000,
+      "winning": 9096,
+      "losing": 0,
+      "any_call": 9096,
+      "winning_rate": 0.9096,
+      "losing_rate": 0.0,
+      "any_call_rate": 0.9096,
+      "mean_stop_look": null,
+      "mean_identities_per_arm_used": null
+    },
+    "contract": {
+      "0.05": {
+        "runs": 10000,
+        "winning": 7930,
+        "losing": 0,
+        "any_call": 7930,
+        "winning_rate": 0.793,
+        "losing_rate": 0.0,
+        "any_call_rate": 0.793,
+        "mean_stop_look": 21.81,
+        "mean_identities_per_arm_used": 2350.2
+      },
+      "0.1": {
+        "runs": 10000,
+        "winning": 8837,
+        "losing": 0,
+        "any_call": 8837,
+        "winning_rate": 0.8837,
+        "losing_rate": 0.0,
+        "any_call_rate": 0.8837,
+        "mean_stop_look": 19.93,
+        "mean_identities_per_arm_used": 2110.1
+      }
+    },
+    "guardrail_false_stops": null,
+    "seconds": 155.0
+  },
+  "savings": {
+    "power": 0.793,
+    "inflation": 1.0497,
+    "contract_horizon": 3000,
+    "fixed_horizon_identities_per_arm": 2858,
+    "contract_mean_used": 2350.2,
+    "saving_pct": 17.8
+  },
+  "base_rates": [
+    {
+      "label": "Offline engine calibration on simulated synthetic units (not user traffic)",
+      "engine": {
+        "constants.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\constants.py",
+          "sha256": "d77d20ab300a198ca3ebacbace2c5ac22fc61529bff64ad166e9c55f10d4564d",
+          "tag": "v2.295.2"
+        },
+        "stats.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\stats.py",
+          "sha256": "97c5ebfca7c81a52ee234af24db5a831ec5f57bc9b461d23b50e5388d83bb880",
+          "tag": "v2.295.2"
+        }
+      },
+      "parameters": {
+        "runs": 2000,
+        "looks": 30,
+        "identities_per_arm_per_look": 100,
+        "base_rate": 0.02,
+        "relative_lift": 0.0,
+        "seed": 7020,
+        "guardrail_rate": null,
+        "floors": {
+          "min_identities_per_variant": 50,
+          "min_conversions_per_variant": 5
+        },
+        "banner_thresholds": {
+          "winning_over": 0.95,
+          "losing_under": 0.05
+        }
+      },
+      "banner_every_look": {
+        "runs": 2000,
+        "winning": 117,
+        "losing": 569,
+        "any_call": 686,
+        "winning_rate": 0.0585,
+        "losing_rate": 0.2845,
+        "any_call_rate": 0.343,
+        "mean_stop_look": 10.53,
+        "mean_identities_per_arm_used": 2332.3
+      },
+      "banner_final_look_only": {
+        "runs": 2000,
+        "winning": 54,
+        "losing": 123,
+        "any_call": 177,
+        "winning_rate": 0.027,
+        "losing_rate": 0.0615,
+        "any_call_rate": 0.0885,
+        "mean_stop_look": null,
+        "mean_identities_per_arm_used": null
+      },
+      "contract": {
+        "0.05": {
+          "runs": 2000,
+          "winning": 3,
+          "losing": 112,
+          "any_call": 115,
+          "winning_rate": 0.0015,
+          "losing_rate": 0.056,
+          "any_call_rate": 0.0575,
+          "mean_stop_look": 19.03,
+          "mean_identities_per_arm_used": 2936.9
+        }
+      },
+      "guardrail_false_stops": null,
+      "seconds": 25.0
+    },
+    {
+      "label": "Offline engine calibration on simulated synthetic units (not user traffic)",
+      "engine": {
+        "constants.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\constants.py",
+          "sha256": "d77d20ab300a198ca3ebacbace2c5ac22fc61529bff64ad166e9c55f10d4564d",
+          "tag": "v2.295.2"
+        },
+        "stats.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\stats.py",
+          "sha256": "97c5ebfca7c81a52ee234af24db5a831ec5f57bc9b461d23b50e5388d83bb880",
+          "tag": "v2.295.2"
+        }
+      },
+      "parameters": {
+        "runs": 2000,
+        "looks": 30,
+        "identities_per_arm_per_look": 100,
+        "base_rate": 0.05,
+        "relative_lift": 0.0,
+        "seed": 7050,
+        "guardrail_rate": null,
+        "floors": {
+          "min_identities_per_variant": 50,
+          "min_conversions_per_variant": 5
+        },
+        "banner_thresholds": {
+          "winning_over": 0.95,
+          "losing_under": 0.05
+        }
+      },
+      "banner_every_look": {
+        "runs": 2000,
+        "winning": 194,
+        "losing": 596,
+        "any_call": 790,
+        "winning_rate": 0.097,
+        "losing_rate": 0.298,
+        "any_call_rate": 0.395,
+        "mean_stop_look": 8.88,
+        "mean_identities_per_arm_used": 2165.7
+      },
+      "banner_final_look_only": {
+        "runs": 2000,
+        "winning": 63,
+        "losing": 149,
+        "any_call": 212,
+        "winning_rate": 0.0315,
+        "losing_rate": 0.0745,
+        "any_call_rate": 0.106,
+        "mean_stop_look": null,
+        "mean_identities_per_arm_used": null
+      },
+      "contract": {
+        "0.05": {
+          "runs": 2000,
+          "winning": 16,
+          "losing": 118,
+          "any_call": 134,
+          "winning_rate": 0.008,
+          "losing_rate": 0.059,
+          "any_call_rate": 0.067,
+          "mean_stop_look": 22.0,
+          "mean_identities_per_arm_used": 2946.4
+        }
+      },
+      "guardrail_false_stops": null,
+      "seconds": 20.3
+    },
+    {
+      "label": "Offline engine calibration on simulated synthetic units (not user traffic)",
+      "engine": {
+        "constants.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\constants.py",
+          "sha256": "d77d20ab300a198ca3ebacbace2c5ac22fc61529bff64ad166e9c55f10d4564d",
+          "tag": "v2.295.2"
+        },
+        "stats.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\stats.py",
+          "sha256": "97c5ebfca7c81a52ee234af24db5a831ec5f57bc9b461d23b50e5388d83bb880",
+          "tag": "v2.295.2"
+        }
+      },
+      "parameters": {
+        "runs": 2000,
+        "looks": 30,
+        "identities_per_arm_per_look": 100,
+        "base_rate": 0.1,
+        "relative_lift": 0.0,
+        "seed": 7100,
+        "guardrail_rate": null,
+        "floors": {
+          "min_identities_per_variant": 50,
+          "min_conversions_per_variant": 5
+        },
+        "banner_thresholds": {
+          "winning_over": 0.95,
+          "losing_under": 0.05
+        }
+      },
+      "banner_every_look": {
+        "runs": 2000,
+        "winning": 272,
+        "losing": 613,
+        "any_call": 885,
+        "winning_rate": 0.136,
+        "losing_rate": 0.3065,
+        "any_call_rate": 0.4425,
+        "mean_stop_look": 7.95,
+        "mean_identities_per_arm_used": 2024.2
+      },
+      "banner_final_look_only": {
+        "runs": 2000,
+        "winning": 77,
+        "losing": 112,
+        "any_call": 189,
+        "winning_rate": 0.0385,
+        "losing_rate": 0.056,
+        "any_call_rate": 0.0945,
+        "mean_stop_look": null,
+        "mean_identities_per_arm_used": null
+      },
+      "contract": {
+        "0.05": {
+          "runs": 2000,
+          "winning": 31,
+          "losing": 80,
+          "any_call": 111,
+          "winning_rate": 0.0155,
+          "losing_rate": 0.04,
+          "any_call_rate": 0.0555,
+          "mean_stop_look": 22.96,
+          "mean_identities_per_arm_used": 2960.9
+        }
+      },
+      "guardrail_false_stops": null,
+      "seconds": 22.6
+    },
+    {
+      "label": "Offline engine calibration on simulated synthetic units (not user traffic)",
+      "engine": {
+        "constants.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\constants.py",
+          "sha256": "d77d20ab300a198ca3ebacbace2c5ac22fc61529bff64ad166e9c55f10d4564d",
+          "tag": "v2.295.2"
+        },
+        "stats.py": {
+          "origin": "..\\..\\reference\\flagsmith\\api\\experimentation\\stats.py",
+          "sha256": "97c5ebfca7c81a52ee234af24db5a831ec5f57bc9b461d23b50e5388d83bb880",
+          "tag": "v2.295.2"
+        }
+      },
+      "parameters": {
+        "runs": 2000,
+        "looks": 30,
+        "identities_per_arm_per_look": 605,
+        "base_rate": 0.02,
+        "relative_lift": 0.0,
+        "seed": 7777,
+        "guardrail_rate": null,
+        "floors": {
+          "min_identities_per_variant": 50,
+          "min_conversions_per_variant": 5
+        },
+        "banner_thresholds": {
+          "winning_over": 0.95,
+          "losing_under": 0.05
+        },
+        "note": "horizon from `ulysses horizon` for 2% and a 25% lift"
+      },
+      "banner_every_look": {
+        "runs": 2000,
+        "winning": 266,
+        "losing": 630,
+        "any_call": 896,
+        "winning_rate": 0.133,
+        "losing_rate": 0.315,
+        "any_call_rate": 0.448,
+        "mean_stop_look": 7.56,
+        "mean_identities_per_arm_used": 12069.1
+      },
+      "banner_final_look_only": {
+        "runs": 2000,
+        "winning": 68,
+        "losing": 108,
+        "any_call": 176,
+        "winning_rate": 0.034,
+        "losing_rate": 0.054,
+        "any_call_rate": 0.088,
+        "mean_stop_look": null,
+        "mean_identities_per_arm_used": null
+      },
+      "contract": {
+        "0.05": {
+          "runs": 2000,
+          "winning": 24,
+          "losing": 73,
+          "any_call": 97,
+          "winning_rate": 0.012,
+          "losing_rate": 0.0365,
+          "any_call_rate": 0.0485,
+          "mean_stop_look": 23.2,
+          "mean_identities_per_arm_used": 17950.3
+        }
+      },
+      "guardrail_false_stops": null,
+      "seconds": 21.2
+    }
+  ]
+}

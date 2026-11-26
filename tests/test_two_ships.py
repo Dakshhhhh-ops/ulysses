@@ -161,6 +161,7 @@ def test_committed_sample_is_used_for_a_matching_run_without_its_own_export(tmp_
     assert hero["left"]["ships"] == sample["counts"]["first_exit"]["winning"]
 
 
-def test_empty_calibration_still_has_no_hero(page, tmp_path):
+def test_empty_calibration_still_has_no_hero(page, tmp_path, monkeypatch):
+    monkeypatch.setattr(calibration_view, "COMMITTED_OFFLINE", None)
     html = page(tmp_path / "none")
     assert 'id="two-ships"' not in html and "Not run yet" in html

@@ -38,6 +38,7 @@
   {%- else %}
   <div class="plate-band" data-tone="amber"><span class="tag">{{ ('LAB SIMULATION' if tab == 'lab' else 'SYNTHETIC IDENTITIES') }} · {{ active.label }}</span></div>
   <p class="facts">{{ active.facts | join(' · ') }}</p>
+  {%- if active.source_note %}<p class="facts">{{ active.source_note }}</p>{% endif %}
   {%- macro rate_table(rows, caption, label) %}
   <div class="table-wrap" style="border:0" role="region" aria-label="{{ label }}" tabindex="0">
   <table class="cal-table">
