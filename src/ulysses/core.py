@@ -29,6 +29,7 @@ import logging
 import re
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -141,6 +142,13 @@ class Ulysses:
         self._notify = notify
         self._look_locks: dict[tuple[str, str, int], threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        # Lifecycle writes (start, complete) the service has sent and not yet seen return, per experiment.
+        # Flagsmith run synchronously delivers its audit webhook inside the open write transaction, so
+        # anything read back meanwhile shows the state from before the write.
+        self._in_flight: dict[tuple[str, int], int] = {}
+        self._deferred: dict[tuple[str, int], dict[str, AuditEntry]] = {}
+        self._flight_guard = threading.Lock()
+        self._repairing = threading.local()
 
     # ================================================================ signers
 
@@ -488,6 +496,90 @@ class Ulysses:
 
     # ============================================================== writes to Flagsmith
 
+    @contextmanager
+    def _write_in_flight(self, ref):
+        key = (ref.environment, ref.experiment)
+        with self._flight_guard:
+            self._in_flight[key] = self._in_flight.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            with self._flight_guard:
+                self._in_flight[key] -= 1
+                if not self._in_flight[key]:
+                    del self._in_flight[key]
+
+    def write_in_flight(self, environment: str, experiment_id: int) -> bool:
+        with self._flight_guard:
+            return self._in_flight.get((environment, int(experiment_id)), 0) > 0
+
+    def _judge_deferred(self, ref) -> list[dict]:
+        """Judge the audit entries held back while a write was in flight, now that it has returned."""
+        with self._flight_guard:
+            held = self._deferred.pop((ref.environment, ref.experiment), {})
+        out = []
+        for entry in held.values():
+            try:
+                out.append(self.handle_audit(entry, _attempts=3))
+            except Exception as exc:  # noqa: BLE001 - the entry is kept and judged again by sync_audit
+                log.warning("deferred audit entry %s not judged yet: %s", entry.id, exc)
+        try:
+            self.drain_notes()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deviation notes not drained: %s", exc)
+        return out
+
+    def _fault(self, ref, h: str | None, what: str, detail: str, repaired: bool) -> int:
+        fid = self.store.add_service_fault(environment=ref.environment, experiment_id=ref.experiment,
+                                           contract_hash=h, what=what, detail=detail, repaired=repaired,
+                                           now=self.clock())
+        log.error("service fault on experiment %s: %s (%s)", ref.experiment, detail,
+                  "repaired" if repaired else "NOT repaired")
+        self._emit("service_fault", {"hash": h, "experiment": ref.experiment, "what": what, "detail": detail,
+                                     "repaired": repaired})
+        return fid
+
+    def _expected_status(self, h: str) -> tuple[str, ...] | None:
+        row = self.store.contract_row(h)
+        st = row["state"] if row else None
+        if st in ("active", "decided", "executing"):
+            return ("running", "paused")
+        if st == "executed":
+            return ("completed",)
+        return None
+
+    def _repair_revert(self, c: ct.Contract, h: str, exp: ExperimentInfo, cause: str) -> bool:
+        """Flagsmith shows 'created' for an experiment the service started: a lost update, not a deviation.
+
+        Nobody can move an experiment back to 'created' through Flagsmith's API, so this can only be a
+        write that saved a stale copy of the row (a PATCH that read it before the start committed).
+        Start it again under the same contract and record the fault.
+        """
+        ref = c.experiment
+        if getattr(self._repairing, "on", False):
+            return False  # a repair is already running in this thread; it records the outcome
+        self._repairing.on = True
+        try:
+            return self._repair_revert_once(c, h, exp, cause)
+        finally:
+            self._repairing.on = False
+
+    def _repair_revert_once(self, c: ct.Contract, h: str, exp: ExperimentInfo, cause: str) -> bool:
+        ref = c.experiment
+        repaired = False
+        try:
+            self._expect(ref, "start", h, expect={"status": "running"}, also=["rollout", "flag_change"])
+            with self._write_in_flight(ref):
+                self._fs.start(ref.environment, ref.experiment)
+            repaired = self._fs.get_experiment(ref.environment, ref.experiment).status in ("running", "paused")
+        except FlagsmithError as exc:
+            log.error("could not restore the start of experiment %s: %s", ref.experiment, exc)
+        self._fault(ref, h, "status_reverted",
+                    f"experiment {ref.experiment} showed status {exp.status!r} after {cause}; the contract had "
+                    "started it", repaired)
+        self._judge_deferred(ref)
+        return repaired
+
     def _expect(self, ref, kind: str, h: str | None, *, expect: dict, also: list[str] | None = None,
                 proposal_id: str | None = None) -> int:
         """Record, before sending it, exactly which write the service is about to make."""
@@ -507,6 +599,9 @@ class Ulysses:
     def _append_hypothesis(self, c: ct.Contract, h: str, line: str, *, base: str | None = None) -> None:
         """Append one line to the experiment's hypothesis, idempotently."""
         ref = c.experiment
+        if self.write_in_flight(ref.environment, ref.experiment):
+            # A PATCH now could save a stale copy of the row over the lifecycle write in flight.
+            raise FlagsmithError("a lifecycle write to this experiment is in flight; the note waits")
         exp = self._fs.get_experiment(ref.environment, ref.experiment)
         current = exp.hypothesis if base is None else base
         if base is None and line in current:
@@ -528,6 +623,25 @@ class Ulysses:
                 self.store.set_expected_landed(ew, landed)
             if not landed:
                 raise
+        self._check_after_note(c, h, exp)
+
+    def _check_after_note(self, c: ct.Contract, h: str, before: ExperimentInfo) -> None:
+        """A note PATCH saves the whole row in Flagsmith: confirm it changed nothing but the hypothesis."""
+        ref = c.experiment
+        try:
+            after = self._fs.get_experiment(ref.environment, ref.experiment)
+        except FlagsmithError:
+            return  # the next look's state check reads it again
+        want = self._expected_status(h)
+        if after.status != before.status or (want and after.status not in want):
+            if after.status == "created" and want == ("running", "paused"):
+                self._repair_revert(c, h, after, "a hypothesis note")
+            else:
+                self._fault(ref, h, "status_changed_by_note",
+                            f"status {before.status!r} became {after.status!r} across a hypothesis note", False)
+        if _rollout_of(after) != _rollout_of(before):
+            self._fault(ref, h, "rollout_changed_by_note",
+                        f"rollout {_rollout_of(before)} became {_rollout_of(after)} across a hypothesis note", False)
 
     def start_under_contract(self, h: str) -> dict:
         c, row = self._load(h)
@@ -576,11 +690,17 @@ class Ulysses:
                                     contract_hash=h, proposal_id=None, detail=None, now=self.clock())
         self._expect(ref, "start", h, expect={"status": "running"}, also=["rollout", "flag_change"])
         try:
-            self._fs.start(ref.environment, ref.experiment)
+            with self._write_in_flight(ref):
+                self._fs.start(ref.environment, ref.experiment)
         except FlagsmithError as exc:
             self.store.mark_action_failed(aid)
-            return self._reconcile_start(c, h, first_error=str(exc), raise_if_not=True, exc=exc)
-        return self._activate_started(c, h)
+            try:
+                return self._reconcile_start(c, h, first_error=str(exc), raise_if_not=True, exc=exc)
+            finally:
+                self._judge_deferred(ref)
+        out = self._activate_started(c, h)
+        self._judge_deferred(ref)
+        return out
 
     def _reconcile_start(self, c: ct.Contract, h: str, *, first_error: str | None, raise_if_not: bool,
                          exc: Exception | None = None) -> dict:
@@ -604,6 +724,11 @@ class Ulysses:
     def _activate_started(self, c: ct.Contract, h: str) -> dict:
         ref = c.experiment
         exp = self._fs.get_experiment(ref.environment, ref.experiment)
+        if exp.status == "created":
+            # The start returned but Flagsmith shows it undone: a stale row was saved over it.
+            self.store.cas_contract_state(h, ("starting", "signed"), "active")
+            self._repair_revert(c, h, exp, "the start returned")
+            exp = self._fs.get_experiment(ref.environment, ref.experiment)
         self.store.set_governed(environment=ref.environment, experiment_id=ref.experiment, contract_hash=h,
                                 feature_id=exp.feature_id, flag=exp.flag,
                                 option_ids=[v.option_id for v in exp.variations if v.option_id is not None],
@@ -725,6 +850,12 @@ class Ulysses:
         exp = self._fs.get_experiment(ref.environment, ref.experiment)
         gov = self.store.governed_row(ref.environment, ref.experiment)
         problems = []
+        if exp.status == "created":
+            if self._repair_revert(c, h, exp, "the service's own writes"):
+                return None
+            return {"hash": h, "state": "active", "look_not_taken": True, "retry_after_seconds": 60,
+                    "detail": "Flagsmith shows the experiment as not started and restarting it failed. "
+                              "Recorded as a service fault, not a deviation."}
         if exp.status not in ("running", "paused"):
             problems.append(("complete" if exp.status == "completed" else "status",
                              f"experiment is {exp.status} in Flagsmith, but the contract never completed it"))
@@ -819,8 +950,12 @@ class Ulysses:
             return self._proposal_view(p)
         # One execution per experiment at a time in this process; the contract-state claim below
         # covers anything else (an amendment or a second worker).
-        with self._lock_for(self._load(h)[0].experiment, kind="write"):
-            return self._execute_locked(pid)
+        ref = self._load(h)[0].experiment
+        with self._lock_for(ref, kind="write"):
+            try:
+                return self._execute_locked(pid)
+            finally:
+                self._judge_deferred(ref)
 
     def _execute_locked(self, pid: str) -> dict:
         p = self.store.proposal(pid)
@@ -894,7 +1029,8 @@ class Ulysses:
                                   "rollout_variant": (exp.variation(ship).option_id if ship else None)},
                           also=["flag_change", "rollout"])
         try:
-            res = self._fs.complete(ref.environment, ref.experiment, ship)
+            with self._write_in_flight(ref):
+                res = self._fs.complete(ref.environment, ref.experiment, ship)
             self.store.set_expected_landed(ew, True)
             return res
         except FlagsmithError as exc:
@@ -1067,8 +1203,19 @@ class Ulysses:
                 pass
         return self.clock()
 
-    def _read_back_matches(self, ew: dict) -> bool | None:
-        """Does Flagsmith now show what this expected write was meant to do? None if it cannot be read."""
+    def _read_back_matches(self, ew: dict, attempts: int = 1) -> bool | None:
+        """Does Flagsmith now show what this expected write was meant to do? None if it cannot be read.
+
+        ``attempts`` > 1 reads again a few times, for entries judged just after a write returned."""
+        ok = self._read_back_once(ew)
+        for _ in range(attempts - 1):
+            if ok:
+                break
+            self.sleep(self.settings.poll_seconds)
+            ok = self._read_back_once(ew)
+        return ok
+
+    def _read_back_once(self, ew: dict) -> bool | None:
         if ew.get("landed") == 1:
             return True
         try:
@@ -1084,7 +1231,7 @@ class Ulysses:
             return ex.get("contains", "") in exp.hypothesis
         return False
 
-    def _match_expected(self, kind: str, gov: dict, entry: AuditEntry) -> dict | None:
+    def _match_expected(self, kind: str, gov: dict, entry: AuditEntry, attempts: int = 1) -> dict | None:
         """The service's own expected write this author-less entry corresponds to, if any.
 
         A primary entry (start, complete, hypothesis update) claims one expected write of the same kind,
@@ -1101,13 +1248,13 @@ class Ulysses:
             if ew["kind"] == kind and ew["matched_audit_id"] is None:
                 if ew["landed"] == 0:
                     continue
-                ok = self._read_back_matches(ew)
+                ok = self._read_back_matches(ew, attempts)
                 if ok and self.store.claim_expected_write(ew["id"], entry.id):
                     self.store.set_expected_landed(ew["id"], True)
                     return ew
             elif kind in ew["also"] and ew["landed"] != 0 and t <= ew["created_at"] + SIDE_EFFECT_WINDOW:
                 # Flagsmith writes these rows inside the same request as the start or complete.
-                if ew["landed"] == 1 or self._read_back_matches(ew):
+                if ew["landed"] == 1 or self._read_back_matches(ew, attempts):
                     return ew
         return None
 
@@ -1172,6 +1319,8 @@ class Ulysses:
         """Write pending deviation notes onto their experiments; retried until they land."""
         written = 0
         for dv in self.store.pending_notes():
+            if dv.get("experiment_id") is not None and self.write_in_flight(dv["environment"], dv["experiment_id"]):
+                continue  # never PATCH over a lifecycle write in flight
             try:
                 c, _ = self._load(dv["contract_hash"])
                 self._append_hypothesis(c, dv["contract_hash"], dv["note"])
@@ -1185,7 +1334,7 @@ class Ulysses:
                 self.store.set_note_state(dv["id"], "failed")
         return written
 
-    def handle_audit(self, entry: AuditEntry) -> dict:
+    def handle_audit(self, entry: AuditEntry, _attempts: int = 1) -> dict:
         """Classify one Flagsmith audit-log entry; record a deviation if it is not the service's own write."""
         self.store.keep_audit_entry(entry.id, {
             "id": entry.id, "log": entry.log, "author": entry.author,
@@ -1199,16 +1348,22 @@ class Ulysses:
         if not kind or not gov:
             self.store.set_audit_verdict(entry.id, "ignored", None)
             return {"audit_id": entry.id, "verdict": "ignored"}
+        if self.write_in_flight(gov["environment"], gov["experiment_id"]):
+            # Judged once the service's own write returns; a read now would see the old state.
+            with self._flight_guard:
+                self._deferred.setdefault((gov["environment"], int(gov["experiment_id"])), {})[str(entry.id)] = entry
+            return {"audit_id": entry.id, "verdict": "deferred",
+                    "reason": "a service write to this experiment is in flight; judged when it returns"}
         h = gov["contract_hash"]
         c_row = self.store.contract_row(h)
         if kind == "flag_change" and c_row and c_row["state"] in ("executed", "void", "superseded"):
             # After the contract's own completion the flag is the team's again.
-            ew = self._match_expected(kind, gov, entry) if entry.author is None else None
+            ew = self._match_expected(kind, gov, entry, _attempts) if entry.author is None else None
             if ew is None:
                 self.store.set_audit_verdict(entry.id, "ignored", None, detail={"reason": "after the contract ended"})
                 return {"audit_id": entry.id, "verdict": "ignored"}
         if entry.author is None:
-            ew = self._match_expected(kind, gov, entry)
+            ew = self._match_expected(kind, gov, entry, _attempts)
             if ew is not None:
                 self.store.set_audit_verdict(entry.id, "authorised", None, expected_id=ew["id"],
                                              detail={"kind": kind, "contract": ew["contract_hash"]})

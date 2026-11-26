@@ -80,6 +80,16 @@ CREATE TABLE IF NOT EXISTS actions (
     ok INTEGER NOT NULL DEFAULT 1,
     at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS service_faults (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT,
+    experiment_id INTEGER,
+    contract_hash TEXT,
+    what TEXT NOT NULL,            -- e.g. status_reverted, rollout_changed_by_note
+    detail TEXT NOT NULL,
+    repaired INTEGER NOT NULL DEFAULT 0,
+    at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS refusals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     what TEXT NOT NULL,
@@ -164,12 +174,17 @@ class Store:
         with self._lock:
             return self._db.execute(sql, tuple(args))
 
+    # Rows are fetched while the lock is held: the connection is shared between threads, and a
+    # fetch interleaved with another thread's statement can come back empty.
     def _one(self, sql: str, args: Iterable[Any] = ()) -> dict | None:
-        row = self._exec(sql, args).fetchone()
+        with self._lock:
+            row = self._db.execute(sql, tuple(args)).fetchone()
         return dict(row) if row else None
 
     def _all(self, sql: str, args: Iterable[Any] = ()) -> list[dict]:
-        return [dict(r) for r in self._exec(sql, args).fetchall()]
+        with self._lock:
+            rows = self._db.execute(sql, tuple(args)).fetchall()
+        return [dict(r) for r in rows]
 
     def transaction(self):
         return _Tx(self)
@@ -379,6 +394,18 @@ class Store:
 
     def refusals(self) -> list[dict]:
         return self._all("SELECT * FROM refusals ORDER BY id")
+
+    def add_service_fault(self, *, environment: str, experiment_id: int, contract_hash: str | None, what: str,
+                          detail: str, repaired: bool, now: float) -> int:
+        """The service's own write damaged Flagsmith state. Kept apart from deviations (not someone else's change)."""
+        cur = self._exec(
+            "INSERT INTO service_faults(environment, experiment_id, contract_hash, what, detail, repaired, at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (environment, experiment_id, contract_hash, what, detail, 1 if repaired else 0, now))
+        return int(cur.lastrowid)
+
+    def service_faults(self) -> list[dict]:
+        return self._all("SELECT * FROM service_faults ORDER BY id")
 
     def add_deviation(self, *, environment: str | None, experiment_id: int | None, contract_hash: str | None,
                       audit_id: Any, log: str, author: str | None, now: float, kind: str | None = None,

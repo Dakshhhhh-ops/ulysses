@@ -264,6 +264,11 @@ def create_app(
     def deviations():
         return svc.store.deviations()
 
+    @app.get("/api/service-faults", dependencies=[Depends(agent)])
+    def service_faults():
+        """Damage the service's own writes did to Flagsmith state (kept apart from deviations)."""
+        return svc.store.service_faults()
+
     @app.get("/api/refusals", dependencies=[Depends(agent)])
     def refusals():
         return svc.store.refusals()
