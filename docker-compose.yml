@@ -1,0 +1,69 @@
+# A throwaway, stock open-source Flagsmith for trying Ulysses: pinned release, Experimentation on,
+# experiment events stored in Flagsmith's own Postgres. Nothing here is modified Flagsmith code.
+#
+#   uv run python scripts/judge_demo.py        # brings this up, bootstraps it and runs the demo
+#   docker compose -p ulysses down -v          # removes it and its data
+#
+# The Flagsmith API and dashboard listen on http://localhost:8280.
+name: ulysses
+
+x-flagsmith-env: &flagsmith-env
+  DATABASE_URL: postgresql://postgres:password@postgres:5432/flagsmith
+  ENVIRONMENT: production
+  DJANGO_ALLOWED_HOSTS: '*'
+  FLAGSMITH_DOMAIN: localhost:8280
+  DJANGO_SECRET_KEY: ulysses-throwaway-local-secret
+  WAREHOUSE_CREDENTIALS_SECRET: ulysses-throwaway-warehouse-secret
+  EXPERIMENTATION_ENABLED: 'true'
+  # Results and exposures are computed inside the refresh request instead of on a task queue,
+  # so a demo look does not wait behind other work. The five-minute refresh floor still applies.
+  TASK_RUN_METHOD: SYNCHRONOUSLY
+  # The contract service runs on the host; Flagsmith refuses webhooks to private addresses unless listed.
+  SSRF_ALLOWED_HOSTS: 'host.docker.internal'
+  GUNICORN_WORKERS: '2'
+  GUNICORN_THREADS: '4'
+
+x-image: &image docker.flagsmith.com/flagsmith/flagsmith:2.295.2@sha256:48905c664152d8ae2c843ec9cee72ff197e7caff6e91b959bb851a235915ea35
+
+volumes:
+  pgdata:
+
+services:
+  postgres:
+    image: postgres:15.5-alpine
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: flagsmith
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -d flagsmith -U postgres']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 20s
+    mem_limit: 512m
+
+  migrate-db:
+    image: *image
+    command: ['migrate']
+    environment:
+      <<: *flagsmith-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  flagsmith:
+    image: *image
+    command: ['serve']
+    environment:
+      <<: *flagsmith-env
+    ports:
+      - '8280:8000'
+    extra_hosts:
+      # Linux has no host.docker.internal by default; Docker Desktop does.
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      migrate-db:
+        condition: service_completed_successfully
+    mem_limit: 1g
