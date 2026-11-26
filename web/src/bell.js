@@ -190,6 +190,7 @@ class Instrument {
     this.frames = 0;
     this.frameTimes = [];
     this.lost = 0;
+    this.slow = false;      // set once by checkSpeed: the flat drawing stays for good and the loop stops
     this.highlighted = { seq: null, k: null };
 
     const canvas = document.createElement("canvas");
@@ -900,7 +901,7 @@ class Instrument {
   }
 
   onRestored() {
-    if (this.lost > 1) return;
+    if (this.lost > 1 || this.slow) return;
     this.canvas.style.visibility = "";
     this.stage.dataset.ready = "gl";
     this.stage.querySelector(".plate-note")?.remove();
@@ -909,6 +910,7 @@ class Instrument {
 
   // ---- loop: render on demand only ------------------------------------------------------------------------
   invalidate(force = false) {
+    if (this.slow) return;
     this.dirty = true;
     if (force) this.visible = true;
     if (!this.running && this.visible && !document.hidden) {
@@ -919,6 +921,7 @@ class Instrument {
   }
 
   frame(now) {
+    if (this.slow) { this.running = false; return; }
     const dt = Math.min(0.05, (now - this.last) / 1000);
     this.last = now;
     let active = false;
@@ -951,13 +954,14 @@ class Instrument {
       if (this.hollow && this.hollowList.length) this.placeBeads(this.progress ?? this.threadSegs);
       const t0 = performance.now();
       this.renderer.render(this.world, this.camera);
-      if (this.stage.dataset.ready !== "gl" && this.lost === 0) this.stage.dataset.ready = "gl";  // swap the SVG out only after a real frame
+      if (this.stage.dataset.ready !== "gl" && this.lost === 0 && !this.slow) this.stage.dataset.ready = "gl";  // swap the SVG out only after a real frame
       this.plate.chips.place((p) => this.project(p), this.w, this.h);
       this.dirty = false;
       this.frames++;
       if (active && this.frameTimes.length < 30) {
         this.frameTimes.push(now - (this.prevFrame || now));
         if (this.frameTimes.length === 30) this.checkSpeed();
+        if (this.slow) { this.running = false; return; }
       }
       this.prevFrame = now;
       if (this.debugEl) this.debug(performance.now() - t0);
@@ -969,6 +973,14 @@ class Instrument {
   checkSpeed() {
     const avg = this.frameTimes.slice(1).reduce((a, b) => a + b, 0) / (this.frameTimes.length - 1);
     if (avg > 24 && !this.opts.debug && !this.opts.forceGL) {
+      // Stop drawing for good: the next frame() would otherwise set data-ready back to "gl" and hide the SVG.
+      this.slow = true;
+      this.tweens = [];
+      this.springing = false;
+      this.inertia = false;
+      this.orbitVel = { az: 0, el: 0 };
+      this.dirty = false;
+      this.running = false;
       rememberLowPower();
       this.plate.fig.dataset.flat = "true";
       this.canvas.style.display = "none";
