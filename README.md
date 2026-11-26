@@ -192,19 +192,19 @@ Guardrails in A/A (a guardrail metric at 10% in both arms, no effect), share of 
 Produced by `uv run ulysses calibrate live` and recomputed from its trace by `uv run ulysses calibrate summarise <trace>`. Every number is read from Flagsmith's results endpoint. The identities are synthetic, assigned by Flagsmith's engine through the Python SDK; they are not user traffic.
 
 <!-- live-table:start -->
-Live engine calibration on self-hosted Flagsmith (batch `ab1aca`): 40 A/A experiments, every number read from Flagsmith's results endpoint. Signed design: 6 looks at least five minutes apart, horizon 600 identities per arm, contract alpha 0.05. At least 100 synthetic identities per arm were sent per look, assigned by Flagsmith's engine (Python SDK, local evaluation), conversion probability 10% in both arms. Synthetic identities, not user traffic. 95% Wilson intervals. 4 reads did not return in time and count as looks not taken.
+Live engine calibration on self-hosted Flagsmith (batch `72e1bc`): 30 A/A experiments, every number read from Flagsmith's results endpoint. Signed design: 6 looks at least five minutes apart, horizon 600 identities per arm, contract alpha 0.05. At least 100 synthetic identities per arm were sent per look, assigned by Flagsmith's engine (Python SDK, local evaluation), conversion probability 10% in both arms. Synthetic identities, not user traffic. 95% Wilson intervals.
 
 | Rule (A/A, no real difference) | False Winning (ships a do-nothing variation) | False Losing | Any false call |
 |---|---|---|---|
-| Stop at the first look over 95% or under 5% (looks 1-6) | 0/40 = 0.0% (0-9) | 4/40 = 10.0% (4-23) | 4/40 = 10.0% (4-23) |
-| Read once at the final look | 0/40 = 0.0% (0-9) | 3/40 = 7.5% (3-20) | 3/40 = 7.5% (3-20) |
-| Ulysses contract, alpha 0.05 two-sided | 0/40 = 0.0% (0-9) | 0/40 = 0.0% (0-9) | 0/40 = 0.0% (0-9) |
+| Stop at the first look over 95% or under 5% (looks 1-6) | 0/30 = 0.0% (0-11) | 1/30 = 3.3% (1-17) | 1/30 = 3.3% (1-17) |
+| Read once at the final look | 0/30 = 0.0% (0-11) | 1/30 = 3.3% (1-17) | 1/30 = 3.3% (1-17) |
+| Ulysses contract, alpha 0.05 two-sided | 0/30 = 0.0% (0-11) | 1/30 = 3.3% (1-17) | 1/30 = 3.3% (1-17) |
 
-Contract outcomes: 0 wins, 0 losses, 3 at the horizon with no decision, 37 still holding. In 33 of them Flagsmith had counted fewer than the 600-per-arm horizon in one arm at the last read (events sent but not counted), so the contract never reached its final look.
+Contract outcomes: 0 wins, 1 losses, 29 at the horizon with no decision, 0 still holding.
 
-The Python SDK's event buffer overflowed during this batch and dropped events (the harness now flushes every 100 identities), so most experiments never reached their horizon. Read it as corroboration of the offline run, not as a precise rate.
+Every experiment in this batch reached its horizon, Flagsmith counted exactly the identities sent, and no read was missed. At 30 experiments and 6 looks the batch cannot tell the rules apart: each made one false call (a loss), none shipped a do-nothing variation, and the intervals are wide (0-11% for false Winning). It shows the whole pipeline working on Flagsmith's own results endpoint, and that the contract made no false ship there. It does not show the cost of peeking; the 10,000-run offline table carries that claim.
 
-An earlier batch, `d11c7f`, scored under the design it was started with (it stopped at look 8 of 10 on a Flagsmith 429):
+An earlier, larger batch, `d11c7f`, scored under the design it was started with (it stopped at look 8 of 10 on a Flagsmith 429):
 
 Live engine calibration on self-hosted Flagsmith (batch `d11c7f`): 60 A/A experiments, every number read from Flagsmith's results endpoint. Signed design: 10 looks at least five minutes apart, horizon 1000 identities per arm, contract alpha 0.05. At least 100 synthetic identities per arm were sent per look, assigned by Flagsmith's engine (Python SDK, local evaluation), conversion probability 10% in both arms. Synthetic identities, not user traffic. 95% Wilson intervals. The run stopped after look 8 of 10 (see the batch notes); the table covers the looks that were read, and the contract is scored under its signed design without re-fitting.
 
@@ -215,7 +215,9 @@ Live engine calibration on self-hosted Flagsmith (batch `d11c7f`): 60 A/A experi
 
 Contract outcomes: 0 wins, 2 losses, 0 at the horizon with no decision, 58 still holding when the run stopped at look 8 of 10.
 
-Both traces ship with timestamps removed, so the tables can be recomputed from a clone: `uv run ulysses calibrate summarise data/live-ab1aca.jsonl` and `uv run ulysses calibrate summarise data/live-d11c7f.jsonl` (each also writes a `live.md` next to the trace).
+In that batch 58 of 60 contracts were still holding when the run stopped, so its contract row covers a truncated design; the 13 of 60 first-look calls are mostly false losses (9), and its false-Winning interval (3-16%) overlaps the nominal 5%.
+
+The traces ship with timestamps removed, so the tables can be recomputed from a clone: `uv run ulysses calibrate summarise data/live-72e1bc.jsonl` and `uv run ulysses calibrate summarise data/live-d11c7f.jsonl` (each also writes a `live.md` next to the trace). A batch in between, `ab1aca`, lost events to an SDK buffer overflow and is not reported.
 <!-- live-table:end -->
 
 ### Time saved
