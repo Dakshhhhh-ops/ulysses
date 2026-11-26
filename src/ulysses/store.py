@@ -243,7 +243,7 @@ class Store:
     def governing_contract(self, environment: str, experiment_id: int) -> dict | None:
         row = self._one(
             "SELECT * FROM contracts WHERE environment=? AND experiment_id=? "
-            "AND state IN ('active','decided','executed') ORDER BY created_at DESC LIMIT 1",
+            "AND state IN ('starting','active','decided','executing','executed') ORDER BY created_at DESC LIMIT 1",
             (environment, experiment_id),
         )
         if row:
@@ -269,7 +269,7 @@ class Store:
             (r["environment"], r["experiment_id"])
             for r in self._all(
                 "SELECT DISTINCT environment, experiment_id FROM contracts "
-                "WHERE state IN ('starting','active','decided','executed','superseded','deviated')"
+                "WHERE state IN ('starting','active','decided','executing','executed','superseded','deviated')"
             )
         ]
 

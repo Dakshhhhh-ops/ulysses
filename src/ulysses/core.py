@@ -139,7 +139,7 @@ class Ulysses:
         self.clock = clock
         self.sleep = sleep
         self._notify = notify
-        self._look_locks: dict[tuple[str, int], threading.Lock] = {}
+        self._look_locks: dict[tuple[str, str, int], threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
     # ================================================================ signers
@@ -647,9 +647,9 @@ class Ulysses:
                 note = "Flagsmith had not finished recomputing; this look uses its previous results."
         return snap, refreshed, note
 
-    def _lock_for(self, ref) -> threading.Lock:
+    def _lock_for(self, ref, kind: str = "look") -> threading.Lock:
         with self._locks_guard:
-            return self._look_locks.setdefault((ref.environment, ref.experiment), threading.Lock())
+            return self._look_locks.setdefault((kind, ref.environment, ref.experiment), threading.Lock())
 
     def look(self, h: str) -> dict:
         c, _ = self._load(h)
@@ -667,7 +667,7 @@ class Ulysses:
         ref = c.experiment
         now = self.clock()
         self.drain_notes()
-        if row["state"] in ("decided", "executed"):
+        if row["state"] in ("decided", "executing", "executed"):
             fired = [p for p in self.store.proposals_for(h) if p["state"] != "void"]
             return {"hash": h, "state": row["state"], "already_decided": True,
                     "proposals": [self._proposal_view(p) for p in fired]}
@@ -779,8 +779,9 @@ class Ulysses:
         if row["state"] in ("superseded", "void", "deviated"):
             raise Refused(f"contract {short_hash(p['contract_hash'])} is {row['state']}; "
                           "its proposals no longer authorise anything")
-        expected = "decided" if p["outcome"] != "amendment" else ("decided", "signed")
-        if row["state"] not in (expected if isinstance(expected, tuple) else (expected,)):
+        # 'executing' is left behind only by an execution that crashed mid-write; a retry reconciles it.
+        expected = ("decided", "executing") if p["outcome"] != "amendment" else ("decided", "signed", "executing")
+        if row["state"] not in expected:
             raise Refused(f"contract is {row['state']}; this proposal cannot run now")
         return c, row
 
@@ -816,6 +817,16 @@ class Ulysses:
             raise Refused(f"the contract authorises {p['action']!r} for this outcome, not {requested_action!r}")
         if p["state"] == "executed":
             return self._proposal_view(p)
+        # One execution per experiment at a time in this process; the contract-state claim below
+        # covers anything else (an amendment or a second worker).
+        with self._lock_for(self._load(h)[0].experiment, kind="write"):
+            return self._execute_locked(pid)
+
+    def _execute_locked(self, pid: str) -> dict:
+        p = self.store.proposal(pid)
+        h = p["contract_hash"]
+        if p["state"] == "executed":
+            return self._proposal_view(p)
         # Re-check everything at the moment of execution, from stored evidence.
         c, row = self._governing(p)
         if p["state"] not in ("confirmed", "failed"):
@@ -837,40 +848,22 @@ class Ulysses:
         exp = self._fs.get_experiment(ref.environment, ref.experiment)
         earlier = [ew for ew in self.store.expected_writes(ref.environment, ref.experiment)
                    if ew["kind"] == "complete" and ew["proposal_id"] == pid]
-        if exp.status not in ("running", "paused"):
-            # A previous attempt may have landed even though its response never came back.
-            if earlier and self._completed_as(exp, ship):
-                self.store.set_expected_landed(earlier[-1]["id"], True)
-                res = {"reconciled": True, "response_status": exp.status}
-            else:
-                raise Conflict(f"experiment is {exp.status}; nothing to complete")
-        else:
-            aid = self.store.log_action(environment=ref.environment, experiment_id=ref.experiment, kind="complete",
-                                        contract_hash=h, proposal_id=pid, detail={"ship": ship or CONTROL_KEY},
-                                        now=self.clock())
-            ew = self._expect(ref, "complete", h, proposal_id=pid,
-                              expect={"status": "completed", "ship": ship or CONTROL_KEY,
-                                      "rollout_variant": (exp.variation(ship).option_id if ship else None)},
-                              also=["flag_change", "rollout"])
-            try:
-                res = self._fs.complete(ref.environment, ref.experiment, ship)
-                self.store.set_expected_landed(ew, True)
-            except FlagsmithError as exc:
-                # The request may have reached Flagsmith; read back before calling it failed.
-                try:
-                    after = self._fs.get_experiment(ref.environment, ref.experiment)
-                except FlagsmithError:
-                    after = None
-                if after is not None and self._completed_as(after, ship):
-                    self.store.set_expected_landed(ew, True)
-                    res = {"reconciled": True, "response_status": after.status, "first_error": str(exc)}
-                else:
-                    if after is not None and after.status in ("running", "paused"):
-                        self.store.set_expected_landed(ew, False)
-                    self.store.mark_action_failed(aid)
-                    self.store.update_proposal(pid, self.clock(), state="failed",
-                                               result=json.dumps({"error": str(exc), "retry": "call execute again"}))
-                    raise
+        reconcile = exp.status not in ("running", "paused")
+        if reconcile and not (earlier and self._completed_as(exp, ship)):
+            raise Conflict(f"experiment is {exp.status}; nothing to complete")
+        # Claim the contract for this write. The claim fails if an amendment superseded it, or a
+        # deviation froze it, since the checks above ran; an amendment cannot supersede it after.
+        prior = row["state"] if row["state"] != "executing" else "decided"
+        if not self.store.cas_contract_state(h, (row["state"],), "executing"):
+            now_state = (self.store.contract_row(h) or {}).get("state")
+            self.store.log_refusal("execute", f"contract became {now_state} during the checks", h, self.clock())
+            raise Refused(f"contract is now {now_state}; it changed while this execution was being checked, "
+                          "so nothing was sent to Flagsmith")
+        try:
+            res = self._send_complete(c, h, p, exp, ship, earlier, reconcile)
+        except BaseException:
+            self.store.cas_contract_state(h, ("executing",), prior)
+            raise
         line = (f"{MARK} Contract {short_hash(h)} fired: {p['outcome'].replace('_', ' ')}. "
                 f"Executed '{p['action'].replace('_', ' ')}' after the owner's signed confirmation; "
                 f"flag {ref.flag} now serves {ship or CONTROL_KEY} to everyone.")
@@ -884,6 +877,41 @@ class Ulysses:
             self.store.set_contract_state(h, "executed")
         self._emit("executed", {"hash": h, "action": p["action"], "serving": ship or CONTROL_KEY})
         return self._proposal_view(self.store.proposal(pid))
+
+    def _send_complete(self, c: ct.Contract, h: str, p: dict, exp: ExperimentInfo, ship: str | None,
+                       earlier: list[dict], reconcile: bool) -> dict:
+        ref = c.experiment
+        pid = p["id"]
+        if reconcile:
+            # A previous attempt landed even though its response never came back.
+            self.store.set_expected_landed(earlier[-1]["id"], True)
+            return {"reconciled": True, "response_status": exp.status}
+        aid = self.store.log_action(environment=ref.environment, experiment_id=ref.experiment, kind="complete",
+                                    contract_hash=h, proposal_id=pid, detail={"ship": ship or CONTROL_KEY},
+                                    now=self.clock())
+        ew = self._expect(ref, "complete", h, proposal_id=pid,
+                          expect={"status": "completed", "ship": ship or CONTROL_KEY,
+                                  "rollout_variant": (exp.variation(ship).option_id if ship else None)},
+                          also=["flag_change", "rollout"])
+        try:
+            res = self._fs.complete(ref.environment, ref.experiment, ship)
+            self.store.set_expected_landed(ew, True)
+            return res
+        except FlagsmithError as exc:
+            # The request may have reached Flagsmith; read back before calling it failed.
+            try:
+                after = self._fs.get_experiment(ref.environment, ref.experiment)
+            except FlagsmithError:
+                after = None
+            if after is not None and self._completed_as(after, ship):
+                self.store.set_expected_landed(ew, True)
+                return {"reconciled": True, "response_status": after.status, "first_error": str(exc)}
+            if after is not None and after.status in ("running", "paused"):
+                self.store.set_expected_landed(ew, False)
+            self.store.mark_action_failed(aid)
+            self.store.update_proposal(pid, self.clock(), state="failed",
+                                       result=json.dumps({"error": str(exc), "retry": "call execute again"}))
+            raise
 
     @staticmethod
     def _completed_as(exp: ExperimentInfo, ship: str | None) -> bool:
@@ -914,6 +942,8 @@ class Ulysses:
         old, row = self._load(h)
         if row["state"] in ("superseded", "executed", "void"):
             raise Conflict(f"contract is {row['state']} and cannot be amended")
+        if row["state"] == "executing":
+            raise Conflict("this contract is carrying out its action right now; amend it once that finishes")
         if row["state"] == "deviated":
             # Lets two signers recover a contract frozen by a deviation, if the experiment is still running.
             exp = self._fs.get_experiment(old.experiment.environment, old.experiment.experiment)
@@ -951,6 +981,10 @@ class Ulysses:
             if old_row["state"] in ("superseded", "executed", "void"):
                 raise Conflict(f"contract {short_hash(old_h)} is already {old_row['state']}; "
                                "this amendment stays a draft")
+            if old_row["state"] == "executing":
+                # Its pre-signed action is being sent to Flagsmith; superseding now would race it.
+                raise Conflict(f"contract {short_hash(old_h)} is carrying out its action right now; this "
+                               "amendment stays a draft (sign again once that finishes)")
             started = old_row["state"] in ("active", "decided", "deviated", "starting")
             # Every outstanding proposal of the superseded contract dies with it, whatever its state.
             for p in self.store.proposals_for(old_h):
@@ -1000,6 +1034,8 @@ class Ulysses:
             return kind, self._governed_for_id(entry.related_object_id)
         if rtype in self._FLAG_TYPES:
             for g in self.store.governed_rows():
+                if entry.environment and str(entry.environment) != str(g["environment"]):
+                    continue  # the same flag name in another environment or project is not governed
                 named = re.search(rf"(?<![\w-]){re.escape(g['flag'])}(?![\w-])", entry.log or "")
                 same_feature = rtype == "FEATURE" and str(entry.related_object_id) == str(g["feature_id"])
                 if named or same_feature:
@@ -1093,6 +1129,24 @@ class Ulysses:
             return False
         return True
 
+    def _rollout_changed(self, gov: dict) -> bool | None:
+        """Does Flagsmith's rollout differ from the one recorded at the start? Moves the record on if so."""
+        snap = gov.get("rollout")
+        try:
+            exp = self._fs.get_experiment(gov["environment"], gov["experiment_id"])
+        except FlagsmithError:
+            return None
+        now_rollout = _rollout_of(exp)
+        if snap is None or now_rollout is None:
+            return True  # nothing to compare against: treat the entry as the evidence
+        if now_rollout == snap:
+            return False
+        # Recorded once here, so the next look's state check does not count it again.
+        self.store.set_governed(environment=gov["environment"], experiment_id=gov["experiment_id"],
+                                contract_hash=gov["contract_hash"], feature_id=gov["feature_id"], flag=gov["flag"],
+                                option_ids=gov["option_ids"], rollout=now_rollout)
+        return True
+
     def _record_deviation(self, c: ct.Contract, h: str, *, audit_id: Any, log: str, author: str | None,
                           kind: str, source: str, freeze: bool) -> int:
         ref = c.experiment
@@ -1103,10 +1157,13 @@ class Ulysses:
                                        audit_id=audit_id, log=log, author=author, now=self.clock(), kind=kind,
                                        source=source, note=note)
         if freeze:
-            self.store.cas_contract_state(h, ("starting", "active", "decided"), "deviated")
-            for p in self.store.proposals_for(h):
-                if p["state"] in ("pending", "confirmed", "failed"):
-                    self.store.update_proposal(p["id"], self.clock(), state="void")
+            with self.store.transaction():
+                # A contract that is mid-execution is not frozen under it: the write in flight finds
+                # Flagsmith's real state for itself.
+                if self.store.cas_contract_state(h, ("starting", "active", "decided"), "deviated"):
+                    for p in self.store.proposals_for(h):
+                        if p["state"] in ("pending", "confirmed", "failed"):
+                            self.store.update_proposal(p["id"], self.clock(), state="void")
         self.drain_notes()
         self._emit("deviation", {"hash": h, "log": log, "author": author, "kind": kind, "source": source})
         return did
@@ -1157,6 +1214,12 @@ class Ulysses:
                                              detail={"kind": kind, "contract": ew["contract_hash"]})
                 return {"audit_id": entry.id, "verdict": "authorised", "expected_write": ew["id"],
                         "contract": ew["contract_hash"]}
+        if kind == "rollout" and self._rollout_changed(gov) is not True:
+            # Flagsmith's rollout still matches what the contract started (or cannot be read): the
+            # entry alone is not evidence. A real change is still caught by the state check at each look.
+            self.store.set_audit_verdict(entry.id, "unverified", None,
+                                         detail={"kind": kind, "reason": "Flagsmith's rollout is unchanged"})
+            return {"audit_id": entry.id, "verdict": "unverified", "contract": h}
         freeze = kind in ("complete", "start", "delete", "pause")
         if freeze:
             real = self._verify_lifecycle(kind, gov)
