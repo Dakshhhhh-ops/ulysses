@@ -1,14 +1,17 @@
 {% extends "base.html" %}
 {% from "_elevation.html" import plate, legend_key %}
+{% from "_two_ships.html" import two_ships %}
 {% set nav = "calibration" %}
 {% set source = scene.source if active and not active.error else none %}
 {% block title %}Calibration · Ulysses{% endblock %}
 {% block main %}
 {%- set off = cal.offline -%}
 {%- set live = cal.live -%}
+{%- set ts = off.two_ships if off and not off.error else none -%}
+{%- if ts %}{{ two_ships(ts) }}{% endif %}
 <div class="page-head">
   <p class="label">A/A calibration · both arms identical, so every shipped winner is a false one</p>
-  <h1>How often does an A/A test ship a winner that does nothing?</h1>
+  {% if ts and not ts.error %}<h2 class="ph-h">How often does an A/A test ship a winner that does nothing?</h2>{% else %}<h1>How often does an A/A test ship a winner that does nothing?</h1>{% endif %}
   <p class="lede">Flagsmith's docs read a chance to win over 95% as Winning. Read once, at a planned end, that is a sound call at the 10% level. Acted on at the first refresh where it appears, the same label ships variations that do nothing more often. A contract signed in advance acts on the same Flagsmith number, only at its signed boundaries. Every figure below is read from the calibration scripts' own output on this machine.</p>
 </div>
 
@@ -94,6 +97,7 @@
         <span class="key"><span class="swatch contract" aria-hidden="true"></span>crossed a signed ring (the contract acts here)</span>
         <span class="key"><span class="swatch final" aria-hidden="true" style="background:var(--ink);opacity:.4"></span>never left 5%–95%</span>
         {%- set ff = fan_flat(scene) if scene.paths else none %}
+        {%- if active and active.paths_note %}<span class="key">{{ active.paths_note }}</span>{% endif %}
         {%- if ff and ff.total > ff.shown %}<span class="key">flat drawing shows {{ ff.shown }} of {{ ff.total }} paths; counts are from all runs</span>{% endif %}
       </div>
     </div>

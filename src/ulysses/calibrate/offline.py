@@ -125,8 +125,13 @@ def simulate(
     seed: int = 62944,
     guardrail_rate: float | None = 0.10,
     flagsmith_src: str | None = None,
+    keep_paths: int = 0,
+    engine: tuple | None = None,
 ) -> dict:
-    stats, consts, provenance = flagsmith_source.load(flagsmith_src)
+    """``keep_paths`` keeps the first that many runs' chance-to-win per look and each rule's stop, for the
+    per-run export (it reads the same draws, so the counts do not change). ``engine`` replaces the
+    Flagsmith source with (stats, constants, provenance), for tests only."""
+    stats, consts, provenance = engine or flagsmith_source.load(flagsmith_src)
     rng = np.random.default_rng(seed)
     horizon = looks * per_arm_per_look
     contracts = {a: _contract(a, looks, horizon) for a in alphas}
@@ -136,12 +141,19 @@ def simulate(
     g_old = {d: 0 for d in guard_contracts}
     g_new = {d: 0 for d in guard_contracts}
     p_c, p_t = base_rate, base_rate * (1 + relative_lift)
+    kept: list[dict] = []
     t0 = time.time()
-    for _ in range(runs):
+    for run_i in range(runs):
         chances = _chances(stats, consts, rng.binomial(per_arm_per_look, p_c, size=looks).cumsum(),
                            rng.binomial(per_arm_per_look, p_t, size=looks).cumsum(), per_arm_per_look, looks)
+        keep = run_i < keep_paths
+        if keep:
+            kept.append({"run": run_i + 1, "chance_to_win": [None if c is None else round(float(c), 6) for c in chances],
+                         "first_exit": None, "contract": {str(a): None for a in alphas}})
         for k, ch in enumerate(chances):
             if ch is not None and (ch > WIN or ch < LOSE):
+                if keep:
+                    kept[-1]["first_exit"] = {"look": k + 1, "side": "winning" if ch > WIN else "losing"}
                 if ch > WIN:
                     banner_any.winning += 1
                 else:
@@ -165,6 +177,8 @@ def simulate(
                 if d.counted:
                     prior.append(d.fraction)
                 if d.outcome in ("win", "loss"):
+                    if keep:
+                        kept[-1]["contract"][str(a)] = {"look": k + 1, "outcome": d.outcome}
                     if d.outcome == "win":
                         rule[a].winning += 1
                     else:
@@ -213,14 +227,15 @@ def simulate(
             d: {"old_fixed_97_5_every_look": g_old[d], "signed_pocock": g_new[d], "guardrail_alpha": ct.GUARDRAIL_ALPHA, "runs": runs}
             for d in g_old},
         "seconds": round(time.time() - t0, 1),
+        "_paths": kept,
         "_counts": {"banner_any": banner_any, "banner_final": banner_final, "rule": rule,
                     "g_old": g_old, "g_new": g_new},
     }
 
 
-def pooled(seeds: tuple[int, ...], **kw) -> dict:
-    """The same design over several seeds, counts added up."""
-    parts = [simulate(seed=s, **kw) for s in seeds]
+def pooled(seeds: tuple[int, ...], keep_paths: int = 0, **kw) -> dict:
+    """The same design over several seeds, counts added up. ``keep_paths`` keeps the first runs of the first seed."""
+    parts = [simulate(seed=s, keep_paths=keep_paths if i == 0 else 0, **kw) for i, s in enumerate(seeds)]
     first = parts[0]
     ba, bf = RuleCount(), RuleCount()
     rule = {a: RuleCount() for a in first["_counts"]["rule"]}
@@ -236,7 +251,8 @@ def pooled(seeds: tuple[int, ...], **kw) -> dict:
             g_old[d] += c["g_old"][d]
             g_new[d] += c["g_new"][d]
     n = sum(p["parameters"]["runs"] for p in parts)
-    out = {k: v for k, v in first.items() if k != "_counts"}
+    out = {k: v for k, v in first.items() if k not in ("_counts", "_paths")}
+    out["_paths"] = first["_paths"]
     out["parameters"] = {**first["parameters"], "runs": n, "seed": list(seeds)}
     out["banner_every_look"] = ba.summary()
     out["banner_final_look_only"] = bf.summary()
@@ -245,6 +261,65 @@ def pooled(seeds: tuple[int, ...], **kw) -> dict:
         d: {"old_fixed_97_5_every_look": g_old[d], "signed_pocock": g_new[d], "guardrail_alpha": ct.GUARDRAIL_ALPHA, "runs": n} for d in g_old}
     out["seconds"] = round(sum(p["seconds"] for p in parts), 1)
     return out
+
+
+PATHS_FILE = "paths-offline.json"
+DEFAULT_PATHS = 100
+PATHS_COMMAND = "uv run ulysses calibrate offline --flagsmith-src ../_shared/reference/flagsmith"
+
+
+def paths_export(sim: dict) -> dict:
+    """The per-run export: for the kept runs, Flagsmith's chance to win at every look and where each rule stops.
+
+    ``sim`` is a ``simulate`` result (or the first seed of ``pooled``) made with ``keep_paths``. The kept runs
+    are the first runs of that seed, so they are the opening runs of the pooled table, drawn from the same
+    random numbers. ``counts`` are recounted from the runs themselves; a test holds them equal to
+    ``simulate``'s own summary for the same number of runs.
+    """
+    runs = sim["_paths"]
+    par = sim["parameters"]
+    seed = par["seed"][0] if isinstance(par["seed"], list) else par["seed"]
+    alphas = list(runs[0]["contract"]) if runs else []
+    first = {"winning": sum(1 for r in runs if r["first_exit"] and r["first_exit"]["side"] == "winning"),
+             "losing": sum(1 for r in runs if r["first_exit"] and r["first_exit"]["side"] == "losing")}
+    contract = {a: {"win": sum(1 for r in runs if (r["contract"][a] or {}).get("outcome") == "win"),
+                    "loss": sum(1 for r in runs if (r["contract"][a] or {}).get("outcome") == "loss")}
+                for a in alphas}
+    return {
+        "label": "Per-run paths from the offline engine calibration, simulated synthetic units (not user traffic)",
+        "engine": {k: {"tag": v.get("tag"), "sha256": v.get("sha256")} for k, v in sim["engine"].items()},
+        "parameters": {"runs": len(runs), "seed": seed, "first_run": 1, "looks": par["looks"],
+                       "identities_per_arm_per_look": par["identities_per_arm_per_look"],
+                       "base_rate": par["base_rate"], "relative_lift": par["relative_lift"],
+                       "alphas": [float(a) for a in alphas], "banner_thresholds": par["banner_thresholds"],
+                       "note": f"runs 1-{len(runs)} of seed {seed}: the opening runs of the pooled A/A table"},
+        "rules": {"first_exit": "stop at the first look over 95% (Winning: ship) or under 5% (Losing: keep control)",
+                  "contract": "Ulysses contract (decision.evaluate) at each alpha: win ships, loss keeps control"},
+        "counts": {"first_exit": first, "contract": contract},
+        "runs": runs,
+        "command": PATHS_COMMAND,
+    }
+
+
+def dump_export(export: dict) -> str:
+    """JSON with one line per run, so a committed copy diffs run by run."""
+    head = {k: v for k, v in export.items() if k != "runs"}
+    body = ",\n".join("  " + json.dumps(r, separators=(",", ":")) for r in export["runs"])
+    text = json.dumps(head, indent=1)
+    return text[:-2] + ',\n "runs": [\n' + body + "\n ]\n}\n"
+
+
+def export_paths(out_dir: str | Path = ".run/calibration", *, runs: int = DEFAULT_PATHS, seed: int = DEFAULT_SEEDS[0],
+                 looks: int = 30, per_arm_per_look: int = 100, flagsmith_src: str | None = None,
+                 engine: tuple | None = None) -> Path:
+    """Only the per-run export, in seconds: the same runs ``run`` keeps (same seed, same draws)."""
+    sim = simulate(runs=runs, looks=looks, per_arm_per_look=per_arm_per_look, seed=seed, keep_paths=runs,
+                   flagsmith_src=flagsmith_src, engine=engine)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / PATHS_FILE
+    path.write_text(dump_export(paths_export(sim)), encoding="utf-8")
+    return path
 
 
 def _pct(k: int, n: int) -> str:
@@ -335,10 +410,12 @@ def markdown(r: dict) -> str:
 
 def run(out_dir: str | Path = ".run/calibration", runs: int = 2000, flagsmith_src: str | None = None,
         power_lift: float = 0.25, looks: int = 30, per_arm_per_look: int = 100,
-        seeds: tuple[int, ...] = DEFAULT_SEEDS, base_rate_runs: int = 2000) -> dict:
+        seeds: tuple[int, ...] = DEFAULT_SEEDS, base_rate_runs: int = 2000, paths: int = DEFAULT_PATHS) -> dict:
     kw = dict(runs=runs, looks=looks, per_arm_per_look=per_arm_per_look, flagsmith_src=flagsmith_src)
-    aa = pooled(seeds, **kw)
+    aa = pooled(seeds, keep_paths=min(paths, runs), **kw)
+    export = paths_export({**aa, "parameters": {**aa["parameters"], "seed": seeds[0]}, "_paths": aa.pop("_paths")})
     pw = pooled(tuple(s + 1 for s in seeds), relative_lift=power_lift, guardrail_rate=None, **kw)
+    pw.pop("_paths", None)
     # Sizing: the contract's horizon against a fixed-horizon test with the same level and the same power.
     power = pw["contract"]["0.05"]["winning_rate"]
     horizon = looks * per_arm_per_look
@@ -360,13 +437,18 @@ def run(out_dir: str | Path = ".run/calibration", runs: int = 2000, flagsmith_sr
     base_rows.append(sized)
     for row in base_rows:
         row.pop("_counts", None)
+        row.pop("_paths", None)
     result = {"aa": aa, "power": pw, "savings": savings, "base_rates": base_rows}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "offline.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     md = markdown(result)
     (out / "offline.md").write_text(md, encoding="utf-8")
-    return {**result, "markdown": md, "paths": [str(out / "offline.json"), str(out / "offline.md")]}
+    written = [str(out / "offline.json"), str(out / "offline.md")]
+    if export["runs"]:
+        (out / PATHS_FILE).write_text(dump_export(export), encoding="utf-8")
+        written.append(str(out / PATHS_FILE))
+    return {**result, "markdown": md, "paths": written}
 
 
 def guardrail_sweep(alphas: tuple[float, ...] = (0.025, 0.01), *, runs: int = 2000, seeds: tuple[int, ...] = (11, 12),
