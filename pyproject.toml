@@ -24,6 +24,11 @@ dependencies = [
 ulysses = "ulysses.cli:main"
 flagsmith-ulysses = "ulysses.cli:main"
 
+[project.optional-dependencies]
+llm = [
+    "anthropic>=2.14.0",
+]
+
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 

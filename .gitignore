@@ -41,3 +41,6 @@ web/dev/
 
 # Written by `ulysses calibrate summarise` next to a shipped trace
 data/live.md
+
+# A scripted mock run never belongs next to the real model transcripts
+examples/llm_agent/transcripts/*.mock.jsonl

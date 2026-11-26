@@ -19,6 +19,11 @@ Needs only Docker and uv. It:
 Flagsmith refreshes results at most every five minutes; a measured run from a fresh clone took about half an hour.
 
     uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down]
+
+``--llm`` puts a real LLM agent in place of the scripted one: Claude through the Anthropic SDK
+(``examples/llm_agent/``), driving only the Ulysses MCP tools with the same agent token. It needs
+ANTHROPIC_API_KEY in the environment and the optional SDK (``uv run --extra llm python scripts/judge_demo.py
+--llm``); without either it says so and runs the scripted agent.
 """
 
 from __future__ import annotations
@@ -101,6 +106,29 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
+LLM_MODEL = "claude-opus-5-5"
+
+
+def choose_agent(want_llm: bool, environ: dict | None = None, sdk_installed: bool | None = None) -> tuple[str, str]:
+    """Which agent runs ("llm" or "scripted") and the line that says so. Never reads the key's value."""
+    env = os.environ if environ is None else environ
+    if not want_llm:
+        return "scripted", "running the scripted agent (Ulysses agent token only)"
+    if not env.get("ANTHROPIC_API_KEY"):
+        return "scripted", ("--llm asked for the LLM agent, but ANTHROPIC_API_KEY is not set: running the scripted "
+                            "agent instead (Ulysses agent token only)")
+    if sdk_installed is None:
+        import importlib.util
+
+        sdk_installed = importlib.util.find_spec("anthropic") is not None
+    if not sdk_installed:
+        return "scripted", ("--llm asked for the LLM agent, but the Anthropic SDK is not installed (run "
+                            "`uv run --extra llm python scripts/judge_demo.py --llm`): running the scripted agent "
+                            "instead (Ulysses agent token only)")
+    return "llm", (f"running the LLM agent: {LLM_MODEL} through the Anthropic SDK, acting only through the Ulysses "
+                   "MCP tools (Ulysses agent token only)")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--flagsmith", help="use this running Flagsmith instead of starting docker-compose.yml")
@@ -109,6 +137,8 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8240, help="contract service port (8200-8299)")
     ap.add_argument("--shop-port", type=int, default=8241)
     ap.add_argument("--down", action="store_true", help="remove the Flagsmith containers at the end")
+    ap.add_argument("--llm", action="store_true",
+                    help="use the LLM agent (examples/llm_agent) when ANTHROPIC_API_KEY is set; else the scripted one")
     ap.add_argument("--serve-only", action="store_true",
                     help="after a run: serve the cards and the signing pages again (Ctrl+C to stop)")
     a = ap.parse_args()
@@ -205,17 +235,24 @@ def main() -> None:
                           "ULYSSES_DB": env_vals["ULYSSES_DB"], "ULYSSES_KEY_DIR": env_vals["ULYSSES_KEY_DIR"]})
         procs.append(subprocess.Popen([py, str(ROOT / "scripts/human_stand_in.py"), "--owner", "maya"],
                                       cwd=ROOT, env=human_env))
-        step("running the scripted agent (Ulysses agent token only)")
+        mode, line = choose_agent(a.llm)
+        step(line)
         agent_env = {k: v for k, v in os.environ.items()
                      if not k.startswith(("FLAGSMITH_", "ULYSSES_KEY"))}
         agent_env.update({"ULYSSES_URL": env_vals["ULYSSES_PUBLIC_URL"],
                           "ULYSSES_AGENT_TOKEN": env_vals["ULYSSES_AGENT_TOKEN"],
                           "ULYSSES_DB": env_vals["ULYSSES_DB"], "SHOP_PORT": str(a.shop_port)})
-        rc = subprocess.run([py, str(ROOT / "scripts/agent_session.py"), "--with-traffic",
-                             "--shop-port", str(a.shop_port)], cwd=ROOT, env=agent_env).returncode
+        if mode == "llm":
+            (RUN / "llm-agent-result.json").unlink(missing_ok=True)
+            cmd = [py, str(ROOT / "examples/llm_agent/run.py"), "live", "--model", "anthropic", "--with-traffic",
+                   "--shop-port", str(a.shop_port)]
+        else:
+            cmd = [py, str(ROOT / "scripts/agent_session.py"), "--with-traffic", "--shop-port", str(a.shop_port)]
+        rc = subprocess.run(cmd, cwd=ROOT, env=agent_env).returncode
         if rc != 0:
             stop("the agent session did not finish (see above); rerun this command to continue from a fresh setup")
-        summarise(time.time() - started, api, a.port)
+        if not summarise(time.time() - started, api, a.port, mode):
+            stop("the LLM agent did not complete every experiment (see the summary and transcript above)")
     finally:
         for p in procs:
             p.terminate()
@@ -223,11 +260,63 @@ def main() -> None:
             subprocess.run(["docker", "compose", "-p", "ulysses", "down", "-v"], cwd=ROOT)
 
 
-def summarise(seconds: float, api: str, port: int) -> None:
-    """One table from what the agent session wrote, so the outcome is on screen at the end."""
-    path = RUN / "agent-session-result.json"
-    results = json.loads(path.read_text()) if path.exists() else {}
+def llm_completed(r: dict) -> int:
+    """How many experiments the LLM agent's contracts ended executed on, as read back from the service."""
+    done = {(st.get("experiment") or {}).get("id") or h for h, st in (r.get("contracts") or {}).items()
+            if st.get("state") == "executed"}
+    return len(done)
+
+
+def expected_experiments(run: Path = RUN) -> int:
+    try:
+        return len(json.loads((run / "demo.json").read_text(encoding="utf-8"))["experiments"]) or 2
+    except (OSError, ValueError, KeyError, TypeError):
+        return 2
+
+
+def summarise_llm(run: Path = RUN) -> tuple[int, int]:
+    """What the LLM agent did, from the result file its harness wrote (read back from the service).
+
+    Returns (experiments the agent completed, experiments in the demo)."""
+    expected = expected_experiments(run)
+    path = run / "llm-agent-result.json"
+    if not path.exists():
+        print("  the LLM agent wrote no .run/llm-agent-result.json", flush=True)
+        return 0, expected
+    r = json.loads(path.read_text(encoding="utf-8"))
+    refused = r.get("refused_403") or []
+    waits = r.get("confirm_waits") or []
+    kinds: dict[str, int] = {}
+    for ref in refused:
+        kinds[ref.get("kind") or "other"] = kinds.get(ref.get("kind") or "other", 0) + 1
+    by_kind = ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in sorted(kinds.items()))
+    print(f"  agent: LLM ({r.get('model')}), {r.get('turns')} model turns, {r.get('tool_calls')} tool calls, "
+          f"{r.get('stop') or 'stop_reason ' + str(r.get('stop_reason'))}", flush=True)
+    print(f"  {len(refused)} refused by the contract service with 403" + (f" ({by_kind})" if by_kind else "")
+          + f"; {len(waits)} 403 waits for the owner's one-tap confirm (not refusals)", flush=True)
+    for ref in refused:
+        print(f"    403 {ref.get('kind') or 'other'} on {ref.get('tool')}: {ref.get('detail')}", flush=True)
+    for ex in r.get("executed") or []:
+        res = ex.get("result") or {}
+        print(f"    executed {ex.get('action')}: flag {res.get('flag')} serves {res.get('serving')}", flush=True)
+    for h, st in (r.get("contracts") or {}).items():
+        print(f"    contract {h[:19]} on experiment {(st.get('experiment') or {}).get('id')}: {st.get('state')}",
+              flush=True)
+    print(f"  transcript: {r.get('transcript')}", flush=True)
+    return llm_completed(r), expected
+
+
+def summarise(seconds: float, api: str, port: int, mode: str = "scripted", run: Path = RUN) -> bool:
+    """One table from what the agent session wrote, so the outcome is on screen at the end.
+
+    Returns False when the LLM agent did not complete every experiment (the scripted agent's own exit code
+    already covers it)."""
+    path = run / "agent-session-result.json"
+    results = json.loads(path.read_text()) if (path.exists() and mode == "scripted") else {}
     step(f"done in {seconds / 60:.1f} minutes")
+    done, expected = (summarise_llm(run) if mode == "llm" else (None, None))
+    if mode != "llm":
+        print("  agent: scripted (scripts/agent_session.py)", flush=True)
     for which in ("aa", "cta"):
         r = results.get(which)
         if not r:
@@ -239,9 +328,16 @@ def summarise(seconds: float, api: str, port: int) -> None:
               f"{r.get('minutes_from_start_to_decision')} min "
               f"({r.get('manual_refreshes_avoided_at_one_per_5_min')} five-minute manual checks nobody made)",
               flush=True)
-    print(f"  Flagsmith dashboard: {api} (the experiments are completed there with the contract in the hypothesis)")
+    complete = mode != "llm" or done == expected
+    if complete:
+        print(f"  Flagsmith dashboard: {api} (the experiments are completed there with the contract in the hypothesis)")
+    else:
+        print(f"  Flagsmith dashboard: {api}")
+        print(f"[1;33m  warning: the LLM agent completed {done} of {expected} experiments; see the transcript[0m",
+              flush=True)
     print("  Browse the cards again:  uv run python scripts/judge_demo.py --serve-only", flush=True)
     print(f"  Remove Flagsmith:        docker compose -p ulysses down -v", flush=True)
+    return complete
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
-"""The Ulysses MCP extension: four tools for any MCP client.
+"""The Ulysses MCP extension: six tools for any MCP client.
 
 The agent needs no Flagsmith key at all. On open-source Flagsmith any key that
 can read experiments is an environment admin key that can also change flags,
 so Ulysses does not wire Flagsmith's official MCP server to the agent; its
-reads come through the contract service instead. The four action tools:
+reads come through the contract service instead. The five action tools:
 
 * ``sign_contract``: draft a stop contract from the experiment and return the
   signing card for the owner;
@@ -11,6 +11,8 @@ reads come through the contract service instead. The four action tools:
 * ``look``: one results refresh and read; returns hold or fire, with the card;
 * ``execute``: ask the service to carry out the pre-signed action, which it
   does only after the owner's one-tap confirmation;
+* ``request_amendment``: draft a change to a signed contract, which governs
+  nothing until both the owner and the second signer sign it;
 
 and one read-only tool, ``read_experiment``, which returns Flagsmith's view of
 an experiment through the service.
@@ -34,7 +36,8 @@ INSTRUCTIONS = (
     "Call look on a schedule (it enforces Flagsmith's five-minute refresh floor) and report the card. "
     "A high chance to win, or a 'Winning variation' card, is not a decision: only a look whose outcome fires is. When a look fires, "
     "give the owner the confirm_url; call execute after they confirm. You cannot ship anything the "
-    "contract does not authorise."
+    "contract does not authorise. To change a signed contract, use request_amendment; an amendment needs "
+    "both the owner and the second signer."
 )
 
 
@@ -179,6 +182,26 @@ def build_server(client: ServiceClient | None = None) -> MCPServer:
     )
     def read_experiment(environment: str, experiment_id: int) -> dict:
         return svc.call("GET", f"/api/flagsmith/experiments/{environment}/{int(experiment_id)}")
+
+    @server.tool(
+        description=(
+            "Ask to change a signed contract, for example to act now instead of waiting for the boundary "
+            "(action_now: 'ship_treatment' or 'keep_control'), or to change fields such as the horizon. This only "
+            "drafts an amendment: it governs nothing and authorises nothing until both the owner and the second "
+            "signer have signed it. Returns the amendment's hash and both signing links."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    )
+    def request_amendment(contract_hash: str, reason: str, action_now: str | None = None,
+                          changes: dict | None = None) -> dict:
+        body: dict[str, Any] = {"reason": reason, "changes": changes or {}}
+        if action_now:
+            body["action_now"] = action_now
+        out = svc.call("POST", f"/api/contracts/{contract_hash}/amend", json=body)
+        if out.get("ok"):
+            out["next"] = ("The amendment takes effect only after both the owner and the second signer sign it: "
+                           f"{out.get('sign_urls')}")
+        return out
 
     return server
 
