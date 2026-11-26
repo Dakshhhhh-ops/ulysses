@@ -542,8 +542,11 @@ class Ulysses:
     def _expected_status(self, h: str) -> tuple[str, ...] | None:
         row = self.store.contract_row(h)
         st = row["state"] if row else None
-        if st in ("active", "decided", "executing"):
+        if st in ("active", "decided"):
             return ("running", "paused")
+        if st == "executing":
+            # The outcome note is written after the pre-signed complete returned, before the state moves on.
+            return ("running", "paused", "completed")
         if st == "executed":
             return ("completed",)
         return None

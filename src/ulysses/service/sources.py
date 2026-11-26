@@ -21,6 +21,7 @@ KINDS = {
     "synthetic": "Synthetic identities",
     "lab": "Lab simulation",
     "fixture": "UI fixture",
+    "replay": "Replay of a recorded run",
 }
 
 
