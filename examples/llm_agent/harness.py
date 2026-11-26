@@ -8,7 +8,9 @@ mode the harness adds one local tool, ``wait``, which only sleeps.
 
 Transcripts: every model turn, tool call and tool result (403 bodies included)
 is appended to a JSONL file under ``.run/llm_agent/`` with a time on each
-event. ``Transcript.export`` writes a scrubbed copy with no times, no
+event. The meta event names the ``requested_model`` and, once the run ends
+(``Transcript.settle_meta``), the ``served_model`` the turns came from.
+``Transcript.export`` writes a scrubbed copy with no times, no
 timestamps inside tool results, no thinking signatures, and no token or key.
 """
 
@@ -100,6 +102,26 @@ class Transcript:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(e, default=str) + "\n")
         return e
+
+    def settle_meta(self, served: str | None = None) -> None:
+        """Write the served model into the meta event once the turns are in.
+
+        The meta event is written before the first turn, so it can only hold the model that was
+        requested. A provider may answer with another version (Gemini reports ``model_version``),
+        so ``served_model`` is read back from the model turns, unless ``served`` names it (the mock).
+        ``model`` is set to the served value too, since that is the model whose turns follow.
+        """
+        if served is None:
+            seen = list(dict.fromkeys(str(e["model"]) for e in self.events if e["kind"] == "model" and e.get("model")))
+            served = seen[0] if len(seen) == 1 else (", ".join(seen) if seen else "no model turn recorded")
+        for e in self.events:
+            if e["kind"] == "meta":
+                e["model"] = served
+                e["served_model"] = served
+                if e.get("requested_model") and e["requested_model"] != served:
+                    e["model_note"] = f"the API served {served} for a {e['requested_model']} request"
+        with self.path.open("w", encoding="utf-8") as f:
+            f.writelines(json.dumps(e, default=str) + "\n" for e in self.events)
 
     def export(self, out: Path) -> Path:
         out.parent.mkdir(parents=True, exist_ok=True)

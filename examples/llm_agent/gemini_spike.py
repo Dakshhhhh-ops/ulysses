@@ -1,6 +1,6 @@
 """Spike: which Gemini model calls the Ulysses tools reliably?
 
-For each candidate model, in order of capability, it runs a short two-turn
+For each candidate model, in the listed order (see ``CANDIDATES``), it runs a short two-turn
 exchange with the real Ulysses MCP tool list (names, descriptions and input
 schemas from ``build_server``, exactly as the agent sees them):
 
@@ -12,10 +12,14 @@ schemas from ``build_server``, exactly as the agent sees them):
    should answer with another valid call or plain text, never a malformed call.
 
 Each model gets ``--repeats`` tries. The recommendation is the first model in
-the candidate order that passes every try. Raw results go to
-``.run/gemini-spike.json``; a copy with no times goes to
-``examples/llm_agent/transcripts/gemini-spike.json``. The key is read into the
-process environment by ``gemini_model.load_key()`` and never printed.
+the listed order that passes every try. Each failed try records ``fail_kind``:
+``quota`` (HTTP 429 / RESOURCE_EXHAUSTED, so the model was never really tested),
+``tool_use`` (no call, a call that does not fit the schema, or a bad stop), or
+``other`` (any other error); each model records the kinds it ``failed_on``.
+Results go to ``.run/gemini-spike.json`` and the same JSON to
+``examples/llm_agent/transcripts/gemini-spike.json``. It holds no clock time or
+date; each try keeps its duration in ``seconds``, which is deliberate. The key is
+read into the process environment by ``gemini_model.load_key()`` and never printed.
 
     uv run --extra gemini python examples/llm_agent/gemini_spike.py
 """
@@ -75,6 +79,12 @@ def fits(call: dict, tools: list[dict]) -> str | None:
     return None
 
 
+def is_quota(exc: BaseException) -> bool:
+    """A 429 / RESOURCE_EXHAUSTED from the API: the free-tier quota ran out, not a tool-use failure."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    return code == 429 or "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)
+
+
 def try_model(model: str, tools: list[dict]) -> dict:
     rec: dict = {"model": model, "turns": []}
     t0 = time.perf_counter()
@@ -86,10 +96,12 @@ def try_model(model: str, tools: list[dict]) -> dict:
         calls = t1.tool_uses()
         if not calls:
             rec["fail"] = f"turn 1 made no tool call (stop_reason {t1.stop_reason})"
+            rec["fail_kind"] = "tool_use"
             return rec
         bad = [e for e in (fits(c, tools) for c in calls) if e]
         if bad:
             rec["fail"] = f"turn 1 arguments do not fit the schema: {bad}"
+            rec["fail_kind"] = "tool_use"
             return rec
         msgs.append({"role": "assistant", "content": t1.content})
         msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": c["id"],
@@ -98,14 +110,17 @@ def try_model(model: str, tools: list[dict]) -> dict:
         rec["turns"].append({"stop_reason": t2.stop_reason, "content": t2.content})
         if t2.stop_reason not in ("tool_use", "end_turn"):
             rec["fail"] = f"turn 2 ended with {t2.stop_reason}"
+            rec["fail_kind"] = "tool_use"
             return rec
         bad = [e for e in (fits(c, tools) for c in t2.tool_uses()) if e]
         if bad:
             rec["fail"] = f"turn 2 arguments do not fit the schema: {bad}"
+            rec["fail_kind"] = "tool_use"
             return rec
         rec["pass"] = True
     except Exception as exc:  # noqa: BLE001 - recorded, scrubbed
         rec["fail"] = gm.scrub_text(f"{type(exc).__name__}: {exc}")[:400]
+        rec["fail_kind"] = "quota" if is_quota(exc) else "other"
     finally:
         rec["seconds"] = round(time.perf_counter() - t0, 1)
     return rec
@@ -129,14 +144,15 @@ def main() -> None:
     for model in [c for c in a.candidates.split(",") if c]:
         tries = [try_model(model, tools) for _ in range(a.repeats)]
         ok = sum(1 for t in tries if t.get("pass"))
+        failed_on = sorted({t["fail_kind"] for t in tries if t.get("fail")})
         results.append({"model": model, "in_models_list": model in listed, "passed": ok, "of": a.repeats,
-                        "tries": tries})
+                        "failed_on": failed_on or None, "tries": tries})
         print(f"{model}: {ok}/{a.repeats} passed" + "".join(f"; {t['fail']}" for t in tries if t.get("fail")),
               flush=True)
         if chosen is None and ok == a.repeats:
             chosen = model
     out = {"tools": [t["name"] for t in tools], "repeats": a.repeats, "results": results, "chosen": chosen,
-           "rule": "first candidate, in capability order, that passed every try"}
+           "rule": "first candidate in the listed order that passes every try"}
     text = gm.scrub_text(json.dumps(out, indent=2, default=str))
     (ROOT / ".run").mkdir(exist_ok=True)
     (ROOT / ".run" / "gemini-spike.json").write_text(text, encoding="utf-8")

@@ -392,5 +392,5 @@
     }
   ],
   "chosen": "gemini-4-hydrogen",
-  "rule": "first candidate, in capability order, that passed every try"
+  "rule": "first candidate in the listed order that passes every try"
 }

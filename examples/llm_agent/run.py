@@ -131,7 +131,7 @@ async def _one(world, session, instructions, sc, kind: str, base: Path, export_d
     model = choose_model(kind, sc.name, facts)
     tr = harness.Transcript(base / f"{sc.name}.{model.label}.{_stamp()}.jsonl", secrets=[world.token])
     tr.event("meta", scenario=sc.name, title=sc.title, model_client=model.label,
-             model=model_name(model), command=COMMAND,
+             model=model_name(model), requested_model=model_name(model), served_model=None, command=COMMAND,
              flagsmith="test double with fixture results (not live traffic)",
              signers="synthetic: maya (owner), sam (second signer), keys generated for this run",
              agent_credentials="Ulysses agent token only, passed to the MCP server process")
@@ -140,6 +140,7 @@ async def _one(world, session, instructions, sc, kind: str, base: Path, export_d
     hook = sc.after_tool(world, facts) if sc.after_tool else None
     result = await harness.run_agent(session, model, system=harness.system_prompt(instructions),
                                      user=sc.user(facts), transcript=tr, after_tool=hook, echo=echo)
+    tr.settle_meta(served=model_name(model) if model.label == "mock" else None)
     completed = [w for w in world.fs.writes if w[0] == "complete" and w[1] == facts["experiment"]]
     serving = (world.fs.served.get(scenarios_flag()) if completed else None)
     tr.event("outcome", flagsmith_complete_calls=len(completed),
@@ -206,7 +207,8 @@ async def run_live(a, model: models.ModelClient | None = None) -> dict:
         raise Stop(f"no readable {run_dir / 'demo.json'}: run scripts/demo_setup.py first") from exc
     procs: list = []
     tr = harness.Transcript(run_dir / "llm_agent" / f"live.{model.label}.{_stamp()}.jsonl", secrets=[token])
-    tr.event("meta", scenario="live", model_client=model.label, model=model_name(model), command=COMMAND,
+    tr.event("meta", scenario="live", model_client=model.label, model=model_name(model),
+             requested_model=model_name(model), served_model=None, command=COMMAND,
              flagsmith=f"live Flagsmith behind the contract service at {url}",
              traffic=("synthetic visitors from examples/shop/visitors.py" if a.with_traffic else "not started here"),
              agent_credentials="Ulysses agent token only, passed to the MCP server process")
@@ -230,6 +232,7 @@ async def run_live(a, model: models.ModelClient | None = None) -> dict:
     finally:
         for pr in procs:
             pr.terminate()
+        tr.settle_meta(served=model_name(model) if model.label == "mock" else None)
     # Read back, as the harness (not the model), what each contract the agent drafted ended as.
     import httpx
 
@@ -243,7 +246,9 @@ async def run_live(a, model: models.ModelClient | None = None) -> dict:
                 final[h] = {"state": st.get("state"), "experiment": st.get("experiment")}
             except (httpx.HTTPError, ValueError) as exc:
                 final[h] = {"state": f"unreadable ({type(exc).__name__})"}
-    out = {"model_client": model.label, "model": model_name(model),
+    meta = next(e for e in tr.events if e["kind"] == "meta")
+    out = {"model_client": model.label, "model": meta["served_model"], "requested_model": meta["requested_model"],
+           "served_model": meta["served_model"],
            "turns": result.turns, "stop_reason": result.stop_reason, "stop_details": result.stop_details,
            "stop": result.stop_text(), "tool_calls": len(result.tool_calls),
            "refused_403": [{"tool": r["name"], "kind": r["kind"], "input": r["input"],
