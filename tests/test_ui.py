@@ -15,7 +15,7 @@ from ulysses import contract as ct
 from ulysses.service import calibration_view, fmt, scene as sc
 from ulysses.service.app import create_app
 
-from .conftest import make_contract, sign_as
+from .conftest import make_contract, read_all, sign_as
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "web" / "src" / "parity-fixture.json"
@@ -132,7 +132,7 @@ def test_calibration_without_files_shows_no_figures(tmp_path):
 def client(world, monkeypatch, tmp_path):
     svc, fs, store = world
     monkeypatch.setenv("ULYSSES_CALIBRATION_DIR", str(tmp_path / "none"))
-    return TestClient(create_app(svc, agent_token="t" * 20)), svc, fs
+    return read_all(TestClient(create_app(svc, agent_token="t" * 20)), svc), svc, fs
 
 
 def test_pages_keep_their_ids_and_label_the_source(client, keys, clock):
@@ -206,7 +206,7 @@ def test_no_page_renders_a_date_or_time(world, keys, clock, tmp_path, monkeypatc
              for e, chs in ((1, (0.5, 0.97)), (2, (0.4, 0.3))) for k, ch in enumerate(chs, start=1)]
     (cal / "live-z.jsonl").write_text("\n".join(json.dumps(r) for r in [header, *reads]), encoding="utf-8")
     monkeypatch.setenv("ULYSSES_CALIBRATION_DIR", str(cal))
-    client = TestClient(create_app(svc, agent_token="t" * 20))
+    client = read_all(TestClient(create_app(svc, agent_token="t" * 20)), svc)
 
     unsigned = svc.submit(make_contract(keys, looks=4, n=400, experiment=1))["hash"]
     pages = ["/", f"/sign/{unsigned}"]

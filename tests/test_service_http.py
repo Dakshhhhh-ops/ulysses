@@ -13,7 +13,7 @@ from ulysses import signing
 from ulysses.flagsmith.gateway import FlagsmithError
 from ulysses.service.app import create_app
 
-from .conftest import make_contract
+from .conftest import make_contract, read_all
 
 FS_KEY = "fs-admin-SECRET-key-0123456789"
 TOKEN = "agent-token-0123456789abcdef"
@@ -68,8 +68,8 @@ def test_full_flow_over_http_and_the_key_never_appears(http, keys):
     pid = r["proposal"]["id"]
     # The agent asks to execute before the tap: refused.
     assert client.post(f"/api/proposals/{pid}/execute", json={}).status_code == 403
-    # The card page renders the decision.
-    page = client.get(f"/card/{r['look_id']}")
+    # The card page renders the decision, from the link the service handed out (it carries a read capability).
+    page = client.get(_path(r["card_url"]))
     assert page.status_code == 200 and "WIN" in page.text
     # One tap: the owner's confirmation signature.
     card = client.get(f"/human/card/{r['look_id']}").json()
@@ -170,16 +170,24 @@ def test_agent_read_proxy_returns_flagsmith_numbers_without_a_key(http):
     assert client.post("/api/flagsmith/experiments/env-key/1").status_code == 405
 
 
+def _path(url: str) -> str:
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    return u.path + (f"?{u.query}" if u.query else "")
+
+
 def test_sign_page_and_enrolment(http, keys):
     client, svc, fs, _ = http
     h = svc.submit(make_contract(keys))["hash"]
-    page = client.get(f"/sign/{h}")
+    page = client.get(_path(svc.contract_status(h)["sign_url"]))
     assert page.status_code == 200 and "Stop contract for experiment 1" in page.text
     assert signing.contract_message(h, "owner").decode().splitlines()[1] in page.text
-    tok = svc.enrol_token("maya")
+    tok = svc.enrol_token("ana")
     assert client.get(f"/enrol/{tok}").status_code == 200
     new = signing.Keypair.generate()
     r = client.post("/human/enrol", json={"token": tok, "public_key": new.public})
     assert r.status_code == 200
     assert client.post("/human/enrol", json={"token": tok, "public_key": new.public}).status_code == 403
-    assert client.get("/sign/sha256:nothing").status_code == 404
+    assert client.get("/sign/sha256:nothing").status_code == 401  # no overview grant: nothing says what exists
+    assert read_all(client, svc).get("/sign/sha256:nothing").status_code == 404

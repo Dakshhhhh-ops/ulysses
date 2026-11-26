@@ -8,9 +8,13 @@ Two surfaces with different authentication:
   contains the Flagsmith key (a response guard refuses to send a body that
   does).
 * ``/sign``, ``/card``, ``/enrol`` and ``/human/...`` are the signing surface.
-  A request there is authorised by an Ed25519 signature from a registered
-  signer, made in the signer's browser (WebCrypto, non-extractable key) or by
-  the ``ulysses sign`` command.
+  A write there (sign, confirm, enrol, rotate) is authorised by an Ed25519
+  signature from a registered signer, made in the signer's browser (WebCrypto,
+  non-extractable key) or by the ``ulysses sign`` command, or by a one-time
+  enrolment link. A read there (the contract list, contract pages, curves and
+  cards) needs a read capability on the link the service minted, the cookie
+  that link leaves, or the signer session set at enrolment
+  (``ulysses.capability``); the agent token is not a read grant there.
 
 ``/webhooks/flagsmith`` receives Flagsmith's organisation audit-log webhook.
 It refuses every post unless a shared secret is configured and the body's
@@ -35,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from .. import capability
 from .. import contract as ct
 from .. import horizon as hz
 from ..canonical import short_hash
@@ -45,42 +50,107 @@ from . import ui
 
 log = logging.getLogger("ulysses.service")
 HERE = Path(__file__).parent
+READ_REFUSED = ("this page needs the link the contract service printed (it carries a read capability), or the "
+                "browser that enrolled a signer named in the contract")
 
 
 class SecretGuard:
-    """ASGI middleware: never let a response body carry a configured secret."""
+    """ASGI middleware: never let a response body carry a configured secret.
+
+    Defence in depth only: it matches the secrets' exact bytes, so an encoded or split-up copy passes. The
+    real defence is that no route returns the key at all. A whole response (one body message, as every JSON
+    route sends) is checked before anything is sent and withheld with a 500 if it matches. A streamed
+    response is passed on as it comes, holding back only the last few bytes of each chunk (one secret's
+    length) so a secret split across chunks is still seen; if one appears the stream is cut there.
+    """
 
     def __init__(self, app, secrets_: list[str]):
         self.app = app
         self.secrets = [s.encode() for s in secrets_ if s and len(s) >= 8]
+        self.hold = max((len(s) for s in self.secrets), default=1) - 1
+
+    def _leaks(self, data: bytes) -> bool:
+        return any(s in data for s in self.secrets)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not self.secrets:
             return await self.app(scope, receive, send)
         start: dict[str, Any] = {}
-        chunks: list[bytes] = []
+        state = {"streaming": False, "tail": b"", "cut": False}
 
         async def capture(message):
             if message["type"] == "http.response.start":
                 start.update(message)
                 return
-            if message["type"] == "http.response.body":
-                chunks.append(message.get("body", b""))
-                if not message.get("more_body"):
-                    body = b"".join(chunks)
-                    if any(s in body for s in self.secrets):
-                        log.error("blocked a response that contained a secret: %s", scope.get("path"))
-                        body = b'{"error":"Redacted","detail":"response withheld: it contained a secret"}'
-                        headers = [(k, v) for k, v in start.get("headers", []) if k.lower() not in (b"content-length", b"content-type")]
-                        headers += [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
-                        await send({"type": "http.response.start", "status": 500, "headers": headers})
-                    else:
-                        await send(start)
-                    await send({"type": "http.response.body", "body": body})
+            if message["type"] != "http.response.body":
+                await send(message)
                 return
-            await send(message)
+            if state["cut"]:
+                return
+            body, more = message.get("body", b""), bool(message.get("more_body"))
+            if not state["streaming"] and not more:
+                # The whole response in one message: check it before a byte goes out.
+                if self._leaks(body):
+                    log.error("blocked a response that contained a secret: %s", scope.get("path"))
+                    body = b'{"error":"Redacted","detail":"response withheld: it contained a secret"}'
+                    headers = [(k, v) for k, v in start.get("headers", [])
+                               if k.lower() not in (b"content-length", b"content-type")]
+                    headers += [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+                    await send({"type": "http.response.start", "status": 500, "headers": headers})
+                else:
+                    await send(start)
+                await send({"type": "http.response.body", "body": body})
+                return
+            if not state["streaming"]:
+                state["streaming"] = True
+                await send(start)
+            data = state["tail"] + body
+            if self._leaks(data):
+                log.error("cut a streamed response that contained a secret: %s", scope.get("path"))
+                state["cut"] = True
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                return
+            if more:
+                keep = min(self.hold, len(data))
+                out, state["tail"] = data[:len(data) - keep], data[len(data) - keep:]
+            else:
+                out, state["tail"] = data, b""
+            await send({"type": "http.response.body", "body": out, "more_body": more})
 
         return await self.app(scope, receive, capture)
+
+
+class ReadHeaders:
+    """ASGI middleware for the human pages: no Referer and no caching, and the cookies a route asked for.
+
+    A capability link must not leak to another site through the Referer header or sit in a shared cache. A
+    route that accepted a capability (or enrolled a key) leaves the cookies to set in ``scope["state"]``; they
+    are added to the response headers here, without touching the body (so a streamed body still streams).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "")
+        human = path == "/" or path.startswith(("/sign", "/card", "/human/", "/enrol"))
+
+        async def wrapped(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                state = scope.get("state") or {}
+                cookies = {n: (v, a) for n, v, a in [*state.get("read_cookies", []), *state.get("session_cookies", [])]}
+                for name, (value, max_age) in cookies.items():
+                    headers.append((b"set-cookie", (f"{name}={value}; Max-Age={int(max_age)}; Path=/; HttpOnly; "
+                                                    "SameSite=Lax").encode()))
+                if human:
+                    headers += [(b"referrer-policy", b"no-referrer"), (b"cache-control", b"no-store")]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        return await self.app(scope, receive, wrapped)
 
 
 # ---- request bodies --------------------------------------------------------------------
@@ -140,6 +210,16 @@ class EnrolBody(BaseModel):
     public_key: str
 
 
+class RotateBody(BaseModel):
+    signer: str
+    public_key: str
+    signature: str
+
+
+SESSION_COOKIE = "ulysses_session"
+READ_COOKIE = "ulysses_read_"
+
+
 def create_app(
     svc: Ulysses,
     *,
@@ -162,6 +242,53 @@ def create_app(
         scheme, _, tok = authorization.partition(" ")
         if scheme.lower() != "bearer" or not secrets.compare_digest(tok.encode(), agent_token.encode()):
             raise HTTPException(status_code=401, detail="agent token required (Authorization: Bearer <token>)")
+
+    # ---- read authorisation for the human pages ------------------------------------------
+
+    def _cookie_for(scope: str) -> str:
+        return READ_COOKIE + ("all" if scope == capability.ALL else hashlib.sha256(scope.encode()).hexdigest()[:16])
+
+    def _signer_reads(signer: str, scope: str) -> bool:
+        _, env, eid = scope.split(":", 2)
+        for row in svc.store.contracts_for(env, int(eid)):
+            names = {(row["canonical"].get(r) or {}).get("name") for r in ("owner", "second_signer")}
+            if signer in names:
+                return True
+        return False
+
+    def _granted(request: Request, scope: str) -> bool:
+        cap = request.query_params.get("cap")
+        if cap and svc.read_allowed(scope, cap):
+            exp = int(cap.split(".", 1)[0])
+            name = _cookie_for(capability.ALL if svc.read_allowed(capability.ALL, cap) else scope)
+            request.state.read_cookies = [*getattr(request.state, "read_cookies", []),
+                                          (name, cap, max(int(exp - svc.clock()), 1))]
+            return True
+        for name in (_cookie_for(scope), _cookie_for(capability.ALL)):
+            if svc.read_allowed(scope, request.cookies.get(name)):
+                return True
+        signer = svc.session_signer(request.cookies.get(SESSION_COOKIE))
+        return bool(signer and scope != capability.ALL and _signer_reads(signer, scope))
+
+    def _scope_of_contract(h: str) -> str | None:
+        row = svc.store.contract_row(h)
+        return svc.read_scope(row["environment"], row["experiment_id"]) if row else None
+
+    def _scope_of_card(ident: str) -> str | None:
+        rec = svc.store.proposal(ident) if ident.startswith("P-") else svc.store.look(ident)
+        return _scope_of_contract(rec["contract_hash"]) if rec else None
+
+    def _require(request: Request, scope: str | None) -> None:
+        """Raise 401 unless this request may read ``scope``; an unknown id is a 404 only to an overview grant."""
+        if scope is None:
+            if _granted(request, capability.ALL):
+                raise NotFound("nothing with that id on this service")
+            raise HTTPException(status_code=401, detail=READ_REFUSED)
+        if not _granted(request, scope):
+            raise HTTPException(status_code=401, detail=READ_REFUSED)
+
+    def _locked(request: Request):
+        return templates.TemplateResponse(request, "locked.html", {}, status_code=401)
 
     @app.exception_handler(UlyssesError)
     async def _ulysses_error(_: Request, exc: UlyssesError):
@@ -273,6 +400,11 @@ def create_app(
     def refusals():
         return svc.store.refusals()
 
+    @app.get("/api/signers/events", dependencies=[Depends(agent)])
+    def signer_events():
+        """Every registration, enrolment and key rotation, with the old key's signature on each rotation."""
+        return svc.store.signer_events()
+
     # ---- Flagsmith audit-log webhook ---------------------------------------------------
 
     @app.post("/webhooks/flagsmith")
@@ -304,15 +436,21 @@ def create_app(
         entry: AuditEntry = parse_audit(data)
         return svc.handle_audit(entry)
 
-    # ---- signing surface (authorised by signatures) ------------------------------------
+    # ---- signing surface: writes authorised by signatures, reads by capabilities -----------
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         rows = svc.store.all_contracts()
+        if not _granted(request, capability.ALL):
+            scopes = {r["hash"]: svc.read_scope(r["environment"], r["experiment_id"]) for r in rows}
+            rows = [r for r in rows if _granted(request, scopes[r["hash"]])]
+            has_any = (any(k.startswith(READ_COOKIE) for k in request.cookies) or request.query_params.get("cap")
+                       or svc.session_signer(request.cookies.get(SESSION_COOKIE)))
+            if not rows and not has_any:
+                return _locked(request)
         return templates.TemplateResponse(request, "index.html", {"contracts": rows, **ui.index_context(svc, rows)})
 
-    @app.get("/human/contract/{h}")
-    def human_contract(h: str):
+    def _contract_data(h: str) -> dict:
         st = svc.contract_status(h)
         c = svc.contract(h)
         from ..signing import contract_message
@@ -322,17 +460,29 @@ def create_app(
         st["toml"] = ct.to_toml(c)
         return st
 
+    @app.get("/human/contract/{h}")
+    def human_contract(request: Request, h: str):
+        _require(request, _scope_of_contract(h))
+        return _contract_data(h)
+
     @app.get("/human/contract/{h}/curves")
-    def human_curves(h: str):
+    def human_curves(request: Request, h: str):
         """Power and expected-sample-size curves of a contract's boundary (ulysses.power)."""
         from .. import power
 
+        _require(request, _scope_of_contract(h))
         return power.curves_for_contract(svc.contract(h))
 
     @app.get("/sign/{h}", response_class=HTMLResponse)
     def sign_page(request: Request, h: str, role: str = "owner"):
+        scope = _scope_of_contract(h)
+        if scope is None or not _granted(request, scope):
+            if scope is None and _granted(request, capability.ALL):
+                return templates.TemplateResponse(request, "missing.html", {"what": "contract", "id": h},
+                                                  status_code=404)
+            return _locked(request)
         try:
-            data = human_contract(h)
+            data = _contract_data(h)
         except NotFound:
             return templates.TemplateResponse(request, "missing.html", {"what": "contract", "id": h}, status_code=404)
         return templates.TemplateResponse(request, "sign.html", {"c": data, "role": role, "h": h,
@@ -342,16 +492,26 @@ def create_app(
     def human_sign(body: SignBody):
         return svc.sign(body.hash, body.role, body.signer, body.signature)
 
-    @app.get("/human/card/{ident}")
-    def human_card(ident: str):
+    def _card_data(ident: str) -> dict:
         if ident.startswith("P-"):
             return {"kind": "proposal", **svc.proposal_card(ident)}
         return {"kind": "look", **svc.look_view(ident)}
 
+    @app.get("/human/card/{ident}")
+    def human_card(request: Request, ident: str):
+        _require(request, _scope_of_card(ident))
+        return _card_data(ident)
+
     @app.get("/card/{ident}", response_class=HTMLResponse)
     def card_page(request: Request, ident: str):
+        scope = _scope_of_card(ident)
+        if scope is None or not _granted(request, scope):
+            if scope is None and _granted(request, capability.ALL):
+                return templates.TemplateResponse(request, "missing.html", {"what": "card", "id": ident},
+                                                  status_code=404)
+            return _locked(request)
         try:
-            data = human_card(ident)
+            data = _card_data(ident)
         except NotFound:
             return templates.TemplateResponse(request, "missing.html", {"what": "card", "id": ident}, status_code=404)
         return templates.TemplateResponse(request, "card.html", {"d": data, "ident": ident,
@@ -363,16 +523,28 @@ def create_app(
 
     @app.get("/enrol/{token}", response_class=HTMLResponse)
     def enrol_page(request: Request, token: str):
-        name = svc.store.peek_enrol_token(token)
+        # Showing the page spends nothing (link previews GET it); only the POST with the key does.
+        name = svc.store.peek_enrol_token(token, svc.clock())
+        if name and svc.store.signer(name):
+            name = None  # a registered name keeps its key; the POST would be refused, so offer nothing here
         return templates.TemplateResponse(request, "enrol.html", {"token": token, "name": name},
                                           status_code=200 if name else 404)
 
     @app.post("/human/enrol")
-    def human_enrol(body: EnrolBody):
-        return svc.enrol_with_token(body.token, body.public_key)
+    def human_enrol(request: Request, body: EnrolBody):
+        out = svc.enrol_with_token(body.token, body.public_key)
+        # This browser now holds the signer's key: let it read the experiments whose contracts name them.
+        request.state.session_cookies = [(SESSION_COOKIE, svc.signer_session(out["name"]),
+                                          int(svc.settings.session_ttl_seconds))]
+        return out
+
+    @app.post("/human/rotate")
+    def human_rotate(body: RotateBody):
+        """Hand a signer's name to a new key; the request must be signed by the current key."""
+        return svc.rotate_signer_key(body.signer, body.public_key, body.signature)
 
     @app.get("/sign", include_in_schema=False)
     def sign_root():
         return RedirectResponse("/")
 
-    return SecretGuard(app, protected_secrets or [])
+    return SecretGuard(ReadHeaders(app), protected_secrets or [])

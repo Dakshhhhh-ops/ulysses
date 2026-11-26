@@ -58,6 +58,19 @@ def world(clock, keys):
     return svc, fs, store
 
 
+def tap(svc, keys, p, who="maya"):
+    """The owner's one-tap confirmation over exactly the text the card shows (with the looks' evidence)."""
+    return keys[who].sign(svc.proposal_card(p["id"])["confirm_message"].encode())
+
+
+def read_all(client, svc):
+    """Let a test client read every human page, as the operator's overview link does."""
+    from ulysses import capability
+
+    client.cookies.set("ulysses_read_all", svc.mint_read(capability.ALL))
+    return client
+
+
 def sign_as(svc, keys, h, who="maya", role="owner"):
     from ulysses.signing import contract_message
 

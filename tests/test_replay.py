@@ -18,7 +18,7 @@ from ulysses.service import sources
 from ulysses.service.app import create_app
 from ulysses.store import Store
 
-from .conftest import Clock, make_contract, sign_as
+from .conftest import Clock, make_contract, sign_as, tap
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIPPED = ROOT / "data" / "replay-judge-demo.jsonl"
@@ -62,7 +62,7 @@ def _recorded_run(tmp_path: Path, keys) -> Path:
     with pytest.raises(Refused):
         svc.execute_for_contract(h, "keep_control")
     p = out["proposal"]
-    sig = keys["maya"].sign(signing.confirm_message(h, p["look_id"], p["action"]))
+    sig = tap(svc, keys, p)
     clock.advance(5)
     assert svc.confirm(p["id"], "maya", sig)["state"] == "executed"
     assert svc.store.service_faults() == []  # the outcome note after complete is not a fault

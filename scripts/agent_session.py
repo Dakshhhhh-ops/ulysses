@@ -128,11 +128,12 @@ def guardrail_lines(decision: dict) -> list[str]:
 
 
 class Agent:
-    def __init__(self, session: ClientSession, url: str, a, procs: list | None = None):
+    def __init__(self, session: ClientSession, url: str, a, procs: list | None = None, token: str = ""):
         self.s = session
         self.url = url
         self.a = a
-        self.http = httpx.Client(base_url=url, timeout=60)
+        # The agent's own surface (agent token): the human pages need a read capability it is not given.
+        self.http = httpx.Client(base_url=url, timeout=60, headers={"Authorization": f"Bearer {token}"})
         self.procs = procs or []
 
     def check_traffic(self) -> None:
@@ -157,7 +158,7 @@ class Agent:
 
     def human_state(self, h: str) -> dict:
         try:
-            return self.http.get(f"/human/contract/{h}").json()
+            return self.http.get(f"/api/contracts/{h}").json()
         except (httpx.HTTPError, ValueError):
             return {}
 
@@ -181,7 +182,7 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
         say(tag, f"sign_contract -> {h[:19]}  ({out['summary']['horizon']}; {out['summary']['boundary']})")
         out = await agent.tool("start_under_contract", contract_hash=h)
         say(tag, f"start_under_contract before the owner signs -> {out.get('status')} {out.get('detail')}", RED)
-        say("HUMAN NEEDED", f"owner signs at {agent.url}/sign/{h}", YELLOW)
+        say("HUMAN NEEDED", f"owner signs at {out.get('sign_url') or agent.human_state(h).get('sign_url')}", YELLOW)
         while agent.human_state(h).get("needs"):
             await asyncio.sleep(3)
     st = agent.human_state(h).get("state")
@@ -231,8 +232,8 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
         say(tag, f"execute {wrong} (not the signed action) -> {out.get('status')} {out.get('detail')}", RED)
         say("HUMAN NEEDED", f"owner confirms at {p['confirm_url']}", YELLOW)
         while True:
-            card = agent.http.get(f"/human/card/{p['look_id'] or p['id']}").json()
-            if (card.get("proposal") or {}).get("state") in ("confirmed", "executed", "failed"):
+            now = agent.http.get(f"/api/proposals/{p['id']}").json()
+            if now.get("state") in ("confirmed", "executed", "failed"):
                 break
             await asyncio.sleep(3)
     out = await agent.tool("execute", contract_hash=h, action=p["action"])
@@ -242,7 +243,8 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
     elapsed = time.time() - t0
     results[which] = {
         "contract": h, "kind": label, "outcome": p["outcome"], "action": p["action"], "result": out.get("result"),
-        "card": f"{agent.url}/card/{p['look_id'] or p['id']}",
+        "card": (agent.http.get(f"/api/proposals/{p['id']}").json().get("confirm_url")
+                 or f"{agent.url}/card/{p['look_id'] or p['id']}"),
         "minutes_from_start_to_decision": round(elapsed / 60, 1),
         "results_refreshes_run_by_agent": refreshes, "counted_looks": looks_taken,
         # What "saves real time" means here: the refreshes a person would have made checking every five minutes.
@@ -315,7 +317,7 @@ async def run(a) -> None:
                 say("AGENT", f"connected to the Ulysses MCP server; tools: {', '.join(tools)}")
                 say("AGENT", "keys this process holds: Ulysses agent token only "
                              f"(Flagsmith key in the MCP server's environment: {any(k.startswith('FLAGSMITH_') for k in env)})")
-                agent = Agent(s, url, a, procs)
+                agent = Agent(s, url, a, procs, token=token)
                 await asyncio.gather(*(govern(agent, demo, w, resume.get(w), results) for w in which))
     finally:
         for pr in procs:

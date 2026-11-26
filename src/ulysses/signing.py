@@ -31,6 +31,7 @@ KEY_PREFIX = "ed25519:"
 
 PURPOSE_SIGN = "sign-contract"
 PURPOSE_CONFIRM = "confirm-action"
+PURPOSE_ROTATE = "rotate-key"
 
 
 class SignatureError(Exception):
@@ -50,12 +51,13 @@ def contract_message(contract_hash: str, role: str) -> bytes:
 
 
 def confirm_message(contract_hash: str, look_id: str, action: str, evidence: str | None = None) -> bytes:
-    """What the owner signs to confirm one pre-signed action after a look fires.
+    """What the owner signs to confirm one pre-signed action.
 
     For an action a look fired, ``evidence`` is ``evidence_hash`` over every look on the experiment up to and
-    including that look, so the owner's tap also covers the numbers the decision rests on: editing or dropping
-    any of those looks afterwards breaks the signature. Without it (an amendment's immediate action, or a tap
-    signed before evidence was added) the message names only the contract, the look or proposal, and the action.
+    including that look, so the owner's tap also covers the numbers, the counted flags and the decisions it
+    rests on: editing or dropping any of those looks afterwards breaks the signature. The service accepts no
+    other form for a fired look. An amendment's immediate action has no look; its message names the proposal
+    id in the look's place and carries no evidence line.
     """
     fields = [contract_hash, look_id, action]
     if evidence is not None:
@@ -63,20 +65,43 @@ def confirm_message(contract_hash: str, look_id: str, action: str, evidence: str
     return message(PURPOSE_CONFIRM, *fields)
 
 
-EVIDENCE_SEED = "ulysses/v1/look-evidence"
+def rotation_message(signer: str, old_key: str, new_key: str, seq: int) -> bytes:
+    """What a signer's current key signs to hand the name over to a new key.
+
+    ``seq`` is how many rotations of this signer came before, so a rotation cannot be replayed after the
+    signer has rotated away and back.
+    """
+    return message(PURPOSE_ROTATE, signer, old_key, new_key, f"seq {int(seq)}")
 
 
-def evidence_hash(looks: Iterable[tuple[int, str, str, dict | None]]) -> str:
-    """A hash chain over looks given as ``(seq, look id, contract hash, Flagsmith snapshot)``, in seq order.
+EVIDENCE_SEED = "ulysses/v2/look-evidence"
+
+# The fields of a look's decision the evidence chain covers; ``ulysses export-bundle`` writes the same
+# projection as each look's ``recorded`` object, so the service and a bundle give the same chain.
+DECISION_FIELDS = ("outcome", "action", "counted", "look_number", "identities_per_arm", "fraction",
+                   "chance_to_win", "boundary_z", "boundary_chance", "guardrail")
+GUARDRAIL_FIELDS = ("name", "chance_worse", "boundary_z", "state")
+
+
+def decision_record(decision: dict | None) -> dict:
+    d = decision or {}
+    return ({k: d.get(k) for k in DECISION_FIELDS}
+            | {"guardrails": [{k: g.get(k) for k in GUARDRAIL_FIELDS} for g in d.get("guardrails") or []]})
+
+
+def evidence_hash(looks: Iterable[tuple[int, str, str, dict | None, bool, dict | None]]) -> str:
+    """A hash chain over looks given as ``(seq, look id, contract hash, Flagsmith snapshot, counted, decision)``.
 
     Each link is the SHA-256 of the canonical JSON of ``[previous link, seq, look id, contract hash, snapshot
-    hash]``; the snapshot is Flagsmith's numbers for that look with its ``as_of`` time left out, so the service's
-    store and a timestamp-free bundle give the same chain.
+    hash, counted, decision hash]``. The snapshot is Flagsmith's numbers for that look with its ``as_of`` time
+    left out, and the decision is ``decision_record`` of what the service decided, so the service's store and a
+    timestamp-free bundle give the same chain.
     """
     acc = EVIDENCE_SEED
-    for seq, look_id, contract_hash, snapshot in looks:
+    for seq, look_id, contract_hash, snapshot, counted, decision in looks:
         snap = None if snapshot is None else {k: v for k, v in snapshot.items() if k != "as_of"}
-        acc = content_hash([acc, seq, look_id, contract_hash, content_hash(snap)])
+        acc = content_hash([acc, seq, look_id, contract_hash, content_hash(snap), bool(counted),
+                            content_hash(decision_record(decision))])
     return acc
 
 

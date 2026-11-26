@@ -10,7 +10,9 @@ for two things the owner would do in the browser:
    verdict, then confirms it.
 
 It signs with the owner's passphrase-encrypted key file
-(``~/.ulysses/keys/<owner>.key``). For a recorded demo, use the browser
+(``~/.ulysses/keys/<owner>.key``). It reads the contract and card pages with a
+read capability minted from the service's database, as the links the service
+prints carry. For a recorded demo, use the browser
 instead (``agent_session.py`` waits for the tap; open the printed links).
 
     ULYSSES_KEY_PASSPHRASE_MAYA=... uv run python scripts/human_stand_in.py --owner maya
@@ -30,6 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from ulysses import signing  # noqa: E402
+from ulysses.core import Settings, Ulysses  # noqa: E402
+from ulysses.flagsmith.fake import FakeFlagsmith  # noqa: E402
 from ulysses.store import Store  # noqa: E402
 
 TAG = "\033[1;35m[STAND-IN HUMAN]\033[0m"
@@ -46,6 +50,11 @@ def main() -> None:
     url = a.service.rstrip("/")
     kp = signing.load_keypair(a.owner, prompt=True)
     store = Store(ROOT / a.db if not Path(a.db).is_absolute() else a.db)
+    links = Ulysses(store, FakeFlagsmith(), Settings(public_url=url))  # mints read capabilities only
+
+    def cap(row: dict) -> dict:
+        return {"cap": links.mint_read(links.read_scope(row["environment"], row["experiment_id"]))}
+
     print(f"{TAG} signing as {a.owner} with an encrypted key file, in place of the browser tap", flush=True)
     done: set[tuple[str, str]] = set()
     tries: dict[str, int] = {}
@@ -56,7 +65,7 @@ def main() -> None:
                 for row in store.all_contracts():
                     h = row["hash"]
                     if row["state"] == "draft" and ("sign", h) not in done:
-                        st = http.get(f"/human/contract/{h}").json()
+                        st = http.get(f"/human/contract/{h}", params=cap(row)).json()
                         if "owner" in st.get("needs", []) and st["summary"]["owner"] == a.owner:
                             s = st["summary"]
                             print(f"{TAG} read contract {h[:19]}: {s['hypothesis']} | {s['horizon']} | "
@@ -78,7 +87,7 @@ def main() -> None:
                         if p["state"] != "pending" or ("confirm", p["id"]) in done:
                             continue
                         ident = p["look_id"] or p["id"]
-                        card = http.get(f"/human/card/{ident}").json()
+                        card = http.get(f"/human/card/{ident}", params=cap(row)).json()
                         reason = (card.get("decision") or {}).get("reason") or p["outcome"]
                         print(f"{TAG} card {ident}: {reason}", flush=True)
                         r = http.post("/human/confirm", json={

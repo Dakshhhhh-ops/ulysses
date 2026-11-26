@@ -323,7 +323,10 @@ class Replayer:
         self.speed = speed
         self.store = ReplayStore(self.run_dir / "replay.db")
         self.fs = ReplayFlagsmith(clock=lambda: self.now)
-        self.svc = Ulysses(self.store, self.fs, Settings(public_url=public_url, refresh_wait_seconds=0.0),
+        # A recording can hold owner taps signed before the confirmation carried the looks' evidence chain;
+        # the replay checks those against the earlier message. The live service never accepts that form.
+        self.svc = Ulysses(self.store, self.fs, Settings(public_url=public_url, refresh_wait_seconds=0.0,
+                                                         replay_accepts_earlier_tap_form=True),
                            clock=lambda: self.now, sleep=lambda s: None)
         self.mismatches: list[Step] = []
         self.done = 0

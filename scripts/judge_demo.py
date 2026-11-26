@@ -210,6 +210,7 @@ def main() -> None:
         vals = read_env(JUDGE_ENV)
         port = vals["ULYSSES_PUBLIC_URL"].rsplit(":", 1)[-1]
         step(f"serving the cards at {vals['ULYSSES_PUBLIC_URL']}/ (Ctrl+C to stop)")
+        print(f"  open the contract list with its read link: {overview_link(vals)}", flush=True)
         try:
             subprocess.run([sys.executable, "-m", "ulysses.cli", "serve", "--port", port], cwd=ROOT,
                            env={**os.environ, **vals, "PYTHONPATH": str(ROOT / "src")})
@@ -319,7 +320,9 @@ def main() -> None:
             rc = subprocess.run(agent_command(mode, py, a.shop_port), cwd=ROOT, env=agent_env).returncode
         if rc != 0:
             stop("the agent session did not finish (see above); rerun this command to continue from a fresh setup")
-        if not summarise(time.time() - started, api, a.port, "scripted" if mode == "scripted" else "llm"):
+        ok = summarise(time.time() - started, api, a.port, "scripted" if mode == "scripted" else "llm")
+        print(f"  Contract list (read link, it expires): {overview_link(env_vals)}", flush=True)
+        if not ok:
             stop("the LLM agent did not complete every experiment (see the summary and transcript above)")
     finally:
         for p in procs:
@@ -414,6 +417,14 @@ def summarise_llm(run: Path = RUN) -> tuple[int, int]:
     return llm_completed(r), expected
 
 
+def overview_link(vals: dict) -> str:
+    """The contract list's read link, minted from the run's own service database (it expires)."""
+    from ulysses.service.runtime import local_service
+
+    db = vals.get("ULYSSES_DB", ".run/judge.db")
+    return local_service(vals["ULYSSES_PUBLIC_URL"], ROOT / db if not Path(db).is_absolute() else db).overview_link()
+
+
 def summarise(seconds: float, api: str, port: int, mode: str = "scripted", run: Path = RUN) -> bool:
     """One table from what the agent session wrote, so the outcome is on screen at the end.
 
@@ -498,11 +509,12 @@ def replay(a) -> None:
     print(f"{tag} {span / 60:.1f} recorded minutes played in about {span / speed / 60:.1f} (speed-up {speed:.1f}x). "
           "The contract service, its store, signature checks, decision engine and pages are the real ones; "
           "only Flagsmith is replaced by the recorded answers.")
-    print(f"{tag} pages: {url}/  (store: {run_dir.relative_to(ROOT)})", flush=True)
+    overview = r.svc.overview_link()
+    print(f"{tag} pages: {overview}  (read link; store: {run_dir.relative_to(ROOT)})", flush=True)
     if a.open:
         import webbrowser
 
-        webbrowser.open(f"{url}/")
+        webbrowser.open(overview)
     time.sleep(max(a.lead, 0.0))
     began = time.monotonic()
     for ev in events:
@@ -528,7 +540,7 @@ def replay(a) -> None:
     for m in r.mismatches:
         print(f"{tag} [1;31mdid not reproduce:[0m {m.text}", flush=True)
     if not a.no_hold:
-        print(f"{tag} still serving the replayed pages at {url}/ (Ctrl+C to stop)", flush=True)
+        print(f"{tag} still serving the replayed pages at {r.svc.overview_link()} (Ctrl+C to stop)", flush=True)
         try:
             while True:
                 time.sleep(1)

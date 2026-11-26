@@ -6,7 +6,9 @@ because it holds run-time timestamps.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import sqlite3
 import threading
 import uuid
@@ -20,10 +22,24 @@ CREATE TABLE IF NOT EXISTS signers (
     added_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS enrol_tokens (
-    token TEXT PRIMARY KEY,
+    token TEXT PRIMARY KEY,        -- SHA-256 of the token; the token itself is only in the link
     signer TEXT NOT NULL,
     used INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS signer_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signer TEXT NOT NULL,
+    kind TEXT NOT NULL,            -- enrolled | rotated
+    old_key TEXT,
+    new_key TEXT NOT NULL,
+    seq INTEGER NOT NULL,          -- rotations of this signer before this one
+    signature TEXT,                -- for a rotation: the old key's signature over signing.rotation_message
+    at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS contracts (
     hash TEXT PRIMARY KEY,
@@ -150,7 +166,13 @@ MIGRATIONS = [
     ("deviations", "source", "ALTER TABLE deviations ADD COLUMN source TEXT"),
     ("audit_seen", "expected_id", "ALTER TABLE audit_seen ADD COLUMN expected_id INTEGER"),
     ("audit_seen", "detail", "ALTER TABLE audit_seen ADD COLUMN detail TEXT"),
+    # A token row without an expiry (made before expiries existed) never validates.
+    ("enrol_tokens", "expires_at", "ALTER TABLE enrol_tokens ADD COLUMN expires_at REAL"),
 ]
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 class Store:
@@ -192,11 +214,14 @@ class Store:
     # ---- signers ---------------------------------------------------------------
 
     def add_signer(self, name: str, public_key: str, now: float) -> None:
-        self._exec(
-            "INSERT INTO signers(name, public_key, added_at) VALUES (?,?,?) "
-            "ON CONFLICT(name) DO UPDATE SET public_key=excluded.public_key, added_at=excluded.added_at",
-            (name, public_key, now),
-        )
+        """Register a new signer. Never replaces a registered key: that takes ``rotate_signer``."""
+        with self._lock:
+            self._exec("INSERT OR IGNORE INTO signers(name, public_key, added_at) VALUES (?,?,?)",
+                       (name, public_key, now))
+            row = self.signer(name)
+            if not row or row["public_key"] != public_key:
+                raise ValueError(f"signer {name!r} is already registered with a different key; "
+                                 "a new key needs a rotation signed by the old one")
 
     def signer(self, name: str) -> dict | None:
         return self._one("SELECT * FROM signers WHERE name=?", (name,))
@@ -204,25 +229,64 @@ class Store:
     def signers(self) -> list[dict]:
         return self._all("SELECT name, public_key FROM signers ORDER BY name")
 
-    def new_enrol_token(self, signer: str, now: float) -> str:
-        token = uuid.uuid4().hex
-        self._exec("INSERT INTO enrol_tokens(token, signer, created_at) VALUES (?,?,?)", (token, signer, now))
+    def rotate_signer(self, name: str, old_key: str, new_key: str, seq: int, signature: str, now: float) -> bool:
+        """Swap ``name``'s key from ``old_key`` to ``new_key`` if it is still ``old_key`` and ``seq`` rotations
+        came before; record the event. False if either moved on meanwhile."""
+        with self.transaction():
+            if self.rotation_count(name) != seq:
+                return False
+            cur = self._exec("UPDATE signers SET public_key=?, added_at=? WHERE name=? AND public_key=?",
+                             (new_key, now, name, old_key))
+            if cur.rowcount != 1:
+                return False
+            self._exec("INSERT INTO signer_events(signer, kind, old_key, new_key, seq, signature, at) "
+                       "VALUES (?,?,?,?,?,?,?)", (name, "rotated", old_key, new_key, seq, signature, now))
+            return True
+
+    def rotation_count(self, name: str) -> int:
+        r = self._one("SELECT COUNT(*) AS c FROM signer_events WHERE signer=? AND kind='rotated'", (name,))
+        return int((r or {"c": 0})["c"])
+
+    def log_signer_event(self, name: str, kind: str, new_key: str, now: float) -> None:
+        self._exec("INSERT INTO signer_events(signer, kind, old_key, new_key, seq, signature, at) "
+                   "VALUES (?,?,?,?,?,?,?)", (name, kind, None, new_key, self.rotation_count(name), None, now))
+
+    def signer_events(self, names: Iterable[str] | None = None) -> list[dict]:
+        rows = self._all("SELECT signer, kind, old_key, new_key, seq, signature, at FROM signer_events ORDER BY id")
+        if names is not None:
+            wanted = set(names)
+            rows = [r for r in rows if r["signer"] in wanted]
+        return rows
+
+    def new_enrol_token(self, signer: str, now: float, ttl: float) -> str:
+        token = secrets.token_urlsafe(32)
+        self._exec("INSERT INTO enrol_tokens(token, signer, created_at, expires_at) VALUES (?,?,?,?)",
+                   (_token_hash(token), signer, now, now + ttl))
         return token
 
     def signer_by_key(self, public_key: str) -> dict | None:
         return self._one("SELECT * FROM signers WHERE public_key=?", (public_key,))
 
-    def use_enrol_token(self, token: str) -> str | None:
+    def use_enrol_token(self, token: str, now: float) -> str | None:
         with self._lock:
-            row = self._one("SELECT * FROM enrol_tokens WHERE token=? AND used=0", (token,))
-            if not row:
+            name = self.peek_enrol_token(token, now)
+            if not name:
                 return None
-            self._exec("UPDATE enrol_tokens SET used=1 WHERE token=?", (token,))
-            return row["signer"]
+            cur = self._exec("UPDATE enrol_tokens SET used=1 WHERE token=? AND used=0", (_token_hash(token),))
+            return name if cur.rowcount == 1 else None
 
-    def peek_enrol_token(self, token: str) -> str | None:
-        row = self._one("SELECT signer FROM enrol_tokens WHERE token=? AND used=0", (token,))
+    def peek_enrol_token(self, token: str, now: float) -> str | None:
+        row = self._one("SELECT signer FROM enrol_tokens WHERE token=? AND used=0 AND expires_at IS NOT NULL "
+                        "AND expires_at > ?", (_token_hash(token), now))
         return row["signer"] if row else None
+
+    # ---- the service's own secret ----------------------------------------------
+
+    def service_secret(self) -> bytes:
+        """A random secret made on first use and kept here; it signs the human pages' read links."""
+        with self._lock:
+            self._exec("INSERT OR IGNORE INTO meta(key, value) VALUES ('read_secret', ?)", (secrets.token_hex(32),))
+            return bytes.fromhex(self._one("SELECT value FROM meta WHERE key='read_secret'")["value"])
 
     # ---- contracts -------------------------------------------------------------
 

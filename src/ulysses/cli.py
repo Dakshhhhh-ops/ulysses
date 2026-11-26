@@ -270,11 +270,55 @@ def cmd_signer_add(a) -> None:
     console.print(f"[green]registered[/] {a.name}")
 
 
+def _local():
+    from .service.runtime import local_service
+
+    _env()
+    return local_service(_service()[0])
+
+
 def cmd_signer_enrol(a) -> None:
-    store = _store()
-    tok = store.new_enrol_token(a.name, time.time())
-    url, _ = _service()
-    console.print(f"Send this one-time link to {a.name}; it creates a key in their browser:\n{url}/enrol/{tok}")
+    svc = _local()
+    if svc.store.signer(a.name):
+        fail(f"{a.name} is already registered; an enrolment link cannot replace a key",
+             f"the signer rotates it with their current key: ulysses signer rotate {a.name}")
+    tok = svc.enrol_token(a.name)
+    minutes = svc.settings.enrol_ttl_seconds / 60
+    console.print(f"Send this one-time link to {a.name}; it creates a key in their browser. It works once, "
+                  f"within {minutes:g} minutes:\n{svc.settings.public_url}/enrol/{tok}", soft_wrap=True)
+
+
+def cmd_signer_rotate(a) -> None:
+    """Hand a signer's name to a new key file, signed by the current one."""
+    import getpass
+
+    key_dir = Path(a.key_dir) if a.key_dir else None
+    old = signing.load_keypair(a.name, key_dir, prompt=True)
+    pw = None if a.no_passphrase else (signing.passphrase_for(a.name)
+                                       or getpass.getpass(f"Passphrase for {a.name}'s new signing key: "))
+    if pw is not None and len(pw) < 8:
+        fail("use a passphrase of at least 8 characters, or --no-passphrase for a throwaway test key")
+    svc = _local()
+    new = signing.Keypair.generate()
+    msg = svc.rotation_message(a.name, new.public)
+    out = _api("POST", "/human/rotate", agent=False,
+               json={"signer": a.name, "public_key": new.public, "signature": old.sign(msg)})
+    path = signing.key_path(a.name, key_dir)
+    path.replace(path.with_suffix(f".key.replaced-{out['seq']}"))
+    signing.save_keypair(a.name, new, key_dir, pw)
+    console.print(f"[green]rotated[/] {a.name}: {out['replaced']} -> {out['public_key']} (recorded; contracts "
+                  "naming the old key no longer verify)")
+
+
+def cmd_link(a) -> None:
+    """Print a read link for the human pages, minted with the service's own secret (run on its machine)."""
+    svc = _local()
+    if a.hash:
+        if not svc.store.contract_row(a.hash):
+            fail(f"no contract {a.hash} in this database")
+        console.print(svc.link(f"/sign/{a.hash}", a.hash), soft_wrap=True)
+    else:
+        console.print(svc.overview_link(), soft_wrap=True)
 
 
 def cmd_signer_list(a) -> None:
@@ -309,7 +353,7 @@ def cmd_contract_draft(a) -> None:
             "expected_rate_per_hour": a.rate_per_hour, "hypothesis": a.hypothesis,
             "override_reason": a.override_reason}
     out = _api("POST", "/api/contracts/draft", json={k: v for k, v in body.items() if v is not None})
-    console.print(f"[green]drafted[/] {out['hash']}\nsign at: {out['sign_url']}")
+    console.print(f"[green]drafted[/] {out['hash']}\nsign at: {out['sign_url']}", soft_wrap=True)
     if a.out:
         toml = httpx.get(_service()[0] + f"/api/contracts/{out['hash']}/toml",
                          headers={"Authorization": f"Bearer {_service()[1]}"}, timeout=60).text
@@ -319,7 +363,7 @@ def cmd_contract_draft(a) -> None:
 
 def cmd_contract_submit(a) -> None:
     out = _api("POST", "/api/contracts", json={"toml": Path(a.file).read_text(encoding="utf-8")})
-    console.print(f"[green]submitted[/] {out['hash']}  state={out['state']}\nsign at: {out['sign_url']}")
+    console.print(f"[green]submitted[/] {out['hash']}  state={out['state']}\nsign at: {out['sign_url']}", soft_wrap=True)
 
 
 def cmd_contract_show(a) -> None:
@@ -336,8 +380,21 @@ def cmd_sign(a) -> None:
 
 
 def cmd_confirm(a) -> None:
+    from urllib.parse import urlparse
+
     url, _ = _service()
-    card = httpx.get(f"{url}/human/card/{a.ident}", timeout=60).json()
+    if a.ident.startswith(("http://", "https://")):
+        # The card link the service handed out: it carries its own read capability.
+        card_url = a.ident.replace("/card/", "/human/card/", 1)
+        u = urlparse(a.ident)
+        a.ident = u.path.rsplit("/", 1)[-1]
+    else:
+        svc = _local()
+        rec = svc.store.proposal(a.ident) if a.ident.startswith("P-") else svc.store.look(a.ident)
+        if not rec:
+            fail(f"no look or proposal {a.ident} in this database", "pass the card link instead")
+        card_url = svc.link(f"/human/card/{a.ident}", rec["contract_hash"]).replace(svc.settings.public_url, url, 1)
+    card = httpx.get(card_url, timeout=60).json()
     p = card.get("proposal")
     if not p:
         fail("nothing to confirm on this card")
@@ -729,8 +786,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sg.add_parser("enrol", help="print a one-time link that creates a key in the signer's browser")
     s.add_argument("name")
     s.set_defaults(fn=cmd_signer_enrol)
+    s = sg.add_parser("rotate", help="replace a signer's key file with a new key, signed by the current one")
+    s.add_argument("name")
+    s.add_argument("--key-dir")
+    s.add_argument("--no-passphrase", action="store_true", help="store the new key unencrypted (tests only)")
+    s.set_defaults(fn=cmd_signer_rotate)
     s = sg.add_parser("list")
     s.set_defaults(fn=cmd_signer_list)
+
+    s = sub.add_parser("link", help="print a read link for the contract pages (run where the service's database is)")
+    s.add_argument("hash", nargs="?", help="one contract (its experiment's pages); default: the contract list")
+    s.set_defaults(fn=cmd_link)
 
     c = sub.add_parser("contract", help="draft, check and submit contracts").add_subparsers(dest="sub", required=True)
     s = c.add_parser("verify", help="validate a contract file and print its hash and boundary")
@@ -770,7 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_sign)
 
     s = sub.add_parser("confirm", help="one-tap confirm, from the command line")
-    s.add_argument("ident", help="look id or proposal id")
+    s.add_argument("ident", help="the card link, or a look id or proposal id (then read from the local database)")
     s.add_argument("--as", dest="as_", required=True)
     s.add_argument("--key-dir")
     s.set_defaults(fn=cmd_confirm)

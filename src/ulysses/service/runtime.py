@@ -48,6 +48,27 @@ def slack_notifier(url: str, public_url: str):
     return notify
 
 
+def link_settings() -> dict:
+    """How long read links, enrolment links and signer sessions last (seconds), from the environment."""
+    out = {}
+    for env, field in (("ULYSSES_LINK_TTL_SECONDS", "link_ttl_seconds"),
+                       ("ULYSSES_ENROL_TTL_SECONDS", "enrol_ttl_seconds"),
+                       ("ULYSSES_SESSION_TTL_SECONDS", "session_ttl_seconds")):
+        if os.environ.get(env):
+            out[field] = float(os.environ[env])
+    return out
+
+
+def local_service(public_url: str | None = None, db_path: str | Path | None = None) -> Ulysses:
+    """The service's rules over its own database, without Flagsmith: for minting links and enrolment tokens
+    on the service's machine (``ulysses link``, ``ulysses signer enrol``, the demo scripts)."""
+    from ..flagsmith.fake import FakeFlagsmith
+
+    url = (public_url or os.environ.get("ULYSSES_PUBLIC_URL") or f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")
+    store = Store(db_path or os.environ.get("ULYSSES_DB", ".run/ulysses.db"))
+    return Ulysses(store, FakeFlagsmith(), Settings(public_url=url, **link_settings()))
+
+
 def build(db_path: str | Path | None = None) -> tuple[Ulysses, dict]:
     url = os.environ.get("FLAGSMITH_API_URL", "http://localhost:8000")
     key = os.environ.get("FLAGSMITH_ADMIN_KEY", "")
@@ -61,7 +82,8 @@ def build(db_path: str | Path | None = None) -> tuple[Ulysses, dict]:
     slack = os.environ.get("ULYSSES_SLACK_WEBHOOK") or None
     settings = Settings(public_url=public_url, slack_webhook=slack,
                         # Kept well under the 300 s client timeout so a slow look does not invite a retry.
-                        refresh_wait_seconds=float(os.environ.get("ULYSSES_REFRESH_WAIT", "150")))
+                        refresh_wait_seconds=float(os.environ.get("ULYSSES_REFRESH_WAIT", "150")),
+                        **link_settings())
     store = Store(db_path or os.environ.get("ULYSSES_DB", ".run/ulysses.db"))
     svc = Ulysses(store, RestFlagsmith(url, key), settings,
                   notify=slack_notifier(slack, public_url) if slack else None)
@@ -76,6 +98,9 @@ def make_asgi():
     if not cfg["webhook_secret"]:
         log.warning("ULYSSES_WEBHOOK_SECRET is not set: %s", "accepting UNSIGNED audit webhooks (dev only)"
                     if insecure else "the audit webhook is disabled until it is (deviation detection by webhook off)")
+    # The operator's way in: the contract list needs a read capability like every other human page.
+    print(f"Ulysses contract list (read link, expires in {svc.settings.link_ttl_seconds / 3600:g} h): "
+          f"{svc.overview_link()}", flush=True)
     return create_app(svc, agent_token=cfg["agent_token"],
                       protected_secrets=[cfg["flagsmith_key"], cfg["webhook_secret"] or ""],
                       webhook_secret=cfg["webhook_secret"], webhook_insecure=insecure)

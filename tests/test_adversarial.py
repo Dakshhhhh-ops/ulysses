@@ -26,7 +26,7 @@ from ulysses.flagsmith.gateway import AuditEntry, FlagsmithError, MetricInfo
 from ulysses.mcp_server import FENCE_CLOSE, FENCE_OPEN, ServiceClient, build_server, card_text, inert
 from ulysses.service.app import create_app
 
-from .conftest import make_contract, sign_as
+from .conftest import make_contract, sign_as, tap
 
 PHI = NormalDist().cdf
 FS_KEY = "fs-admin-SECRET-key-0123456789"
@@ -47,6 +47,7 @@ def started(svc, keys, **kw):
 
 
 def confirm_sig(keys, h, look_or_pid, action, who="maya"):
+    """A tap over the bare message (contract, look or proposal, action), without the looks' evidence."""
     return keys[who].sign(signing.confirm_message(h, look_or_pid, action))
 
 
@@ -261,7 +262,7 @@ def test_pages_escape_injected_markup(http, keys):
     c = make_contract(keys, n=1000, looks=10)
     c = ct.from_canonical({**c.canonical(), "hypothesis": markup})
     h = svc.submit(c)["hash"]
-    page = client.get(f"/sign/{h}").text
+    page = client.get(f"/sign/{h}", params={"cap": svc.mint_read(svc.read_scope("env-key", 1))}).text
     assert markup not in page and "&lt;script&gt;" in page
 
 
@@ -272,7 +273,7 @@ def test_replayed_confirm_signature_after_execution_sends_nothing_more(world, ke
     svc, fs, store = world
     h = started(svc, keys, n=1000, looks=10)
     p = fire_win(svc, fs, h)
-    sig = confirm_sig(keys, h, p["look_id"], p["action"])
+    sig = tap(svc, keys, p)
     assert svc.confirm(p["id"], "maya", sig)["state"] == "executed"
     for _ in range(3):
         assert svc.confirm(p["id"], "maya", sig)["state"] == "executed"
@@ -482,7 +483,7 @@ def test_replay_of_an_unverified_entry_after_the_services_own_completion_is_not_
     assert client.post("/webhooks/flagsmith", content=raw, headers=_sig(raw)).json()["verdict"] == "unverified"
     clock.advance(600)
     p = fire_win(svc, fs, h)
-    svc.confirm(p["id"], "maya", confirm_sig(keys, h, p["look_id"], p["action"]))
+    svc.confirm(p["id"], "maya", tap(svc, keys, p))
     assert fs.experiments[1].status == "completed"
     clock.advance(3600)
     replay = client.post("/webhooks/flagsmith", content=raw, headers=_sig(raw)).json()
@@ -502,7 +503,7 @@ def test_owner_confirm_racing_the_agents_execute_never_sets_an_executed_proposal
     svc, fs, store = world
     h = started(svc, keys, n=1000, looks=10)
     p = fire_win(svc, fs, h)
-    sig = confirm_sig(keys, h, p["look_id"], p["action"])
+    sig = tap(svc, keys, p)
     real = fs.complete
     monkeypatch.setattr(fs, "complete", lambda *a, **k: (_ for _ in ()).throw(FlagsmithError("timed out")))
     with pytest.raises(FlagsmithError):
@@ -532,7 +533,7 @@ def test_parallel_confirms_and_executes_complete_exactly_once(world, keys):
     svc, fs, store = world
     h = started(svc, keys, n=1000, looks=10)
     p = fire_win(svc, fs, h)
-    sig = confirm_sig(keys, h, p["look_id"], p["action"])
+    sig = tap(svc, keys, p)
     errors: list[BaseException] = []
 
     def run(fn):
@@ -561,7 +562,7 @@ def test_agent_token_after_the_contract_completed_can_change_nothing(http, keys)
     client, svc, fs, _ = http
     h = started(svc, keys, n=1000, looks=10)
     p = fire_win(svc, fs, h)
-    svc.confirm(p["id"], "maya", confirm_sig(keys, h, p["look_id"], p["action"]))
+    svc.confirm(p["id"], "maya", tap(svc, keys, p))
     writes = len(fs.writes)
     look = client.post(f"/api/contracts/{h}/look").json()
     assert look["already_decided"]
@@ -596,7 +597,7 @@ def test_agent_token_against_another_contract_still_needs_that_contracts_signatu
 
 def test_agent_surface_has_no_route_that_signs_enrols_or_registers(http):
     _, _, _, app = http
-    inner = app.app  # under the secret guard
+    inner = app.app.app  # under the secret guard and the read-headers layer
     agent_posts = sorted(r.path for r in inner.routes
                          if getattr(r, "methods", None) and "POST" in r.methods and r.path.startswith("/api/"))
     assert agent_posts == sorted([
@@ -608,3 +609,336 @@ def test_agent_surface_has_no_route_that_signs_enrols_or_registers(http):
     r = client.post("/human/confirm", json={"proposal_id": "P-000000000000", "signer": "maya", "signature": "AA=="},
                     headers={"Authorization": f"Bearer {TOKEN}"})
     assert r.status_code == 404
+
+
+# ================================================================ 7. the human read surface
+
+
+def _no_auth(app):
+    return TestClient(app)
+
+
+def _cap_of(url: str) -> str:
+    from urllib.parse import parse_qs, urlparse
+
+    return parse_qs(urlparse(url).query)["cap"][0]
+
+
+def _path_of(url: str) -> str:
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    return u.path + (f"?{u.query}" if u.query else "")
+
+
+def test_human_read_surface_needs_a_capability_or_a_signer_session(http, keys):
+    """Hole found: the contract list, contract pages, curves and cards were readable by anyone who reached
+    the port: contracts, Flagsmith's numbers and signer names. The agent token is not a read grant there."""
+    _, svc, fs, app = http
+    h = started(svc, keys, n=1000, looks=10)
+    p = fire_win(svc, fs, h)
+    paths = ["/", f"/human/contract/{h}", f"/human/contract/{h}/curves", f"/sign/{h}",
+             f"/human/card/{p['look_id']}", f"/card/{p['look_id']}", f"/human/card/{p['id']}", f"/card/{p['id']}"]
+    anon = _no_auth(app)
+    for path in paths:
+        r = anon.get(path)
+        assert r.status_code == 401, (path, r.status_code)
+        assert "maya" not in r.text and h.split(":")[-1][:12] not in r.text, path
+        r = anon.get(path, headers={"Authorization": f"Bearer {TOKEN}"})
+        assert r.status_code == 401, (path, "agent token")
+    # The links the service hands out carry their own capability.
+    for url in (svc.contract_status(h)["sign_url"], p["confirm_url"], svc.proposal(p["id"])["confirm_url"]):
+        assert "cap=" in url, url
+        assert _no_auth(app).get(_path_of(url)).status_code == 200, url
+    cap = _cap_of(svc.contract_status(h)["sign_url"])
+    for path in paths[1:]:
+        assert _no_auth(app).get(path, params={"cap": cap}).status_code == 200, path
+
+
+def test_capability_is_bound_to_its_experiment_and_expires(http, keys, clock):
+    _, svc, fs, app = http
+    fs.add_experiment(2)
+    a = started(svc, keys, n=1000, looks=10)
+    b = svc.submit(make_contract(keys, n=1000, looks=10, experiment=2))["hash"]
+    cap_a = _cap_of(svc.contract_status(a)["sign_url"])
+    assert _no_auth(app).get(f"/human/contract/{a}", params={"cap": cap_a}).status_code == 200
+    assert _no_auth(app).get(f"/human/contract/{b}", params={"cap": cap_a}).status_code == 401  # another experiment
+    exp, _, mac = cap_a.partition(".")
+    for forged in (f"{int(exp) + 10**6}.{mac}", f"{exp}.{mac[:-2]}AA", f"{exp}.", "", "x.y"):
+        assert _no_auth(app).get(f"/human/contract/{a}", params={"cap": forged}).status_code == 401, forged
+    clock.advance(svc.settings.link_ttl_seconds + 1)
+    assert _no_auth(app).get(f"/human/contract/{a}", params={"cap": cap_a}).status_code == 401  # expired
+
+
+def test_capability_cookie_follows_the_experiments_own_links_only(http, keys):
+    _, svc, fs, app = http
+    fs.add_experiment(2)
+    h = started(svc, keys, n=1000, looks=10)
+    p = fire_win(svc, fs, h)
+    other = svc.submit(make_contract(keys, n=1000, looks=10, experiment=2))["hash"]
+    browser = _no_auth(app)
+    r = browser.get(_path_of(svc.contract_status(h)["sign_url"]))
+    assert r.status_code == 200
+    assert r.headers.get("referrer-policy") == "no-referrer"
+    assert browser.get(f"/card/{p['look_id']}").status_code == 200  # a link on the page, no cap in it
+    assert browser.get(f"/human/card/{p['id']}").status_code == 200
+    assert browser.get(f"/sign/{other}").status_code == 401
+    rows = browser.get("/")
+    assert rows.status_code == 200
+    assert h.split(":")[-1][:12] in rows.text and other.split(":")[-1][:12] not in rows.text
+
+
+def test_overview_link_reads_every_experiment(http, keys):
+    _, svc, fs, app = http
+    fs.add_experiment(2)
+    a = started(svc, keys, n=1000, looks=10)
+    b = svc.submit(make_contract(keys, n=1000, looks=10, experiment=2))["hash"]
+    link = svc.overview_link()
+    assert "cap=" in link
+    browser = _no_auth(app)
+    page = browser.get(_path_of(link))
+    assert page.status_code == 200
+    assert a.split(":")[-1][:12] in page.text and b.split(":")[-1][:12] in page.text
+    assert browser.get(f"/sign/{b}").status_code == 200
+
+
+def test_signer_session_after_enrolment_reads_only_that_signers_experiments(http, keys):
+    _, svc, fs, app = http
+    fs.add_experiment(2)
+    maya_h = started(svc, keys, n=1000, looks=10)
+    ana = signing.Keypair.generate()
+    browser = _no_auth(app)
+    tok = svc.enrol_token("ana")
+    assert browser.post("/human/enrol", json={"token": tok, "public_key": ana.public}).status_code == 200
+    c = make_contract(keys, n=1000, looks=10, experiment=2)
+    c = ct.from_canonical({**c.canonical(), "owner": {"name": "ana", "public_key": ana.public}})
+    ana_h = svc.submit(c)["hash"]
+    assert browser.get(f"/sign/{ana_h}").status_code == 200
+    assert browser.get(f"/human/contract/{ana_h}").status_code == 200
+    assert browser.get(f"/sign/{maya_h}").status_code == 401
+    page = browser.get("/")
+    assert page.status_code == 200 and ana_h.split(":")[-1][:12] in page.text
+    assert maya_h.split(":")[-1][:12] not in page.text
+    # Rotating ana's key ends the session made for the old one.
+    new = signing.Keypair.generate()
+    svc.rotate_signer_key("ana", new.public, ana.sign(svc.rotation_message("ana", new.public)))
+    assert browser.get(f"/sign/{ana_h}").status_code == 401
+
+
+# ================================================================ 8. enrolment and key rotation
+
+
+def test_enrolment_link_get_shows_the_page_and_only_the_post_spends_it(http):
+    _, svc, _, app = http
+    browser = _no_auth(app)
+    tok = svc.enrol_token("ana")
+    for _ in range(3):  # link previews and prefetchers GET it; that spends nothing
+        assert browser.get(f"/enrol/{tok}").status_code == 200
+    key = signing.Keypair.generate().public
+    assert browser.post("/human/enrol", json={"token": tok, "public_key": key}).status_code == 200
+    assert browser.get(f"/enrol/{tok}").status_code == 404
+    again = browser.post("/human/enrol", json={"token": tok, "public_key": signing.Keypair.generate().public})
+    assert again.status_code == 403
+    assert svc.store.signer("ana")["public_key"] == key
+
+
+def test_enrolment_link_expires(http, clock):
+    _, svc, _, app = http
+    tok = svc.enrol_token("ana")
+    clock.advance(svc.settings.enrol_ttl_seconds + 1)
+    browser = _no_auth(app)
+    assert browser.get(f"/enrol/{tok}").status_code == 404
+    r = browser.post("/human/enrol", json={"token": tok, "public_key": signing.Keypair.generate().public})
+    assert r.status_code == 403 and svc.store.signer("ana") is None
+
+
+def test_enrolment_token_is_not_kept_in_the_database_in_the_clear(world):
+    svc, _, store = world
+    tok = svc.enrol_token("ana")
+    assert len(tok) >= 40
+    rows = store._all("SELECT * FROM enrol_tokens")
+    assert rows and all(tok not in json.dumps(r) for r in rows)
+
+
+def test_enrolment_link_cannot_replace_an_existing_signers_key(http, keys):
+    """Hole found: enrolment upserted, so whoever opened a link for a registered name first replaced the
+    owner's key, and contracts naming the old key stopped verifying while the new key holder could sign."""
+    _, svc, _, app = http
+    tok = svc.enrol_token("maya")
+    r = _no_auth(app).post("/human/enrol", json={"token": tok, "public_key": keys["mallory"].public})
+    assert r.status_code in (403, 409)
+    assert svc.store.signer("maya")["public_key"] == keys["maya"].public
+    with pytest.raises(ValueError):
+        svc.store.add_signer("maya", keys["mallory"].public, 0.0)
+    assert svc.store.signer("maya")["public_key"] == keys["maya"].public
+
+
+def test_key_rotation_needs_the_old_keys_signature_and_is_recorded(http, keys):
+    client, svc, _, app = http
+    new = signing.Keypair.generate()
+    msg = svc.rotation_message("maya", new.public)
+    for bad in (keys["mallory"].sign(msg), new.sign(msg), keys["maya"].sign(svc.rotation_message("sam", new.public))):
+        r = _no_auth(app).post("/human/rotate", json={"signer": "maya", "public_key": new.public, "signature": bad})
+        assert r.status_code == 403
+    assert svc.store.signer("maya")["public_key"] == keys["maya"].public
+    sig = keys["maya"].sign(msg)
+    r = _no_auth(app).post("/human/rotate", json={"signer": "maya", "public_key": new.public, "signature": sig})
+    assert r.status_code == 200, r.text
+    assert svc.store.signer("maya")["public_key"] == new.public
+    # The same request again does not apply twice (the message names the key it replaces and a sequence).
+    r = _no_auth(app).post("/human/rotate", json={"signer": "maya", "public_key": new.public, "signature": sig})
+    assert r.status_code in (400, 403)
+    # Nor after the signer rotated back: the message carries how many rotations came before it.
+    back = new.sign(svc.rotation_message("maya", keys["maya"].public))
+    assert _no_auth(app).post("/human/rotate", json={"signer": "maya", "public_key": keys["maya"].public,
+                                                     "signature": back}).status_code == 200
+    r = _no_auth(app).post("/human/rotate", json={"signer": "maya", "public_key": new.public, "signature": sig})
+    assert r.status_code == 403
+    assert svc.store.signer("maya")["public_key"] == keys["maya"].public
+    events = client.get("/api/signers/events").json()
+    rot = [e for e in events if e["kind"] == "rotated"]
+    assert len(rot) == 2 and rot[0]["signer"] == "maya" and [e["seq"] for e in rot] == [0, 1]
+    assert rot[0]["old_key"] == keys["maya"].public and rot[0]["new_key"] == new.public
+    assert signing.is_valid(keys["maya"].public,
+                            signing.rotation_message("maya", rot[0]["old_key"], new.public, rot[0]["seq"]),
+                            rot[0]["signature"])
+
+
+def test_key_rotation_is_in_the_audit_bundle_and_verifies(world, keys):
+    from ulysses import verify as vf
+
+    svc, fs, store = world
+    started(svc, keys, n=1000, looks=10)
+    new = signing.Keypair.generate()
+    svc.rotate_signer_key("sam", new.public, keys["sam"].sign(svc.rotation_message("sam", new.public)))
+    b = vf.export_bundle(store, "env-key", 1)
+    assert [r["signer"] for r in b["key_rotations"]] == ["sam"]
+    checks = vf.verify_bundle(b)
+    assert any(c.name.startswith("key rotation") and c.status == "PASS" for c in checks)
+    b["key_rotations"][0]["new_key"] = keys["mallory"].public
+    checks = vf.verify_bundle(b)
+    assert any(c.name.startswith("key rotation") and c.status == "FAIL" for c in checks)
+
+
+# ================================================================ 9. the confirmation's evidence
+
+
+def test_confirm_without_the_evidence_chain_is_refused(world, keys):
+    """The earlier message (contract, look, action) no longer confirms a fired look: v0.1.0 has no old taps."""
+    svc, fs, store = world
+    h = started(svc, keys, n=1000, looks=10)
+    p = fire_win(svc, fs, h)
+    with pytest.raises(Refused):
+        svc.confirm(p["id"], "maya", keys["maya"].sign(signing.confirm_message(h, p["look_id"], p["action"])))
+    assert completes(fs) == []
+    assert svc.confirm(p["id"], "maya", tap(svc, keys, p))["state"] == "executed"
+
+
+def test_live_service_never_accepts_the_earlier_tap_form():
+    import inspect
+
+    from ulysses.core import Settings
+    from ulysses.service import app as app_mod
+    from ulysses.service import runtime
+
+    assert Settings().replay_accepts_earlier_tap_form is False
+    assert "replay_accepts_earlier_tap_form" not in inspect.getsource(runtime)
+    assert "replay_accepts_earlier_tap_form" not in inspect.getsource(app_mod)
+
+
+@pytest.mark.parametrize("tamper", ["counted", "decision"])
+def test_evidence_chain_covers_the_counted_flag_and_the_decision(world, keys, clock, tamper):
+    svc, fs, store = world
+    h = started(svc, keys, n=1000, looks=10)
+    fs.set_results(1, 100, 100, 0.6)
+    first = svc.look(h)["look_id"]
+    clock.advance(400)
+    p = fire_win(svc, fs, h)
+    sig = tap(svc, keys, p)
+    before = svc.proposal_card(p["id"])["confirm_message"]
+    if tamper == "counted":
+        store._exec("UPDATE looks SET counted = 1 - counted WHERE id=?", (first,))
+    else:
+        d = store.look(first)["decision"]
+        d["chance_to_win"] = 0.5
+        d["outcome"] = "watch"
+        store._exec("UPDATE looks SET decision=? WHERE id=?", (json.dumps(d), first))
+    assert svc.proposal_card(p["id"])["confirm_message"] != before
+    with pytest.raises(Refused):
+        svc.confirm(p["id"], "maya", sig)
+    assert completes(fs) == []
+
+
+def test_evidence_hash_moves_with_counted_and_decision():
+    snap = {"identities": {"control": 1}, "metrics": {}}
+    dec = {"outcome": "hold", "counted": True, "chance_to_win": 0.6}
+    base = signing.evidence_hash([(1, "L1", "h", snap, True, dec)])
+    assert base != signing.evidence_hash([(1, "L1", "h", snap, False, dec)])
+    assert base != signing.evidence_hash([(1, "L1", "h", snap, True, {**dec, "outcome": "win"})])
+    assert base != signing.evidence_hash([(1, "L1", "h", snap, True, {**dec, "chance_to_win": 0.61})])
+
+
+# ================================================================ 10. the response guard
+
+
+def _run_guard(factory, secrets_):
+    from ulysses.service.app import SecretGuard
+
+    sent: list[dict] = []
+    order: list[str] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        order.append("sent:" + message["type"])
+        sent.append(message)
+
+    async def go():
+        await SecretGuard(factory(order), secrets_)({"type": "http", "path": "/x"}, receive, send)
+
+    anyio.run(go)
+    return sent, order
+
+
+def _streaming_app(chunks):
+    def factory(order):
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
+            for i, c in enumerate(chunks):
+                order.append(f"app:chunk{i}")
+                await send({"type": "http.response.body", "body": c, "more_body": i < len(chunks) - 1})
+        return app
+    return factory
+
+
+def test_secret_guard_lets_a_streaming_response_stream():
+    chunks = [b"a" * 100, b"b" * 100, b"c" * 100]
+    sent, order = _run_guard(_streaming_app(chunks), ["some-secret-value"])
+    # Bytes of the first chunk go out before the app produces its last one; nothing is held to the end.
+    assert order.index("sent:http.response.body") < order.index("app:chunk2")
+    assert b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body") == b"".join(chunks)
+    assert sent[0]["status"] == 200
+
+
+def test_secret_guard_cuts_a_stream_carrying_a_secret_even_split_across_chunks():
+    secret = "fs-admin-SECRET-key-0123456789"
+    chunks = [b"x" * 50 + secret[:10].encode(), secret[10:].encode() + b"y" * 50, b"tail"]
+    sent, _ = _run_guard(_streaming_app(chunks), [secret])
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    assert secret.encode() not in body
+    assert sent[-1]["type"] == "http.response.body" and not sent[-1].get("more_body")
+
+
+def test_secret_guard_still_withholds_a_whole_response():
+    secret = "fs-admin-SECRET-key-0123456789"
+
+    def factory(order):
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": json.dumps({"k": secret}).encode()})
+        return app
+
+    sent, _ = _run_guard(factory, [secret])
+    assert sent[0]["status"] == 500 and secret.encode() not in sent[-1]["body"]

@@ -6,13 +6,13 @@ import pytest
 
 from ulysses import boundary as bd
 from ulysses import contract as ct
-from ulysses import power, signing, srm
+from ulysses import power, srm
 from ulysses.core import Invalid
 from ulysses.decision import Observation, evaluate, observation_from_snapshot
 from ulysses.flagsmith.gateway import MetricResult, ResultsSnapshot
 from ulysses.horizon import plan
 
-from .conftest import make_contract, sign_as
+from .conftest import make_contract, read_all, sign_as, tap
 
 PHI = NormalDist().cdf
 ARMS = ["big_cta", "wide_cta", "green_cta"]
@@ -297,8 +297,7 @@ def test_multi_arm_flow_ships_the_winner(world, keys, clock):
     look = svc.look(h)
     assert look["decision"]["outcome"] == "win" and look["decision"]["winner"] == ARMS[1]
     p = look["proposal"]
-    msg = signing.confirm_message(p["contract"], p["look_id"], p["action"])
-    done = svc.confirm(p["id"], "maya", keys["maya"].sign(msg))
+    done = svc.confirm(p["id"], "maya", tap(svc, keys, p))
     assert done["result"]["serving"] == ARMS[1]
     assert fs.served["checkout_button"] == ARMS[1]
     assert fs.experiments[2].raw["rollout_variant"] == fs.experiments[2].variation(ARMS[1]).option_id
@@ -357,7 +356,7 @@ def test_sign_page_draws_the_curves(world, keys):
     hp = plan(min_relative_lift=0.25, baseline_rate=0.10, looks=10)
     h = svc.submit(make_contract(keys, n=hp.identities_per_arm, looks=10,
                                  design=ct.Design(baseline_rate=0.10, min_relative_lift=0.25, power=0.8)))["hash"]
-    client = TestClient(create_app(svc, agent_token="test-agent-token-0123456789"))
+    client = read_all(TestClient(create_app(svc, agent_token="test-agent-token-0123456789")), svc)
     html = client.get(f"/sign/{h}").text
     assert 'id="curves"' in html and "Chance of each outcome" in html and "oc-line" in html
     assert "Traffic split" in html and "0.001" in html
@@ -389,7 +388,7 @@ def test_three_arm_card_names_the_leading_arm_not_the_first_treatment(world, key
     look = svc.look(h)
     assert look["decision"]["outcome"] == "hold" and look["decision"]["winner"] is None
     assert look["flagsmith"]["metrics"]["purchase@wide_cta"]["lift"] == 0.09
-    client = TestClient(create_app(svc, agent_token="test-agent-token-0123456789"))
+    client = read_all(TestClient(create_app(svc, agent_token="test-agent-token-0123456789")), svc)
     html = client.get(f"/card/{look['look_id']}").text
     txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
     assert "control vs wide_cta" in txt and "control vs big_cta" not in txt

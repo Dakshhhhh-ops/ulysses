@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% set nav = "" %}
+{% block title %}Link needed · Ulysses{% endblock %}
+{% block main %}
+<div class="page-head">
+  <p class="label">Read access</p>
+  <h1>This page needs its link</h1>
+  <p class="lede">Contracts and decision cards open only from the link the contract service printed for them (it carries a read capability that expires), or in the browser that enrolled a signer named in the contract.</p>
+  <p class="lede">Ask whoever runs the service for a fresh link, or print the overview link on the service's machine:</p>
+  <p class="cmd"><code>ulysses link</code></p>
+</div>
+{% endblock %}

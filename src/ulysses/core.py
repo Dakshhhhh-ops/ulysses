@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
+from . import capability
 from . import contract as ct
 from . import signing
 from .canonical import content_hash, short_hash
@@ -106,6 +107,15 @@ class Settings:
     poll_seconds: float = 3.0
     slack_webhook: str | None = None
     expected_write_window_seconds: float = 600.0
+    # Read links (sign_url, card_url, confirm_url, the overview link) stop working this long after minting.
+    link_ttl_seconds: float = 24 * 3600.0
+    # An enrolment link stops working this long after it is made (and after its first use).
+    enrol_ttl_seconds: float = 15 * 60.0
+    # The signer session a browser gets when it enrols a key.
+    session_ttl_seconds: float = 7 * 24 * 3600.0
+    # Only scripts/judge_demo.py --replay sets this, to replay taps recorded before the confirmation carried
+    # the looks' evidence chain. The service built by ``ulysses serve`` never accepts that form.
+    replay_accepts_earlier_tap_form: bool = False
 
 
 def _rollout_of(exp: ExperimentInfo) -> dict | None:
@@ -178,35 +188,118 @@ class Ulysses:
         signing.decode_public(public_key)
         existing = self.store.signer(name)
         if existing and existing["public_key"] != public_key:
-            raise Conflict(f"signer {name!r} is already registered with a different key")
+            raise Conflict(f"signer {name!r} is already registered with a different key; "
+                           "a new key needs a rotation signed by the old one")
         other = self.store.signer_by_key(public_key)
         if other and other["name"] != name:
             raise Conflict(f"that public key already belongs to signer {other['name']!r}")
-        self.store.add_signer(name, public_key, self.clock())
+        if not existing:
+            with self.store.transaction():
+                self.store.add_signer(name, public_key, self.clock())
+                self.store.log_signer_event(name, "registered", public_key, self.clock())
         return {"name": name, "public_key": public_key}
 
     def enrol_token(self, name: str) -> str:
-        return self.store.new_enrol_token(name, self.clock())
+        """A one-time enrolment link token for ``name``, valid for ``settings.enrol_ttl_seconds``."""
+        return self.store.new_enrol_token(name, self.clock(), self.settings.enrol_ttl_seconds)
 
     def enrol_with_token(self, token: str, public_key: str) -> dict:
-        name = self.store.peek_enrol_token(token)
+        """Register the browser's key for the name the link was made for. A GET of the link spends nothing;
+        this (the POST carrying the key) spends it. It never replaces a registered key."""
+        name = self.store.peek_enrol_token(token, self.clock())
         if not name:
-            raise Refused("this enrolment link is not valid or has been used")
+            raise Refused("this enrolment link is not valid, has expired or has been used")
         try:
             signing.decode_public(public_key)
         except signing.SignatureError as exc:
             raise Invalid(str(exc)) from exc
+        # Checked before the token is spent, so a bad request does not burn the link.
         other = self.store.signer_by_key(public_key)
         if other and other["name"] != name:
-            # Checked before the token is spent, so a bad request does not burn the link.
             raise Conflict(f"that public key already belongs to signer {other['name']!r}")
+        existing = self.store.signer(name)
+        if existing and existing["public_key"] != public_key:
+            self.store.log_refusal("enrol", f"{name} is registered; an enrolment link cannot replace a key", None,
+                                   self.clock())
+            raise Refused(f"{name!r} is already registered; an enrolment link cannot replace a key. The signer "
+                          "rotates it with a request signed by the current key (ulysses signer rotate)")
         with self.store.transaction():
-            if not self.store.use_enrol_token(token):
-                raise Refused("this enrolment link is not valid or has been used")
-            # An enrolment link issued by the operator may rotate a signer's key.
-            # Contracts naming the old key stop verifying, which is intended.
-            self.store.add_signer(name, public_key, self.clock())
+            if not self.store.use_enrol_token(token, self.clock()):
+                raise Refused("this enrolment link is not valid, has expired or has been used")
+            if not existing:
+                self.store.add_signer(name, public_key, self.clock())
+                self.store.log_signer_event(name, "enrolled", public_key, self.clock())
         return {"name": name, "public_key": public_key}
+
+    def rotation_message(self, name: str, new_key: str) -> bytes:
+        """What ``name``'s current key signs to hand the name to ``new_key`` (see ``signing.rotation_message``)."""
+        cur = self.store.signer(name)
+        if not cur:
+            raise NotFound(f"no signer {name!r}")
+        return signing.rotation_message(name, cur["public_key"], new_key, self.store.rotation_count(name))
+
+    def rotate_signer_key(self, name: str, new_key: str, signature: str) -> dict:
+        """Replace a signer's key, authorised by a signature from the key being replaced. Recorded as an event
+        that ``/api/signers/events`` and the audit bundle show. Contracts naming the old key stop verifying."""
+        cur = self.store.signer(name)
+        if not cur:
+            raise NotFound(f"no signer {name!r}")
+        try:
+            signing.decode_public(new_key)
+        except signing.SignatureError as exc:
+            raise Invalid(str(exc)) from exc
+        if new_key == cur["public_key"]:
+            raise Invalid("that is already the signer's key")
+        other = self.store.signer_by_key(new_key)
+        if other:
+            raise Conflict(f"that public key already belongs to signer {other['name']!r}")
+        seq = self.store.rotation_count(name)
+        msg = signing.rotation_message(name, cur["public_key"], new_key, seq)
+        if not signing.is_valid(cur["public_key"], msg, signature):
+            self.store.log_refusal("rotate", f"{name}: not signed by the current key", None, self.clock())
+            raise Refused(f"a key rotation for {name!r} must be signed by their current key")
+        if not self.store.rotate_signer(name, cur["public_key"], new_key, seq, signature, self.clock()):
+            raise Conflict(f"{name!r}'s key changed while the rotation was checked; nothing was changed")
+        return {"name": name, "public_key": new_key, "replaced": cur["public_key"], "seq": seq}
+
+    # ======================================================== read links
+
+    def _read_secret(self) -> bytes:
+        if getattr(self, "_secret_cache", None) is None:
+            self._secret_cache = self.store.service_secret()
+        return self._secret_cache
+
+    def read_scope(self, environment: str, experiment_id: int) -> str:
+        return capability.experiment_scope(environment, experiment_id)
+
+    def mint_read(self, scope: str) -> str:
+        return capability.mint(self._read_secret(), scope, self.clock() + self.settings.link_ttl_seconds)
+
+    def read_allowed(self, scope: str, token: str | None) -> bool:
+        return capability.valid(self._read_secret(), scope, token, self.clock())
+
+    def link(self, path: str, contract_hash: str) -> str:
+        """``public_url + path`` with a read capability for the experiment ``contract_hash`` governs."""
+        row = self.store.contract_row(contract_hash)
+        if not row:
+            return f"{self.settings.public_url}{path}"
+        cap = self.mint_read(self.read_scope(row["environment"], row["experiment_id"]))
+        return f"{self.settings.public_url}{path}{'&' if '?' in path else '?'}cap={cap}"
+
+    def overview_link(self) -> str:
+        """The operator's link to the contract list: reads every experiment until it expires."""
+        return f"{self.settings.public_url}/?cap={self.mint_read(capability.ALL)}"
+
+    def signer_session(self, name: str) -> str:
+        cur = self.store.signer(name)
+        if not cur:
+            raise NotFound(f"no signer {name!r}")
+        return capability.session(self._read_secret(), name, cur["public_key"],
+                                  self.clock() + self.settings.session_ttl_seconds)
+
+    def session_signer(self, token: str | None) -> str | None:
+        return capability.session_signer(self._read_secret(), token, self.clock(),
+                                         lambda n: (self.store.signer(n) or {}).get("public_key"))
 
     # ============================================================== contracts
 
@@ -471,7 +564,7 @@ class Ulysses:
             "expires_in_hours": (None if (start_by is None or not unstarted)
                                  else round((start_by - self.clock()) / 3600, 1)),
             "supersedes": row["supersedes"],
-            "sign_url": f"{self.settings.public_url}/sign/{h}",
+            "sign_url": self.link(f"/sign/{h}", h),
             "summary": summarise(c),
             "policy": {"problems": problems, "warnings": warnings,
                        "override_reason": c.design.override_reason if c.design else None},
@@ -701,7 +794,7 @@ class Ulysses:
         if not self._signature_valid(c, h, "owner"):
             self.store.log_refusal("start", "no valid owner signature", h, now)
             raise Refused("this contract has no valid owner signature; it cannot start an experiment",
-                          sign_url=f"{self.settings.public_url}/sign/{h}")
+                          sign_url=self.link(f"/sign/{h}", h))
         if not self._fully_signed(c, h):
             self.store.log_refusal("start", "amendment lacks the second signature", h, now)
             raise Refused("this amendment needs both the owner and the second signer")
@@ -889,7 +982,7 @@ class Ulysses:
                 pid = self.store.add_proposal(contract_hash=h, look_id=look_id, outcome=d.outcome,
                                               action=d.action or "keep_control", state="pending", now=self.clock())
         out["look_id"] = look_id
-        out["card_url"] = f"{self.settings.public_url}/card/{look_id}"
+        out["card_url"] = self.link(f"/card/{look_id}", h)
         if pid:
             out["proposal"] = self._proposal_view(self.store.proposal(pid))
             self._emit("fired", {"hash": h, "outcome": d.outcome, "action": d.action, "reason": d.reason,
@@ -935,7 +1028,7 @@ class Ulysses:
         return {
             "id": p["id"], "outcome": p["outcome"], "action": p["action"], "state": p["state"],
             "look_id": p["look_id"], "contract": p["contract_hash"],
-            "confirm_url": f"{self.settings.public_url}/card/{p['look_id'] or p['id']}",
+            "confirm_url": self.link(f"/card/{p['look_id'] or p['id']}", p["contract_hash"]),
             "result": json.loads(p["result"]) if p["result"] else None,
         }
 
@@ -972,26 +1065,25 @@ class Ulysses:
         """What the owner signs to confirm proposal ``p`` (the text the card shows).
 
         For an action a look fired it covers, besides the contract, the look and the action, a hash chain over
-        every look on the experiment up to and including that look (``signing.evidence_hash``), so a later edit
-        to any of those looks' numbers, or a dropped look, breaks the owner's signature.
+        every look on the experiment up to and including that look: Flagsmith's numbers, the counted flag and
+        the decision (``signing.evidence_hash``), so a later edit to any of those looks, or a dropped look,
+        breaks the owner's signature. An amendment's immediate action names the proposal id instead.
         """
         if not p["look_id"]:
-            return self._legacy_confirm_message(p)
+            return signing.confirm_message(p["contract_hash"], p["id"], p["action"])
         lk = self.store.look(p["look_id"])
         looks = [] if not lk else [x for x in self.store.looks(lk["environment"], lk["experiment_id"])
                                    if x["seq"] <= lk["seq"]]
-        evidence = signing.evidence_hash((x["seq"], x["id"], x["contract_hash"], x["snapshot"]) for x in looks)
+        evidence = signing.evidence_hash((x["seq"], x["id"], x["contract_hash"], x["snapshot"], bool(x["counted"]),
+                                          x["decision"]) for x in looks)
         return signing.confirm_message(p["contract_hash"], p["look_id"], p["action"], evidence)
 
-    @staticmethod
-    def _legacy_confirm_message(p: dict) -> bytes:
-        """The earlier confirmation text: contract, look or proposal, and action, without the looks' numbers."""
-        return signing.confirm_message(p["contract_hash"], p["look_id"] or p["id"], p["action"])
-
     def _confirm_valid(self, c: ct.Contract, p: dict, signature: str | None) -> bool:
-        """The owner's tap verifies, in the current form or the earlier one (``ulysses verify`` marks the latter)."""
-        return any(signing.is_valid(c.owner.public_key, m, signature or "")
-                   for m in (self.confirm_message(p), self._legacy_confirm_message(p)))
+        """The owner's tap verifies over the card's text (no other form, outside a replay of an old recording)."""
+        msgs = [self.confirm_message(p)]
+        if self.settings.replay_accepts_earlier_tap_form and p["look_id"]:
+            msgs.append(signing.confirm_message(p["contract_hash"], p["look_id"], p["action"]))
+        return any(signing.is_valid(c.owner.public_key, m, signature or "") for m in msgs)
 
     def confirm(self, pid: str, signer: str, signature: str) -> dict:
         p = self.store.proposal(pid)
@@ -1004,10 +1096,9 @@ class Ulysses:
             raise Refused(f"this proposal is {p['state']}; there is nothing to confirm")
         if signer != c.owner.name:
             raise Refused(f"only the owner ({c.owner.name}) confirms the pre-signed action")
-        msg = self.confirm_message(p)
         try:
-            if not signing.is_valid(c.owner.public_key, self._legacy_confirm_message(p), signature):
-                signing.verify(c.owner.public_key, msg, signature)
+            if not self._confirm_valid(c, p, signature):
+                signing.verify(c.owner.public_key, self.confirm_message(p), signature)
         except signing.SignatureError as exc:
             self.store.log_refusal("confirm", str(exc), p["contract_hash"], self.clock())
             raise Refused(f"confirmation signature rejected: {exc}") from exc
@@ -1050,7 +1141,7 @@ class Ulysses:
         c, row = self._governing(p)
         if p["state"] not in ("confirmed", "failed"):
             raise Refused("waiting for the owner's one-tap confirmation",
-                          confirm_url=f"{self.settings.public_url}/card/{p['look_id'] or p['id']}")
+                          confirm_url=self.link(f"/card/{p['look_id'] or p['id']}", h))
         if not self._fully_signed(c, h):
             raise Refused("the governing contract's signatures no longer verify")
         if p["confirm_signer"] != c.owner.name or not self._confirm_valid(c, p, p["confirm_signature"]):
@@ -1166,7 +1257,7 @@ class Ulysses:
             raise Refused("this amendment needs both the owner and the second signer before it authorises "
                           f"anything; still missing: {', '.join(missing)}",
                           needs=missing, supersedes=c.amendment.supersedes,
-                          sign_urls={r: f"{self.settings.public_url}/sign/{h}?role={r}" for r in missing})
+                          sign_urls={r: self.link(f"/sign/{h}?role={r}", h) for r in missing})
         props = [p for p in self.store.proposals_for(h) if p["state"] in ("pending", "confirmed", "executed", "failed")]
         if not props:
             self.store.log_refusal("execute", f"no fired outcome authorises {action}", h, self.clock())
@@ -1212,8 +1303,8 @@ class Ulysses:
             raise Invalid("amended contract does not validate", errors=_errors(exc)) from exc
         out = self.submit(new)
         out["sign_urls"] = {
-            "owner": f"{self.settings.public_url}/sign/{new.hash}?role=owner",
-            "second_signer": f"{self.settings.public_url}/sign/{new.hash}?role=second_signer",
+            "owner": self.link(f"/sign/{new.hash}?role=owner", new.hash),
+            "second_signer": self.link(f"/sign/{new.hash}?role=second_signer", new.hash),
         }
         return out
 

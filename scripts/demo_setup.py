@@ -91,7 +91,8 @@ def main() -> None:
         kp = ensure_key(name)
         existing = store.signer(name)
         if existing and existing["public_key"] != kp.public:
-            sys.exit(f"signer {name!r} is registered with a different key; enrol again with a new link")
+            sys.exit(f"signer {name!r} is registered with a different key; rotate it with `ulysses signer rotate {name}` "
+                     "or start from a fresh database")
         store.add_signer(name, kp.public, time.time())
     out = {
         "environment": demo["environment_key"], "project_id": demo["project_id"],

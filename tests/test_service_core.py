@@ -11,7 +11,7 @@ from ulysses.canonical import content_hash
 from ulysses.core import Conflict, Invalid, Refused
 from ulysses.flagsmith.gateway import AuditEntry, FlagsmithError
 
-from .conftest import make_contract, sign_as
+from .conftest import make_contract, sign_as, tap
 
 PHI = NormalDist().cdf
 
@@ -22,8 +22,7 @@ def submit(svc, keys, **kw):
 
 def confirm(svc, keys, look_or_pid_view, who="maya"):
     p = look_or_pid_view["proposal"]
-    msg = signing.confirm_message(p["contract"], p["look_id"] or p["id"], p["action"])
-    return svc.confirm(p["id"], who, keys[who].sign(msg))
+    return svc.confirm(p["id"], who, tap(svc, keys, p, who))
 
 
 # ---- signing and starting ---------------------------------------------------------

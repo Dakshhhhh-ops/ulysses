@@ -19,7 +19,7 @@ from ulysses.core import Settings, Ulysses
 from ulysses.flagsmith.fake import FakeFlagsmith
 from ulysses.store import Store
 
-from .conftest import make_contract, sign_as
+from .conftest import make_contract, sign_as, tap
 
 PHI = NormalDist().cdf
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,7 +104,8 @@ def test_unpinned_bundle_is_consistent_not_verified(won):
 
 def _evidence(looks, h, upto):
     ordered = sorted(looks, key=lambda lk: lk["seq"])
-    return signing.evidence_hash((lk["seq"], lk["id"], h, lk["flagsmith"]) for lk in ordered if lk["seq"] <= upto)
+    return signing.evidence_hash((lk["seq"], lk["id"], h, lk["flagsmith"], bool(lk["recorded"].get("counted")),
+                                  lk["recorded"]) for lk in ordered if lk["seq"] <= upto)
 
 
 def _forge(bundle, h_old):
@@ -429,17 +430,23 @@ def test_dropped_look_breaks_the_owners_tap(won, keys):
     assert [c for c in checks if c.name.endswith(" confirmation")][0].status == "FAIL"
 
 
-def test_earlier_form_of_the_tap_verifies_but_leaves_evidence_unchecked(world, keys, clock):
-    """A tap over the earlier message (contract, look, action) is still accepted; the verifier says what it lacks."""
+def test_earlier_form_of_the_tap_is_refused_live_and_leaves_evidence_unchecked_in_a_bundle(world, keys, clock):
+    """The service refuses a tap over the earlier message (contract, look, action). A bundle that holds one
+    (data/verify-judge-demo-cta.json was recorded that way) still verifies the tap; the verifier says what it lacks."""
+    from ulysses.core import Refused
+
     svc, fs, store = world
     h = svc.submit(make_contract(keys, n=1000, looks=10))["hash"]
     sign_as(svc, keys, h)
     svc.start_under_contract(h)
     fs.set_results(1, 400, 402, PHI(4.0), guardrails={"refunds": 0.45})
     p = svc.look(h)["proposal"]
-    legacy = signing.confirm_message(h, p["look_id"], p["action"])
-    assert svc.confirm(p["id"], "maya", keys["maya"].sign(legacy))["state"] == "executed"
+    legacy = keys["maya"].sign(signing.confirm_message(h, p["look_id"], p["action"]))
+    with pytest.raises(Refused):
+        svc.confirm(p["id"], "maya", legacy)
+    assert svc.confirm(p["id"], "maya", tap(svc, keys, p))["state"] == "executed"
     b = vf.export_bundle(store, "env-key", 1, flagsmith=vf.flagsmith_state(fs, "env-key", 1))
+    next(o for o in b["outcomes"] if o["id"] == p["id"])["confirm_signature"] = legacy
     checks = _pinned(b, keys)
     assert not _fails(checks)
     assert _by_name(checks, f"outcome {p['id']} evidence")[0].status == "SKIP"
@@ -459,7 +466,8 @@ def test_card_message_covers_the_looks_up_to_the_fired_one(world, keys, clock):
     msg = svc.proposal_card(p["id"])["confirm_message"]
     looks = store.looks("env-key", 1)
     assert len(looks) == 2
-    ev = signing.evidence_hash((x["seq"], x["id"], x["contract_hash"], x["snapshot"]) for x in looks)
+    ev = signing.evidence_hash((x["seq"], x["id"], x["contract_hash"], x["snapshot"], bool(x["counted"]),
+                                x["decision"]) for x in looks)
     assert msg == signing.confirm_message(h, p["look_id"], p["action"], ev).decode()
     assert svc.look_view(p["look_id"])["confirm_message"] == msg
     # A signature over other evidence is refused.

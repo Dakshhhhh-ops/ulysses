@@ -11,6 +11,7 @@ from ulysses import signing
 from ulysses.mcp_server import ServiceClient, build_server
 from ulysses.service.app import create_app
 
+from .conftest import tap
 from .test_service_http import FS_KEY, TOKEN
 
 PHI = NormalDist().cdf
@@ -69,7 +70,7 @@ def test_agent_session_through_the_tools(tools, keys):
     assert read["ok"] and read["experiment"]["flag"] == "checkout_button"
     assert drafted["ok"], drafted
     h = drafted["hash"]
-    assert drafted["sign_url"].endswith(h)
+    assert f"/sign/{h}?cap=" in drafted["sign_url"]
     refused = call("start_under_contract", contract_hash=h)
     assert not refused["ok"] and refused["status"] == 403
     svc.sign(h, "owner", "maya", keys["maya"].sign(signing.contract_message(h, "owner")))
@@ -88,7 +89,7 @@ def test_agent_session_through_the_tools(tools, keys):
     wrong = call("execute", contract_hash=h, action="keep_control")
     assert not wrong["ok"] and wrong["status"] == 403
     p = fire["proposal"]
-    svc.confirm(p["id"], "maya", keys["maya"].sign(signing.confirm_message(h, p["look_id"], p["action"])))
+    svc.confirm(p["id"], "maya", tap(svc, keys, p))
     done = call("execute", contract_hash=h, action="ship_treatment")
     assert done["ok"] and done["state"] == "executed"
     assert fs.served["checkout_button"] == "big_cta"
@@ -165,3 +166,50 @@ def test_amendment_tool_drafts_only_and_execute_names_the_missing_signer(tools, 
     assert not [w for w in fs.writes if w[0] == "complete"]
     svc.sign(a, "second_signer", "sam", keys["sam"].sign(signing.contract_message(a, "second_signer")))
     assert svc.store.contract_row(h)["state"] == "superseded"
+
+
+def test_every_tool_carries_mcp_annotations(tools):
+    _, server, _, _ = tools
+    listed = {t.name: t.annotations for t in anyio.run(server.list_tools)}
+    want = {  # (readOnly, destructive, idempotent, openWorld)
+        "read_experiment": (True, False, True, True),
+        "execute": (False, True, True, True),
+        "sign_contract": (False, False, True, False),
+        "start_under_contract": (False, False, False, True),
+        "look": (False, False, False, True),
+        "request_amendment": (False, False, True, False),
+    }
+    assert set(listed) == set(want)
+    for name, (ro, de, idem, ow) in want.items():
+        a = listed[name]
+        assert a is not None and a.title, name
+        assert (a.read_only_hint, a.destructive_hint, a.idempotent_hint, a.open_world_hint) == (ro, de, idem, ow), name
+
+
+def test_signing_link_goes_by_url_elicitation_when_the_client_supports_it(tools):
+    from mcp import Client
+    from mcp.types import ElicitResult
+
+    _, server, _, fs = tools
+    fs.rate[1] = 50.0
+    asked = []
+
+    async def on_elicit(context, params):
+        asked.append(params)
+        return ElicitResult(action="accept")
+
+    args = {"environment": "env-key", "experiment_id": 1, "owner": "maya", "second_signer": "sam",
+            "min_relative_lift": 0.3, "baseline_rate": 0.1}
+
+    async def run(**kw):
+        async with Client(server, mode="legacy", **kw) as c:
+            return _result(await c.call_tool("sign_contract", args))
+
+    out = anyio.run(lambda: run(elicitation_callback=on_elicit))
+    assert out["ok"] and len(asked) == 1
+    assert asked[0].mode == "url" and asked[0].url == out["sign_url"] and "cap=" in asked[0].url
+    assert out["links_offered"] == [{"url": out["sign_url"], "via": "elicitation:accept"}]
+    # A client without elicitation gets the same link in the result, and nothing is asked.
+    plain = anyio.run(run)
+    assert plain["ok"] and plain["sign_url"] and len(asked) == 1
+    assert plain["links_offered"] == [{"url": plain["sign_url"], "via": "link"}]

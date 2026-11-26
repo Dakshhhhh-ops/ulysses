@@ -184,11 +184,8 @@ def export_bundle(store, environment: str, experiment_id: int, *, flagsmith: dic
             "seq": lk["seq"],
             "contract_hash": lk["contract_hash"],
             "flagsmith": _strip_snapshot(lk["snapshot"]),
-            "recorded": {k: lk["decision"].get(k) for k in
-                         ("outcome", "action", "counted", "look_number", "identities_per_arm", "fraction",
-                          "chance_to_win", "boundary_z", "boundary_chance", "guardrail")}
-            | {"guardrails": [{k: g.get(k) for k in ("name", "chance_worse", "boundary_z", "state")}
-                              for g in lk["decision"].get("guardrails") or []]},
+            # The same projection the owner's tap covers (signing.evidence_hash).
+            "recorded": signing.decision_record(lk["decision"]),
         })
     outcomes = []
     for h in chain:
@@ -215,6 +212,9 @@ def export_bundle(store, environment: str, experiment_id: int, *, flagsmith: dic
         "traffic": traffic,
         "contracts": contracts,
         "public_keys": {s["name"]: s["public_key"] for s in store.signers() if s["name"] in names},
+        # Each key rotation of those signers, signed by the key it replaced (no times).
+        "key_rotations": [{k: e[k] for k in ("signer", "old_key", "new_key", "seq", "signature")}
+                          for e in store.signer_events(names) if e["kind"] == "rotated"],
         "looks": looks,
         "outcomes": outcomes,
         "deviations": deviations,
@@ -334,6 +334,11 @@ def _shape_problem(bundle: Any) -> str | None:
     keys = bundle.get("public_keys")
     if not opt(keys, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in (keys or {}).items()):
         return "public_keys must map signer names to key strings"
+    rots = bundle.get("key_rotations")
+    if not opt(rots, list) or not all(isinstance(r, dict) and all(isinstance(r.get(k), str) for k in
+                                      ("signer", "old_key", "new_key", "signature")) and is_int(r.get("seq"))
+                                      for r in rots or []):
+        return "key_rotations must be a list of objects with string signer, old_key, new_key, signature and integer seq"
     seqs: set[int] = set()
     for i, lk in enumerate(bundle.get("looks") or []):
         if not isinstance(lk.get("id"), str) or not is_int(lk.get("seq")) or not isinstance(lk.get("contract_hash"), str):
@@ -477,6 +482,29 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
         add("FAIL", "contracts", "no contract in the bundle could be checked")
         return
 
+    # ---- key rotations ---------------------------------------------------------------------
+    # A rotation hands a signer's name to a new key; it counts only if the key it replaced signed it.
+    rotated_to: dict[tuple[str, str], str] = {}
+    for r in bundle.get("key_rotations") or []:
+        label = f"key rotation {r['signer']} #{r['seq']}"
+        msg = signing.rotation_message(r["signer"], r["old_key"], r["new_key"], r["seq"])
+        if signing.is_valid(r["old_key"], msg, r["signature"]):
+            rotated_to[(r["signer"], r["old_key"])] = r["new_key"]
+            add("PASS", label, f"{r['old_key']} handed {r['signer']} to {r['new_key']}, signed by the old key")
+        else:
+            add("FAIL", label, f"the rotation to {r['new_key']} is not signed by the key it replaced, {r['old_key']}")
+
+    def _rotated(name: str, frm: str, to: str) -> bool:
+        seen = {frm}
+        while (name, frm) in rotated_to:
+            frm = rotated_to[(name, frm)]
+            if frm == to:
+                return True
+            if frm in seen:
+                return False
+            seen.add(frm)
+        return False
+
     # ---- public keys -----------------------------------------------------------------------
     registry = bundle.get("public_keys") or {}
     named_keys: dict[str, str] = {}
@@ -491,8 +519,11 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
         trusted = trusted_keys.get(name)
         if trusted is not None and trusted != key:
             add("FAIL", f"public key {name}", f"the contract names {key}; you trust {trusted}")
-        elif reg is not None and reg != key:
+        elif reg is not None and reg != key and not _rotated(name, key, reg):
             add("FAIL", f"public key {name}", f"{registry_said} {reg}, the contract names {key}")
+        elif reg is not None and reg != key:
+            add("PASS", f"public key {name}", f"the contract names {key}; {name} later rotated to {reg} by "
+                                             "rotations each signed by the key it replaced")
         elif trusted is not None:
             pinned_keys += 1
             add("PASS", f"public key {name}", f"matches the key you supplied, {key}")
@@ -645,7 +676,8 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
 
     # ---- outcomes --------------------------------------------------------------------------
     executed = [p for p in outcomes if p.get("state") == "executed"]
-    by_seq = [(lk["seq"], lk["id"], lk["contract_hash"], lk.get("flagsmith")) for lk in looks]
+    by_seq = [(lk["seq"], lk["id"], lk["contract_hash"], lk.get("flagsmith"),
+               bool((lk.get("recorded") or {}).get("counted")), lk.get("recorded")) for lk in looks]
     for p in outcomes:
         pid = p.get("id", "?")
         name = f"outcome {pid}"
