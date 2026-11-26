@@ -16,7 +16,7 @@ Needs only Docker and uv. It:
 6. prints each look and the outcome, then stops what it started. The Flagsmith containers keep running
    so you can open the dashboard; ``docker compose -p ulysses down -v`` removes them.
 
-Flagsmith refreshes results at most every five minutes, so expect 20 to 40 minutes.
+Flagsmith refreshes results at most every five minutes; a measured run from a fresh clone took about half an hour.
 
     uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down]
 """
@@ -194,7 +194,7 @@ def main() -> None:
 
     procs: list[subprocess.Popen] = []
     try:
-        step(f"starting the contract service on port {a.port} (it alone holds the Flagsmith key)")
+        step(f"starting the contract service on port {a.port} (it holds the Flagsmith admin key; the agent never sees it)")
         host = "0.0.0.0" if sys.platform.startswith("linux") else "127.0.0.1"  # Linux containers reach the bridge IP
         procs.append(subprocess.Popen([py, "-m", "ulysses.cli", "serve", "--host", host, "--port", str(a.port)],
                                       cwd=ROOT, env={**operator, "PYTHONPATH": str(ROOT / "src")}))

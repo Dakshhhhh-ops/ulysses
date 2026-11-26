@@ -47,7 +47,8 @@ def main() -> None:
     kp = signing.load_keypair(a.owner, prompt=True)
     store = Store(ROOT / a.db if not Path(a.db).is_absolute() else a.db)
     print(f"{TAG} signing as {a.owner} with an encrypted key file, in place of the browser tap", flush=True)
-    done: set[str] = set()
+    done: set[tuple[str, str]] = set()
+    tries: dict[str, int] = {}
     end = time.time() + a.minutes * 60
     with httpx.Client(base_url=url, timeout=60) as http:
         while time.time() < end:
@@ -65,8 +66,14 @@ def main() -> None:
                             sig = kp.sign(signing.contract_message(h, "owner"))
                             r = http.post("/human/sign", json={"hash": h, "role": "owner", "signer": a.owner,
                                                                "signature": sig})
-                            print(f"{TAG} signed {h[:19]} -> {r.status_code} {r.json().get('state')}", flush=True)
-                        done.add(("sign", h))
+                            body = r.json()
+                            print(f"{TAG} signed {h[:19]} -> {r.status_code} {body.get('state') or body.get('detail')}",
+                                  flush=True)
+                            tries[h] = tries.get(h, 0) + 1
+                            if r.status_code < 400 or tries[h] >= 5:
+                                done.add(("sign", h))
+                        else:
+                            done.add(("sign", h))
                     for p in store.proposals_for(h):
                         if p["state"] != "pending" or ("confirm", p["id"]) in done:
                             continue
