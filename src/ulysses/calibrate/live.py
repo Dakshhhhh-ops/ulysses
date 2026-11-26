@@ -43,6 +43,7 @@ from .offline import LOSE, WIN, wilson
 
 log = logging.getLogger("ulysses.calibrate.live")
 REFRESH_GAP = 5 * 60 + 10  # Flagsmith's floor plus a margin
+FLUSH_EVERY = 100  # identities between event flushes
 READ_DEADLINE = 420  # Flagsmith's task processor recomputes queued results one by one
 
 
@@ -156,6 +157,10 @@ def run(
             s.served[v] += 1
             if rng.random() < rate:
                 sdk.track_event(lab.CAL_EVENT, identifier=ident)
+            if s.sent % FLUSH_EVERY == 0:
+                # The SDK's event buffer drops the oldest events when it overflows (seen in batch ab1aca),
+                # so flush in small batches instead of once per look.
+                sdk.flush_events()
 
     last_refresh = 0.0
     with trace.open("a", encoding="utf-8") as tf:
@@ -291,7 +296,7 @@ def summarise_trace(path: str | Path, *, signed_looks: int | None = None, signed
     last_look = max(r["look"] for r in rows)
     truncated = last_look < looks
     n = len(by_exp)
-    bw = bl = fw = fl = cw = cl = ch = holding = skipped = 0
+    bw = bl = fw = fl = cw = cl = ch = holding = skipped = short = 0
     for eid, rs in by_exp.items():
         rs = sorted(rs, key=lambda x: x["look"])
         banner = contract_call = None
@@ -312,6 +317,8 @@ def summarise_trace(path: str | Path, *, signed_looks: int | None = None, signed
         bw += banner == "winning"
         bl += banner == "losing"
         last = rs[-1]
+        if contract_call is None and "error" not in last and min(last["n_control"], last["n_treatment"]) < horizon:
+            short += 1
         if not truncated and "error" not in last:
             c = last.get("chance_to_win")
             fw += c is not None and c > WIN
@@ -344,14 +351,17 @@ def summarise_trace(path: str | Path, *, signed_looks: int | None = None, signed
         md.append(f"| Read once at the final look | {pct(fw)} | {pct(fl)} | {pct(fw + fl)} |")
     md.append(f"| Ulysses contract, alpha {alpha} two-sided | {pct(cw)} | {pct(cl)} | {pct(cw + cl)} |")
     md += ["", (f"Contract outcomes: {cw} wins, {cl} losses, {ch} at the horizon with no decision, {holding} still "
-                f"holding" + (f" when the run stopped at look {last_look} of {looks}." if truncated else "."))]
+                f"holding" + (f" when the run stopped at look {last_look} of {looks}." if truncated else ".")
+                + (f" In {short} of them Flagsmith had counted fewer than the {horizon}-per-arm horizon in one arm at "
+                   "the last read (events sent but not counted), so the contract never reached its final look."
+                   if short and not truncated else ""))]
     return {"label": "Live engine calibration on self-hosted Flagsmith with synthetic identities (not user traffic)",
             "batch": batch, "experiments": n, "design": {"looks": looks, "per_arm_per_look": per_arm,
                                                           "horizon": horizon, "alpha": alpha, "rate": rate},
             "looks": looks, "looks_read": last_look, "truncated": truncated, "skipped_reads": skipped,
             "banner_any_look": {"winning": bw, "losing": bl},
             "banner_final_look": None if truncated else {"winning": fw, "losing": fl},
-            "contract": {"win": cw, "loss": cl, "horizon": ch, "holding": holding},
+            "contract": {"win": cw, "loss": cl, "horizon": ch, "holding": holding, "short_of_horizon": short},
             "markdown": "\n".join(md) + "\n"}
 
 

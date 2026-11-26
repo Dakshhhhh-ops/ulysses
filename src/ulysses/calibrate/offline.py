@@ -367,3 +367,45 @@ def run(out_dir: str | Path = ".run/calibration", runs: int = 2000, flagsmith_sr
     md = markdown(result)
     (out / "offline.md").write_text(md, encoding="utf-8")
     return {**result, "markdown": md, "paths": [str(out / "offline.json"), str(out / "offline.md")]}
+
+
+def guardrail_sweep(alphas: tuple[float, ...] = (0.025, 0.01), *, runs: int = 2000, seeds: tuple[int, ...] = (11, 12),
+                    looks: int = 30, per_arm_per_look: int = 100, rate: float = 0.10,
+                    flagsmith_src: str | None = None) -> str:
+    """False-stop rate of a guardrail with no effect, for several one-sided budgets (how the default was chosen).
+
+        uv run python -c "from ulysses.calibrate import offline; print(offline.guardrail_sweep())"
+    """
+    stats, consts, _ = flagsmith_source.load(flagsmith_src)
+    lines = [f"Guardrail false stops in A/A: {rate:.0%} in both arms, {looks} looks of {per_arm_per_look} per arm, "
+             f"seeds {', '.join(map(str, seeds))}. Simulated synthetic units.", "",
+             "| Budget | not increase | not decrease | Runs |", "|---|---|---|---|"]
+    for alpha in alphas:
+        cs = {}
+        for d in ("not_increase", "not_decrease"):
+            data = _contract(0.05, looks, looks * per_arm_per_look, d).canonical()
+            data["guardrails"][0]["alpha"] = alpha
+            cs[d] = ct.from_canonical(data)
+        stops = {d: 0 for d in cs}
+        n = 0
+        for seed in seeds:
+            rng = np.random.default_rng(seed)
+            for _ in range(runs):
+                n += 1
+                g = _chances(stats, consts, rng.binomial(per_arm_per_look, rate, size=looks).cumsum(),
+                             rng.binomial(per_arm_per_look, rate, size=looks).cumsum(), per_arm_per_look, looks)
+                for d, gc in cs.items():
+                    worse = [None if x is None else (x if d == "not_increase" else 1 - x) for x in g]
+                    prior: list[float] = []
+                    for k, w in enumerate(worse):
+                        m = per_arm_per_look * (k + 1)
+                        dd = evaluate(gc, prior, Observation(m, m, 0.5, {"guard": w}))
+                        if dd.counted:
+                            prior.append(dd.fraction)
+                        if dd.outcome == "guardrail_breach":
+                            stops[d] += 1
+                            break
+                        if dd.outcome == "horizon":
+                            break
+        lines.append(f"| {alpha} | {_pct(stops['not_increase'], n)} | {_pct(stops['not_decrease'], n)} | {n} |")
+    return "\n".join(lines) + "\n"
