@@ -38,3 +38,6 @@ Thumbs.db
 web/node_modules/
 web/dev/
 .design-refs/
+
+# Written by `ulysses calibrate summarise` next to a shipped trace
+data/live.md

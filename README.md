@@ -4,20 +4,22 @@ Ulysses lets the owner of a Flagsmith experiment sign the stop rule before any d
 
 Flagsmith's chance to beat control is a fair summary of the evidence each time you read it. The trouble starts when "over 95%" becomes the moment to ship and someone, or an agent, checks every five minutes. Ulysses keeps Flagsmith's number exactly as it is and adds the rule that makes acting on it safe.
 
-How often a variation that does nothing gets shipped, measured on Flagsmith's own `stats.py` (offline simulation, synthetic units, [pending: N] A/A experiments, 30 looks of 100 per arm):
+How often a variation that does nothing gets shipped, measured on Flagsmith's own `stats.py` (offline simulation by `uv run ulysses calibrate offline`: 10,000 A/A experiments, 30 looks of 100 synthetic identities per arm, base rate 10%; simulated units, not user traffic):
 
 <!-- headline-table:start -->
 | Rule | Error level it is meant to have | Ships a do-nothing variation |
 |---|---|---|
-| Stop at the first look over 95% | 10% two-sided, read 30 times | [pending: `uv run ulysses calibrate offline`] |
-| Read once at the end, ship if over 95% | 10% two-sided | [pending] |
-| Ulysses contract, alpha 0.10 (same level as the 95% rule) | 10% two-sided | [pending] |
-| Ulysses contract, alpha 0.05 (the default) | 5% two-sided | [pending] |
+| Stop at the first look over 95% | 10% two-sided, read 30 times | 13.4% (12.7-14.1) |
+| Read once at the end, ship if over 95% | 10% two-sided | 3.9% (3.5-4.3) |
+| Ulysses contract, alpha 0.10 (same level as the 95% rule) | 10% two-sided | 3.0% (2.7-3.4) |
+| Ulysses contract, alpha 0.05 (the default) | 5% two-sided | 1.3% (1.1-1.6) |
 
-Counting false losers as well (a false Losing call keeps control, so it ships nothing), any-direction false calls were: first look over 95% or under 5% [pending]; contract at alpha 0.10 [pending]; contract at alpha 0.05 [pending]. Full tables are under [Impact](#impact).
+Counting false losers as well (a false Losing call keeps control, so it ships nothing), any-direction false calls were 44.7% for the first look over 95% or under 5%, 9.8% for a single read at the end, 10.1% for the contract at alpha 0.10 and 5.3% at alpha 0.05. Ranges are 95% Wilson intervals; full tables are under [Impact](#impact).
 <!-- headline-table:end -->
 
-![The signing page: the owner reads the contract and its boundary, then signs with a key that lives in their browser](docs/screenshots/sign-contract.png)
+![A Ulysses decision card at look 3 of 10: Flagsmith's chance to win is 96.00%, the contract needs 99.996%, and the card says HOLD](docs/screenshots/hold-card.png)
+
+The card above is the whole idea. Flagsmith's docs would call this variation Winning; the contract signed before the start needs 99.996% at look 3 of 10, so it holds. (This screenshot is a UI fixture, as its amber chip says: the page rendered over a test double of Flagsmith, not live traffic. The demo below produces the same cards from a real Flagsmith.)
 
 What makes this different from an agent that asks "may I ship?": the approval that matters comes before the experiment starts, when nobody has a result to be excited about. The owner signs the horizon, the number of looks, the boundary at each look and the action for each outcome. Later, when the contract fires, the owner confirms with one tap, and that tap can only confirm the action already signed. The service holds the Flagsmith key; the agent holds only a Ulysses token, with no Flagsmith key and no signing key, so through Ulysses it cannot start an unsigned experiment, ship early, or ship the other arm. That holds as long as the service, its `.env` and the signer keys sit where the agent's process cannot read them (see [Limitations](#limitations)).
 
@@ -138,7 +140,51 @@ The cost Ulysses removes is a shipped variation that does nothing, or does harm,
 Produced by `uv run ulysses calibrate offline` (writes `.run/calibration/offline.md`). Simulated synthetic units, not user traffic.
 
 <!-- offline-table:start -->
-[pending: paste the tables from `uv run ulysses calibrate offline`: false ships first, then any false call, then the real-lift table and the identities saved against a fixed horizon]
+Flagsmith `stats.py` (v2.295.2, sha256 `97c5ebfca7c8`) on 10000 simulated A/A experiments (5 seeds pooled: 62944, 101, 202, 303, 404), 30 looks of 100 synthetic identities per arm, base rate 10%. Simulated units, not user traffic. 95% Wilson intervals.
+
+False ships: how often a variation that does nothing would be shipped.
+
+| Rule | Level | Ships a do-nothing variation (false Winning) |
+|---|---|---|
+| Read once at the final look (95%/5%) | 10% two-sided | 3.9% (3.5-4.3) |
+| Stop at the first look over 95% or under 5% | 10% two-sided, read 30 times | 13.4% (12.7-14.1) |
+| Ulysses contract, alpha 0.10 | 10% two-sided | 3.0% (2.7-3.4) |
+| Ulysses contract, alpha 0.05 (default) | 5% two-sided | 1.3% (1.1-1.6) |
+
+Any false call, counting false Losing too (a false Losing keeps control, so it ships nothing):
+
+| Rule | False Winning | False Losing | Any false call |
+|---|---|---|---|
+| Read once at the final look | 3.9% (3.5-4.3) | 5.9% (5.5-6.4) | 9.8% (9.3-10.4) |
+| Stop at the first look over 95% or under 5% | 13.4% (12.7-14.1) | 31.3% (30.4-32.2) | 44.7% (43.7-45.6) |
+| Ulysses contract, alpha 0.10 | 3.0% (2.7-3.4) | 7.1% (6.6-7.6) | 10.1% (9.5-10.7) |
+| Ulysses contract, alpha 0.05 | 1.3% (1.1-1.6) | 4.0% (3.6-4.4) | 5.3% (4.9-5.8) |
+
+Same design with a true relative lift of +25% (10% to 12.5%), 10000 runs:
+
+| Rule | Calls the win | Wrong-way call | Mean look of the first call | Mean identities per arm used (all runs) |
+|---|---|---|---|---|
+| Stop at the first look over 95% or under 5% | 91.0% (90.4-91.5) | 5.0% (4.6-5.4) | 9.62 | 1044.5 |
+| Ulysses contract, alpha 0.10 | 88.4% (87.7-89.0) | 0.0% (0.0-0.0) | 19.93 | 2110.1 |
+| Ulysses contract, alpha 0.05 | 79.3% (78.5-80.1) | 0.0% (0.0-0.0) | 21.81 | 2350.2 |
+
+Against a fixed-horizon test with the same false-ship level and the same power (79.3%): that test needs 2858 identities per arm (the contract's horizon 3000 divided by the sequential inflation 1.0497). The contract at alpha 0.05 used 2350.2 on average, 17.8% fewer.
+
+Design sensitivity, contract at alpha 0.05, A/A (the guarantee holds for false Winning; false Losing runs over its nominal 2.5% when conversions are few):
+
+| Base rate | Identities per arm per look x looks | Expected conversions per arm at the horizon | False Winning | False Losing |
+|---|---|---|---|---|
+| 2% | 100 x 30 | 60 | 0.1% (0.1-0.4) | 5.6% (4.7-6.7) |
+| 5% | 100 x 30 | 150 | 0.8% (0.5-1.3) | 5.9% (4.9-7.0) |
+| 10% | 100 x 30 | 300 | 1.6% (1.1-2.2) | 4.0% (3.2-5.0) |
+| 2% | 605 x 30 | 363 | 1.2% (0.8-1.8) | 3.6% (2.9-4.6) |
+
+Guardrails in A/A (a guardrail metric at 10% in both arms, no effect), share of experiments stopped for a guardrail breach that is not there:
+
+| Guardrail direction | Old rule: 97.5% chance worse at any look | Signed rule: one-sided Pocock-type spending, alpha 0.01, counted looks |
+|---|---|---|
+| not increase | 6.0% (5.6-6.5) | 0.1% (0.1-0.2) |
+| not decrease | 22.0% (21.2-22.9) | 4.4% (4.0-4.8) |
 <!-- offline-table:end -->
 
 ### Live: A/A experiments on self-hosted Flagsmith
@@ -146,12 +192,35 @@ Produced by `uv run ulysses calibrate offline` (writes `.run/calibration/offline
 Produced by `uv run ulysses calibrate live` and recomputed from its trace by `uv run ulysses calibrate summarise <trace>`. Every number is read from Flagsmith's results endpoint. The identities are synthetic, assigned by Flagsmith's engine through the Python SDK; they are not user traffic.
 
 <!-- live-table:start -->
-[pending: tables from `uv run ulysses calibrate summarise .run/calibration/live-<batch>.jsonl`, with the batch size, looks and per-arm counts]
+Live engine calibration on self-hosted Flagsmith (batch `ab1aca`): 40 A/A experiments, every number read from Flagsmith's results endpoint. Signed design: 6 looks at least five minutes apart, horizon 600 identities per arm, contract alpha 0.05. At least 100 synthetic identities per arm were sent per look, assigned by Flagsmith's engine (Python SDK, local evaluation), conversion probability 10% in both arms. Synthetic identities, not user traffic. 95% Wilson intervals. 4 reads did not return in time and count as looks not taken.
+
+| Rule (A/A, no real difference) | False Winning (ships a do-nothing variation) | False Losing | Any false call |
+|---|---|---|---|
+| Stop at the first look over 95% or under 5% (looks 1-6) | 0/40 = 0.0% (0-9) | 4/40 = 10.0% (4-23) | 4/40 = 10.0% (4-23) |
+| Read once at the final look | 0/40 = 0.0% (0-9) | 3/40 = 7.5% (3-20) | 3/40 = 7.5% (3-20) |
+| Ulysses contract, alpha 0.05 two-sided | 0/40 = 0.0% (0-9) | 0/40 = 0.0% (0-9) | 0/40 = 0.0% (0-9) |
+
+Contract outcomes: 0 wins, 0 losses, 3 at the horizon with no decision, 37 still holding. In 33 of them Flagsmith had counted fewer than the 600-per-arm horizon in one arm at the last read (events sent but not counted), so the contract never reached its final look.
+
+The Python SDK's event buffer overflowed during this batch and dropped events (the harness now flushes every 100 identities), so most experiments never reached their horizon. Read it as corroboration of the offline run, not as a precise rate.
+
+An earlier batch, `d11c7f`, scored under the design it was started with (it stopped at look 8 of 10 on a Flagsmith 429):
+
+Live engine calibration on self-hosted Flagsmith (batch `d11c7f`): 60 A/A experiments, every number read from Flagsmith's results endpoint. Signed design: 10 looks at least five minutes apart, horizon 1000 identities per arm, contract alpha 0.05. At least 100 synthetic identities per arm were sent per look, assigned by Flagsmith's engine (Python SDK, local evaluation), conversion probability 10% in both arms. Synthetic identities, not user traffic. 95% Wilson intervals. The run stopped after look 8 of 10 (see the batch notes); the table covers the looks that were read, and the contract is scored under its signed design without re-fitting.
+
+| Rule (A/A, no real difference) | False Winning (ships a do-nothing variation) | False Losing | Any false call |
+|---|---|---|---|
+| Stop at the first look over 95% or under 5% (looks 1-8) | 4/60 = 6.7% (3-16) | 9/60 = 15.0% (8-26) | 13/60 = 21.7% (13-34) |
+| Ulysses contract, alpha 0.05 two-sided | 0/60 = 0.0% (0-6) | 2/60 = 3.3% (1-11) | 2/60 = 3.3% (1-11) |
+
+Contract outcomes: 0 wins, 2 losses, 0 at the horizon with no decision, 58 still holding when the run stopped at look 8 of 10.
+
+Both traces ship with timestamps removed, so the tables can be recomputed from a clone: `uv run ulysses calibrate summarise data/live-ab1aca.jsonl` and `uv run ulysses calibrate summarise data/live-d11c7f.jsonl` (each also writes a `live.md` next to the trace).
 <!-- live-table:end -->
 
 ### Time saved
 
-Against a fixed-horizon test with the same false-ship level and the same power, the contract at alpha 0.05 used [pending: percentage from `uv run ulysses calibrate offline`, "Mean identities per arm used"] fewer identities on a real +25% lift (offline simulation). The first-95% rule stops earlier still, and that early stop is exactly where its false winners come from.
+Against a fixed-horizon test with the same false-ship level and the same power, the contract at alpha 0.05 used 17.8% fewer identities on a real +25% lift (2,350 per arm on average against 2,858; offline simulation, `uv run ulysses calibrate offline`). The first-95% rule stops earlier still, and that early stop is exactly where its false winners come from.
 
 In the demo run, the agent ran [pending: refreshes, from `.run/agent-session-result.json`] results refreshes on schedule and reached a decision on the real-effect experiment after [pending: counted looks] counted looks, in [pending: minutes]. A person checking the results page every five minutes over that time would have refreshed it [pending: manual checks] times.
 
@@ -169,16 +238,18 @@ Most agent integrations put a human approval after the agent proposes an action,
 
 The demo video shows both experiments side by side. On the A/A experiment, Flagsmith's chance to win wanders and the card holds, then reaches the horizon and keeps control. On the real-effect experiment the contract fires, the agent's early and wrong-action `execute` calls are refused on screen, the owner taps confirm, and Flagsmith serves bold to everyone. Every card shows the guardrail reading. Any judge can reproduce the same run with the one command above.
 
-![Confirming a fired contract in the browser](docs/screenshots/confirm-in-browser.png)
+![Confirming a fired contract in the browser: the WIN card, the pre-signed action and which key signs it](docs/screenshots/confirm-in-browser.png)
 
-![The calibration page](docs/screenshots/calibration.png)
+The confirm page, also a UI fixture over a test double of Flagsmith (amber chip, top right): the tap signs exactly the text shown, for exactly the pre-signed action.
+
+![The calibration page, lab tab: false winners shipped under each rule, from the offline run above](docs/screenshots/calibration.png)
 
 ## Track 02 checklist
 
 | Requirement | How Ulysses meets it |
 |---|---|
 | Uses the Flagsmith CLI, API or MCP server | The REST API for the lifecycle and results, the official SDK in the demo shop, Flagsmith's own `stats.py` in the calibration. Ulysses ships its own MCP server (four action tools and one read tool) for agents. |
-| Saves real time | Looks run on schedule, so nobody refreshes the results page; the pre-signed action runs on one tap. Against a fixed horizon with the same guarantee, [pending] fewer identities in simulation. Honest cost: the contract waits longer than the first-95% rule would. |
+| Saves real time | Looks run on schedule, so nobody refreshes the results page; the pre-signed action runs on one tap. Against a fixed horizon with the same guarantee it used 17.8% fewer identities in simulation. Honest cost: the contract waits longer than the first-95% rule would. |
 | A human approves changes | Twice: the owner signs before start (start is refused without it) and confirms the fired action with a signed tap. Amendments need a second signer. |
 | Clear output | One card per look: Flagsmith's chance to win, what the contract needs at this look, each guardrail's reading against its rule, hold or fire, and the pre-signed action. |
 | A working demo | `uv run python scripts/judge_demo.py` on a machine with Docker and uv. |
