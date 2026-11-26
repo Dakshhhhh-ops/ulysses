@@ -202,7 +202,7 @@ def test_confirm_must_be_signed_by_the_owner(world, keys):
 def test_guardrail_breach_stops_and_keeps_control(world, keys):
     svc, fs, _ = world
     h = started(svc, keys, n=1000, looks=10)
-    fs.set_results(1, 120, 118, 0.99, guardrails={"refunds": 0.005})  # refunds very likely up
+    fs.set_results(1, 120, 118, 0.99, guardrails={"refunds": 0.00001})  # refunds almost surely up
     out = svc.look(h)
     assert out["decision"]["outcome"] == "guardrail_breach"
     confirm(svc, keys, out)

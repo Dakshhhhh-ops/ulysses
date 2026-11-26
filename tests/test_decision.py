@@ -2,6 +2,7 @@ from statistics import NormalDist
 
 import pytest
 
+from ulysses import contract as ct
 from ulysses.decision import Observation, evaluate, observation_from_snapshot
 from ulysses.flagsmith.gateway import MetricResult, ResultsSnapshot
 
@@ -70,7 +71,7 @@ def test_guardrail_breach_at_a_counted_look_uses_the_signed_spending_boundary(ke
     from ulysses import boundary as bd
 
     c = make_contract(keys, n=1000, looks=10)
-    b = bd.one_sided_boundaries([0.1, 0.2, 0.3], 0.05, final_spends_all=False)[-1]
+    b = bd.one_sided_boundaries([0.1, 0.2, 0.3], ct.GUARDRAIL_ALPHA, final_spends_all=False)[-1]
     just_under = evaluate(c, [0.1, 0.2], Observation(300, 300, 0.6, {"refunds": PHI(b - 0.01)}))
     assert just_under.outcome == "hold" and just_under.guardrails[0]["state"] == "pass"
     over = evaluate(c, [0.1, 0.2], Observation(300, 300, 0.6, {"refunds": PHI(b + 0.01)}))

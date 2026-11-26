@@ -97,3 +97,26 @@ def test_chance_and_z_conversions_invert_flagsmith():
     assert bd.chance_to_z(0.0) < -bd.Z_CAP
     with pytest.raises(ValueError):
         bd.chance_to_z(1.2)
+
+
+def test_one_sided_pocock_boundaries_spend_exactly_alpha():
+    for looks in (1, 5, 12, 30):
+        ts = [k / looks for k in range(1, looks + 1)]
+        bs = bd.one_sided_boundaries(ts, 0.05)
+        assert bd.one_sided_crossing(ts, bs) == pytest.approx(0.05, abs=1e-6)
+    assert bd.one_sided_boundaries([1.0], 0.05)[0] == pytest.approx(1.6449, abs=1e-3)
+    # Pocock-type spending is roughly flat: early looks are not much harder than late ones.
+    b = bd.one_sided_boundaries([k / 12 for k in range(1, 13)], 0.05)
+    assert b[0] - b[-1] < 0.5
+
+
+def test_one_sided_boundary_agrees_with_monte_carlo():
+    rng = np.random.default_rng(11)
+    k = 12
+    ts = np.array([i / k for i in range(1, k + 1)])
+    bs = np.array(bd.one_sided_boundaries(list(ts), 0.01), dtype=float)
+    reps = 200_000
+    inc = rng.normal(0.0, np.sqrt(np.diff(np.concatenate([[0], ts]))), size=(reps, k))
+    z = np.cumsum(inc, axis=1) / np.sqrt(ts)
+    mc = float(np.mean((z >= bs).any(axis=1)))
+    assert mc == pytest.approx(0.01, abs=3 * math.sqrt(0.01 * 0.99 / reps) + 5e-4)
