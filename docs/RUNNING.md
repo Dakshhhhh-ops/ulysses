@@ -223,7 +223,7 @@ For one repository, copy them to its `.claude/skills/`; other agents that read A
 
 ## Tests and CI
 
-CI runs four jobs on every push (`.github/workflows/ci.yml`): the unit tests, a JS/Python parity test for the boundary drawing, the replay above (exits non-zero if any recorded decision, signature or execution does not reproduce), and a smoke test that boots the repo's Flagsmith, signs, starts and takes one look. Locally `uv run pytest -q` gives 493 passed (with a Flagsmith checkout next to the repository); the few skipped tests need a live Flagsmith, Docker, a Flagsmith checkout or Playwright.
+CI runs four jobs on every push (`.github/workflows/ci.yml`): the unit tests, a JS/Python parity test for the boundary drawing, the replay above (exits non-zero if any recorded decision, signature or execution does not reproduce), and a smoke test that boots the repo's Flagsmith, signs, starts and takes one look. Locally `uv run pytest -q` gives 508 passed (with a Flagsmith checkout next to the repository); the few skipped tests need a live Flagsmith, Docker, a Flagsmith checkout or Playwright.
 
 ## Commands
 
