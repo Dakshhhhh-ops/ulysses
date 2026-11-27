@@ -240,3 +240,37 @@ The signing page draws, from the contract itself, the chance it ships the treatm
 The curves describe the stop rule under the normal approximation with looks on their planned counts. They leave out the low-count skew of Flagsmith's z measured above, event loss and looks that land late. With no effect the contract runs to near its horizon, so then it is not cheaper than a single read at the end.
 
 A contract signed with a negative smallest lift (a metric that should go down) is planned by `ulysses horizon` and drawn by `ulysses.power` on the size of that lift, so the chart's axis then reads "True relative improvement" and the page states the signed lift next to it; the marked +25% stands for a signed -25%.
+
+## The headline run, as the README quotes it
+
+`uv run ulysses calibrate offline --flagsmith-src <Flagsmith checkout>`: Flagsmith `stats.py` (v2.295.2, sha256 `97c5ebfca7c8`) on 10000 simulated A/A experiments (5 seeds pooled), 30 looks of 100 synthetic identities per arm, base rate 10%, 95% Wilson intervals. The table is in [What the calibration measured](#what-the-calibration-measured). Two details the table leaves out: most of the first-look rule's false calls are false losses (31.3% of runs), which keep control and ship nothing; and with a true +25% lift the contract stops at mean look 19.93 (alpha 0.10) and 21.81 (alpha 0.05) of 30. The Two Ships picture on the README and the calibration page takes its counts from `data/paths-offline.json` and its rates from `data/offline.json`, both written by that command.
+
+The cost is time: the contract waits longer than the first-95% rule. In the recorded judge demo the real-effect experiment first read over 95% (95.21%) 6.1 minutes in, and the contract fired at 21.5 minutes (`uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl`). Nobody refreshed a page in that time; looks were counted at the planned counts and the owner tapped once.
+
+## Live runs on self-hosted Flagsmith
+
+All live traffic is synthetic identities assigned by Flagsmith's engine through the Python SDK; every number is read from Flagsmith's results endpoint. The traces ship without timestamps and can be re-scored from a clone.
+
+| Batch | A/A experiments | Design | First look over 95% or under 5%: false Winning / any false call | Contract: false Winning / any false call | Command |
+|---|---|---|---|---|---|
+| `360424` | 30 | 10 looks, horizon 1080 per arm, signed contracts in the service | 1/30 = 3.3% (1-17) / 12/30 = 40.0% (25-58) | 0/30 = 0.0% (0-11) / 2/30 = 6.7% (2-21) | `uv run ulysses calibrate summarise data/live-fw-360424.jsonl` |
+| `29ab1e` | 30 | same | 0/30 = 0.0% (0-11) / 8/30 = 26.7% (14-44) | 0/30 = 0.0% (0-11) / 2/30 = 6.7% (2-21) | `uv run ulysses calibrate summarise data/live-fw-29ab1e.jsonl` |
+| `72e1bc` | 30 | 6 looks, horizon 600 | 0/30 = 0.0% (0-11) / 1/30 = 3.3% (1-17) | 0/30 = 0.0% (0-11) / 1/30 = 3.3% (1-17) | `uv run ulysses calibrate summarise data/live-72e1bc.jsonl` |
+| `d11c7f` | 60 | 10 looks, horizon 1000, stopped after look 8 | 4/60 = 6.7% (3-16) / 13/60 = 21.7% (13-34) | 0/60 = 0.0% (0-6) / 2/60 = 3.3% (1-11) | `uv run ulysses calibrate summarise data/live-d11c7f.jsonl` |
+
+These batches are too small to separate the rules: the intervals overlap. What they show is the whole pipeline working on Flagsmith's own results endpoint, the contract shipping no do-nothing variation in any of the four batches, and Flagsmith's chance to win leaning toward false Losing at these counts (10 of 30 and 7 of 30 experiments read under 5% while the contract held, per `live_false_winner.py count`). Batch `d11c7f` stopped at look 8 of 10 on a Flagsmith 429, so 58 of its 60 contracts were still holding. A batch `ab1aca` lost events to an SDK buffer overflow and is not reported.
+
+### A live false "Winning"
+
+![A live Ulysses decision card: experiment 358, look 6 of 10, Flagsmith chance to win 95.67%, the contract needs 99.67%, HOLD](screenshots/live-hold-card.png)
+
+Experiment 358 (flag `ulysses_fw_360424_04`) on self-hosted Flagsmith, look 6 of 10. Flagsmith's chance to win was 95.67%, which its docs would call Winning; the contract signed before the start needed 99.67% at that look, so the card says HOLD. It is an A/A experiment (both arms serve the same value) with synthetic identities sent through Flagsmith's Python SDK, so holding was right. In the two signed-contract batches (`360424` and `29ab1e`, 60 A/A experiments, each under its own signed contract) Flagsmith read over 95% while the contract held in 1 of the 60: this one, at looks 5, 6 and 9. The contracts shipped 0 do-nothing variations. False "Winning" moments were rare in these batches; the 10,000-run simulation carries the claim about how often they happen.
+
+```sh
+uv run python scripts/live_false_winner.py count data/live-fw-360424.jsonl   # 1 of 30 over 95% while held
+uv run python scripts/live_false_winner.py count data/live-fw-29ab1e.jsonl   # 0 of 30
+```
+
+## The agent skill's stop rule
+
+The [`flagsmith-experiment-rollout`](../skills/flagsmith-experiment-rollout/SKILL.md) skill applies its stop rule with `scripts/stop_rule.py check`, without Ulysses. On Flagsmith's own `stats.py` and the same draws as the headline table, that rule shipped a do-nothing variation in 3.9% of 10,000 A/A runs against 13.4% for the first read over 95%, kept the same power on a +25% lift (91.0%), and shipped early in 41.1% of those runs (`uv run python scripts/skill_rule_calibration.py --flagsmith-src <Flagsmith checkout>`; `tests/test_skills.py` checks the skill's quoted numbers against `data/skill-rule-offline.json`).
