@@ -47,6 +47,18 @@ without_confirmation = ["keep_control"]
 
 With that clause the agent rolls back on its own when a guardrail breaks, the experiment loses or it reaches its planned size: keeping control changes nothing for users, and a harmful variation should stop at night without waking anyone. Shipping is never on that list. A contract that names `ship_treatment` is rejected when it is drafted, so putting a variation in front of everyone always waits for the owner's signed tap. Changing the clause is an amendment and needs both signers. Every executed action records which of the two authorised it, and `ulysses verify` fails an autonomous action the clause does not list.
 
+### Asking the owner
+
+A card that waits for a tap is no use if nobody opens it. Set `ULYSSES_NOTIFY_URL` in `.env` and the service sends one message when an action waits for the owner's tap (a win's `ship_treatment`, any action the `[autonomy]` clause does not list, an amendment's immediate action), and one FYI after the agent ran a `keep_control` on its own under the signed clause. The message says, in plain words, which experiment and flag it is, what the contract decided and why, Flagsmith's reading at that look, what is waiting, and the card's absolute URL (from `ULYSSES_PUBLIC_URL`).
+
+- **Where it goes.** A Slack or Discord incoming webhook, or any URL that takes a JSON POST: the body has `text` (Slack), `content` (Discord, with mentions turned off) and the same facts under `ulysses`. An `ntfy.sh` topic URL (or an `ntfy.*` host, or `ULYSSES_NOTIFY_FORMAT=ntfy`) gets plain text with `Title` and `Click` headers, so the phone notification opens the card. `ulysses notify test` sends a sample.
+- **Once.** Each proposal is announced once; the store records it, so a restart does not send it again.
+- **Never in the way.** A failed delivery is recorded as a service fault (`/api/service-faults`), retried on the next scheduled round, and given up after five attempts. It never delays or changes a decision.
+- **Grants nothing.** The message is a pointer. The action still runs only after the owner's signed tap on the card, made with the owner's key in the browser or with `ulysses confirm`. Nothing in the message and nothing sent back to the URL authorises anything.
+- **Carries no secrets.** No keys, tokens or passphrases; a message that would contain a configured secret is withheld. Free text from the contract (the hypothesis, an amendment's reason) appears only in one labelled field of at most 160 plain characters, so it cannot bring links, mentions or markup into the chat.
+
+The card shows whether the owner was asked, or how to turn this on when it is not configured.
+
 ## What is new here, and what is not
 
 Sequential testing is not new: Optimizely, Statsig, GrowthBook and Eppo all correct for peeking, and GrowthBook and Spotify's Confidence fix decision criteria before results arrive. Agents that run experiments through MCP are not new either. What Ulysses adds is the binding: the stop rule is a file the owner signs before any data exists, its hash is written into the Flagsmith experiment, and the agent's authority is exactly "the signed rule fired and the owner tapped" (or "the owner signed this outcome as autonomous"). Anyone can re-check a decision offline with `ulysses verify`.
@@ -302,6 +314,7 @@ ulysses horizon / boundary         identities per arm and look schedule / the bo
 ulysses audit replay --project <id>
 ulysses calibrate offline | live | summarise
 ulysses lab setup [--no-webhook] [--no-health]
+ulysses notify test                send a sample "ask the owner" message to ULYSSES_NOTIFY_URL
 ```
 
 Errors print one line and a next step; `ULYSSES_DEBUG=1` shows the traceback. The distribution name is `flagsmith-ulysses` (`ulysses` is taken on PyPI); it is not published, so install from the repository.

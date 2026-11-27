@@ -39,6 +39,7 @@ from pydantic import ValidationError
 
 from . import capability
 from . import contract as ct
+from . import notify as nt
 from . import signing
 from .canonical import content_hash, short_hash
 from .decision import FIRES, CountedLook, LookDecision, counted_look, evaluate, observation_from_snapshot
@@ -170,6 +171,7 @@ class Ulysses:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
         notify: Callable[[str, dict], None] | None = None,
+        notifier: nt.Notifier | None = None,
     ):
         self.store = store
         self._fs = gateway  # the write-capable client; never returned from any method
@@ -177,6 +179,8 @@ class Ulysses:
         self.clock = clock
         self.sleep = sleep
         self._notify = notify
+        # Asks the owner when an action waits for a tap (ULYSSES_NOTIFY_URL). It authorises nothing.
+        self.notifier = notifier
         self._look_locks: dict[tuple[str, str, int], threading.Lock] = {}
         self._locks_guard = threading.Lock()
         # Lifecycle writes (start, complete) the service has sent and not yet seen return, per experiment.
@@ -981,6 +985,8 @@ class Ulysses:
             self._emit("fired", {"hash": h, "outcome": d.outcome, "action": d.action, "reason": d.reason,
                                  "card_url": out["card_url"],
                                  "autonomous": out["proposal"]["authorised_by"] == "signed_autonomy"})
+            if out["proposal"]["authorised_by"] != "signed_autonomy":
+                self.notify_owner(pid, nt.ASK)
 
     def _hides_numbers(self, environment: str, experiment_id: int, status: str | None = None) -> bool:
         """While a contract governs an experiment and has not decided, Flagsmith's numbers are shown only at
@@ -1104,6 +1110,7 @@ class Ulysses:
                 out.append(self.look(r["hash"]))
             except (UlyssesError, FlagsmithError) as exc:
                 log.warning("scheduled look on %s failed: %s", short_hash(r["hash"]), exc)
+        self.retry_notifications()
         return out
 
     def _state_check(self, c: ct.Contract, h: str) -> dict | None:
@@ -1362,6 +1369,8 @@ class Ulysses:
         self._emit("executed", {"hash": h, "action": p["action"], "serving": ship or CONTROL_KEY,
                                 "autonomous": auto})
         self.health.after_execute(c, h, p["look_id"], p["action"], ship or CONTROL_KEY)
+        if auto:
+            self.notify_owner(pid, nt.FYI)
         return self._proposal_view(self.store.proposal(pid))
 
     def _send_complete(self, c: ct.Contract, h: str, p: dict, exp: ExperimentInfo, ship: str | None,
@@ -1532,6 +1541,7 @@ class Ulysses:
                 log.warning("could not record the amendment on the experiment: %s", exc)
         if pid:
             self._emit("amended", {"hash": h, "proposal": pid})
+            self.notify_owner(pid, nt.ASK)
 
     # ------------------------------------------------------- deviations and audit
 
@@ -2036,6 +2046,7 @@ class Ulysses:
                          "owner": c.owner.name, "second_signer": c.second_signer.name,
                          "planned": [p.model_dump() for p in c.boundary.planned]},
             "proposal": self._proposal_view(props[-1]) if props else None,
+            "notice": self.notice(props[-1]["id"]) if props else None,
             "history": history,
             "confirm_message": None if not props else self.confirm_message(props[-1]).decode(),
         }
@@ -2052,7 +2063,145 @@ class Ulysses:
             "contract": {"hash": p["contract_hash"], "state": row["state"], "summary": summarise(c),
                          "owner": c.owner.name, "amendment": c.amendment.model_dump() if c.amendment else None},
             "confirm_message": self.confirm_message(p).decode(),
+            "notice": self.notice(pid),
         }
+
+    # ---------------------------------------------------------- asking the owner
+
+    def notify_owner(self, pid: str, kind: str) -> None:
+        """Tell the owner about proposal ``pid``: ``ask`` when it waits for the tap, ``fyi`` when it ran under the
+        signed autonomy clause. At most once per proposal and kind (the store records it, so a restart does
+        not send again). A failed delivery is a service fault and changes nothing about the decision."""
+        if self.notifier is None:
+            return
+        try:
+            p = self.store.proposal(pid)
+            if not p:
+                return
+            self.store.add_notification(proposal_id=pid, kind=kind, contract_hash=p["contract_hash"],
+                                        channel=self.notifier.channel, now=self.clock())
+        except Exception as exc:  # noqa: BLE001 - asking the owner never breaks the gate
+            log.warning("owner notification not recorded: %s", exc)
+            return
+        self._dispatch(pid, kind, ("pending",))
+
+    def retry_notifications(self, stale_after_seconds: float = 300.0) -> int:
+        """Another round for messages that failed (or were cut off mid-send by a restart), up to the
+        notifier's attempt limit. Returns how many were tried."""
+        if self.notifier is None:
+            return 0
+        n = 0
+        try:
+            now = self.clock()
+            for r in self.store.notifications(("pending", "failed", "sending")):
+                if r["state"] == "sending" and now - r["updated_at"] < stale_after_seconds:
+                    continue
+                n += 1
+                self._dispatch(r["proposal_id"], r["kind"], (r["state"],))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("owner notification retry failed: %s", exc)
+        return n
+
+    def _dispatch(self, pid: str, kind: str, from_states: tuple[str, ...]) -> None:
+        if self.notifier is not None and self.notifier.background:
+            threading.Thread(target=self._deliver, args=(pid, kind, from_states), daemon=True,
+                             name="ulysses-notify").start()
+        else:
+            self._deliver(pid, kind, from_states)
+
+    def _deliver(self, pid: str, kind: str, from_states: tuple[str, ...]) -> None:
+        n = self.notifier
+        try:
+            if n is None or not self.store.claim_notification(pid, kind, from_states, self.clock()):
+                return  # already sent, given up, or another worker holds it
+            row = self.store.notification(pid, kind) or {}
+            attempts, error = int(row.get("attempts") or 0), None
+            try:
+                msg: nt.Message | None = self._owner_message(pid, kind)
+            except Exception as exc:  # noqa: BLE001
+                msg, error = None, f"message not built ({type(exc).__name__})"
+            for i in range(n.attempts_per_try if msg else 0):
+                if attempts >= n.max_attempts:
+                    break
+                attempts += 1
+                try:
+                    n.send(msg)  # type: ignore[arg-type]
+                    self.store.finish_notification(pid, kind, state="sent", attempts=attempts, error=None,
+                                                   now=self.clock())
+                    return
+                except nt.NotifyError as exc:
+                    error = str(exc)
+                    if i + 1 < n.attempts_per_try and attempts < n.max_attempts:
+                        n.sleep(1.0)
+            state = "gave_up" if attempts >= n.max_attempts or msg is None else "failed"
+            self.store.finish_notification(pid, kind, state=state, attempts=attempts, error=error, now=self.clock())
+            h = self.store.proposal(pid)["contract_hash"]
+            c, _ = self._load(h)
+            self._fault(c.experiment, h, "owner_notify_failed",
+                        f"could not {'ask' if kind == nt.ASK else 'tell'} the owner about proposal {pid} "
+                        f"({error}; attempt {attempts} of {n.max_attempts}"
+                        f"{', giving up' if state == 'gave_up' else ', will retry'}). The decision is unchanged; "
+                        "the card still shows the action and its state.", repaired=False)
+        except Exception as exc:  # noqa: BLE001 - asking the owner never breaks the gate
+            log.warning("owner notification failed: %s", exc)
+
+    def _owner_message(self, pid: str, kind: str) -> nt.Message:
+        p = self.store.proposal(pid)
+        h = p["contract_hash"]
+        c, _ = self._load(h)
+        lk = self.store.look(p["look_id"]) if p["look_id"] else None
+        dec = lk["decision"] if lk else None
+        serving = None
+        if p["action"] == "ship_treatment":
+            serving = (dec or {}).get("winner") or c.experiment.treatment
+        elif p["action"] == "keep_control":
+            serving = c.experiment.control
+        result = json.loads(p["result"]) if p.get("result") else {}
+        if result.get("serving"):
+            serving = result["serving"]
+        if p["outcome"] == "amendment" and c.amendment:
+            agent_text, label = c.amendment.reason, "Amendment reason"
+        else:
+            agent_text, label = c.hypothesis.split(MARK)[0], "Hypothesis"
+        return nt.build(kind, experiment=c.experiment.experiment, flag=c.experiment.flag, owner=c.owner.name,
+                        outcome=p["outcome"], action=p["action"], serving=serving, decision=dec,
+                        card_url=self.link(f"/card/{p['look_id'] or p['id']}", h), agent_text=agent_text,
+                        agent_label=label)
+
+    def notice(self, pid: str) -> dict | None:
+        """What the card says about asking the owner for proposal ``pid`` (None when there is nothing to say)."""
+        p = self.store.proposal(pid)
+        if not p:
+            return None
+        auto = self._autonomous(p)
+        kind = nt.FYI if auto else nt.ASK
+        try:
+            owner = self._load(p["contract_hash"])[0].owner.name
+        except UlyssesError:
+            owner = "the owner"
+        row = self.store.notification(pid, kind)
+        if row is None:
+            waiting = (not auto and p["state"] in ("pending", "failed")) or (auto and p["state"] == "executed")
+            if self.notifier is not None or not waiting:
+                return None
+            return {"state": "off", "text": f"{owner} was not sent a message. To have the service ask the owner "
+                    "when an action waits for a tap, set ULYSSES_NOTIFY_URL in .env (a Slack or Discord webhook, "
+                    "an ntfy.sh topic, or any JSON webhook) and run `ulysses notify test`."}
+        via = "ntfy" if row["channel"] == "ntfy" else "webhook"
+        if row["state"] == "sent":
+            text = (f"{owner} was told by message ({via}) that the agent ran "
+                    f"'{p['action'].replace('_', ' ')}' on its own under the signed autonomy clause."
+                    if auto else
+                    f"{owner} was asked by message ({via}) to open this card and confirm. The message grants "
+                    "nothing: only the owner's signed tap here runs the action.")
+        elif row["state"] in ("pending", "sending"):
+            text = f"Sending the message to {owner} ({via})."
+        else:
+            text = (f"The message to {owner} ({via}) could not be sent ({row['last_error'] or 'no answer'}; "
+                    f"attempt {row['attempts']}). "
+                    + ("The service gave up; " if row["state"] == "gave_up" else "The service retries; ")
+                    + "it is recorded as a service fault and the decision is unchanged.")
+        return {"state": row["state"], "channel": via, "attempts": row["attempts"], "text": text}
 
     def _emit(self, event: str, payload: dict) -> None:
         if self._notify:

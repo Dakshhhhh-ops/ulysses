@@ -20,6 +20,9 @@
   {%- if p.authorised_text %}
   <p class="key-note">{{ p.authorised_text }}</p>
   {%- endif %}
+  {%- if d.notice %}
+  <p class="key-note" id="owner-notice" data-notice="{{ d.notice.state }}">{{ d.notice.text }}</p>
+  {%- endif %}
   {%- if p.result %}
   <p class="result" role="status"><span>Flag <code>{{ p.result.flag }}</code> now serves <code>{{ p.result.serving }}</code>.</span></p>
   {%- endif %}

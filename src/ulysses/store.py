@@ -158,6 +158,19 @@ CREATE TABLE IF NOT EXISTS governed (
     rollout TEXT,                  -- the experiment's rollout as Flagsmith reported it at start (JSON)
     PRIMARY KEY (environment, experiment_id)
 );
+CREATE TABLE IF NOT EXISTS notifications (
+    proposal_id TEXT NOT NULL,
+    kind TEXT NOT NULL,            -- ask (an action waits for the owner's tap) | fyi (it ran under signed autonomy)
+    contract_hash TEXT,
+    state TEXT NOT NULL,           -- pending | sending | sent | failed | gave_up
+    attempts INTEGER NOT NULL DEFAULT 0,
+    channel TEXT,                  -- webhook | ntfy (never the URL)
+    last_error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    sent_at REAL,
+    PRIMARY KEY (proposal_id, kind)
+);
 """
 
 log = logging.getLogger("ulysses")
@@ -518,6 +531,40 @@ class Store:
 
     def service_faults(self) -> list[dict]:
         return self._all("SELECT * FROM service_faults ORDER BY id")
+
+    # ---- owner notifications (one row per proposal and kind: sent at most once, across restarts) ----------
+
+    def add_notification(self, *, proposal_id: str, kind: str, contract_hash: str | None, channel: str,
+                         now: float) -> bool:
+        cur = self._exec(
+            "INSERT OR IGNORE INTO notifications(proposal_id, kind, contract_hash, state, attempts, channel, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (proposal_id, kind, contract_hash, "pending", 0, channel, now, now))
+        return cur.rowcount == 1
+
+    def claim_notification(self, proposal_id: str, kind: str, from_states: Iterable[str], now: float) -> bool:
+        states = tuple(from_states)
+        cur = self._exec(
+            f"UPDATE notifications SET state='sending', updated_at=? WHERE proposal_id=? AND kind=? "
+            f"AND state IN ({','.join('?' * len(states))})", (now, proposal_id, kind, *states))
+        return cur.rowcount == 1
+
+    def finish_notification(self, proposal_id: str, kind: str, *, state: str, attempts: int,
+                            error: str | None, now: float) -> None:
+        self._exec(
+            "UPDATE notifications SET state=?, attempts=?, last_error=?, updated_at=?, "
+            "sent_at=CASE WHEN ?='sent' THEN ? ELSE sent_at END WHERE proposal_id=? AND kind=?",
+            (state, attempts, error, now, state, now, proposal_id, kind))
+
+    def notification(self, proposal_id: str, kind: str) -> dict | None:
+        return self._one("SELECT * FROM notifications WHERE proposal_id=? AND kind=?", (proposal_id, kind))
+
+    def notifications(self, states: Iterable[str] | None = None) -> list[dict]:
+        if states is None:
+            return self._all("SELECT * FROM notifications ORDER BY created_at, proposal_id")
+        st = tuple(states)
+        return self._all(f"SELECT * FROM notifications WHERE state IN ({','.join('?' * len(st))}) "
+                         "ORDER BY created_at, proposal_id", st)
 
     def add_deviation(self, *, environment: str | None, experiment_id: int | None, contract_hash: str | None,
                       audit_id: Any, log: str, author: str | None, now: float, kind: str | None = None,

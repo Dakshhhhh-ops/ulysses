@@ -102,6 +102,9 @@ def cmd_init(a) -> None:
         "ULYSSES_WEBHOOK_URL": f"http://host.docker.internal:{port}/webhooks/flagsmith",
         "ULYSSES_WEBHOOK_SECRET": secrets.token_urlsafe(32),
         "ULYSSES_SLACK_WEBHOOK": "",
+        # Ask the owner when an action waits for a tap: a Slack or Discord webhook, an ntfy.sh topic or any JSON
+        # webhook. Keep it secret. `ulysses notify test` sends a sample. The message grants nothing.
+        "ULYSSES_NOTIFY_URL": "",
     }
     added = []
     lines = env.read_text(encoding="utf-8").splitlines() if env.exists() else []
@@ -332,6 +335,28 @@ def cmd_link(a) -> None:
         console.print(svc.link(f"/sign/{a.hash}", a.hash), soft_wrap=True)
     else:
         console.print(svc.overview_link(), soft_wrap=True)
+
+
+def cmd_notify_test(a) -> None:
+    """Send a sample "ask the owner" message to ULYSSES_NOTIFY_URL."""
+    from . import notify as nt
+
+    _env()
+    try:
+        n = nt.from_env(os.environ, background=False)
+    except SystemExit as exc:
+        fail(str(exc))
+    if n is None:
+        fail("ULYSSES_NOTIFY_URL is not set",
+             "put a Slack or Discord incoming-webhook URL, an ntfy.sh topic URL or any JSON webhook in .env")
+    public = (os.environ.get("ULYSSES_PUBLIC_URL") or "http://127.0.0.1:8200").rstrip("/")
+    msg = nt.build(nt.TEST, experiment=0, flag="example_flag", owner="owner", outcome="test", action="none",
+                   serving=None, decision=None, card_url=f"{public}/")
+    try:
+        n.send(msg)
+    except nt.NotifyError as exc:
+        fail(f"the test message was not delivered ({exc})", "check the URL; it is not printed here on purpose")
+    console.print(f"[green]sent[/] a test message ({n.shape} shape) to the configured URL")
 
 
 def cmd_signer_list(a) -> None:
@@ -816,6 +841,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name")
     s.add_argument("--key-dir")
     s.set_defaults(fn=cmd_keys_show)
+
+    nf = sub.add_parser("notify", help="ask the owner when an action waits for a tap").add_subparsers(
+        dest="sub", required=True)
+    s = nf.add_parser("test", help="send a sample message to ULYSSES_NOTIFY_URL")
+    s.set_defaults(fn=cmd_notify_test)
 
     sg = sub.add_parser("signer", help="who may sign (operator)").add_subparsers(dest="sub", required=True)
     s = sg.add_parser("add")
