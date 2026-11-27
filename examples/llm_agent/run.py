@@ -14,8 +14,15 @@ runs this for you):
 
     uv run --extra llm python examples/llm_agent/run.py live --with-traffic
 
-``--model auto`` (the default) uses Gemini through the Google Gen AI SDK when GEMINI_API_KEY is set, else Claude
-through the Anthropic SDK when ANTHROPIC_API_KEY is set, else the scripted mock, and says which. ``--model gemini``
+In live mode the harness wakes the model (``--wake-every``, default 300 seconds) when it ends its turn while a
+contract it drafted is still open, with one fixed message that carries no numbers; ``--wake-every 0`` ends the run
+at the model's first final reply.
+
+``--model auto`` (the default) uses an OpenAI model over plain HTTPS when OPENAI_API_KEY or OPEN_AI_API_KEY is set
+(read from the environment, else from the git-ignored .env.local), else Gemini through the Google Gen AI SDK when
+GEMINI_API_KEY is set, else Claude through the Anthropic SDK when ANTHROPIC_API_KEY is set, else the scripted mock,
+and says which. ``--openai-model`` picks the OpenAI model (default gpt-5-mini); every OpenAI call goes through the
+spend guard in openai_model.py, which refuses any call that could take the running total past its cap. ``--model gemini``
 also loads GEMINI_API_KEY at run time from ~/.ulysses/llm.env (outside the repository) when it is not set;
 ``--gemini-model`` picks the Gemini model (default: the one gemini_spike.py chose). Every run writes its transcript to .run/llm_agent/; ``--export`` also writes a
 scrubbed copy with no times, token or key to examples/llm_agent/transcripts/<scenario>.<client>.jsonl. A mock
@@ -43,9 +50,11 @@ for p in (ROOT, ROOT / "src"):
 from examples.llm_agent import harness, models  # noqa: E402
 from examples.llm_agent.models import MODEL_ID, AnthropicModel, MockModel  # noqa: E402
 from examples.llm_agent import gemini_model as gm  # noqa: E402
+from examples.llm_agent import openai_model as om  # noqa: E402
 
-REAL_MODELS = ("anthropic", "gemini")  # clients that are language models; their transcripts may be committed
+REAL_MODELS = ("anthropic", "gemini", "openai")  # clients that are language models; their transcripts may be committed
 GEMINI_MODEL = gm.DEFAULT_MODEL
+OPENAI_MODEL = om.DEFAULT_MODEL
 COMMAND = "(called from Python)"  # main() sets the command line that produced the run
 
 EXPORT_DIR = ROOT / "examples" / "llm_agent" / "transcripts"
@@ -78,11 +87,20 @@ def model_name(model) -> str:
 
 def choose_model(kind: str, scenario: str | None, facts: dict) -> models.ModelClient:
     if kind == "auto":
-        kind = "gemini" if gm.have_key() else "anthropic" if models.have_api_key() else "mock"
-        print(f"model client: {kind}" + (f" ({GEMINI_MODEL})" if kind == "gemini" else
+        kind = ("openai" if om.have_key() else "gemini" if gm.have_key() else "anthropic" if models.have_api_key()
+                else "mock")
+        print(f"model client: {kind}" + (f" ({OPENAI_MODEL})" if kind == "openai" else
+                                         f" ({GEMINI_MODEL})" if kind == "gemini" else
                                          f" ({MODEL_ID})" if kind == "anthropic" else
-              " (neither GEMINI_API_KEY nor ANTHROPIC_API_KEY is set, so a scripted mock plays the agent; it is not "
+              " (no OPENAI_API_KEY, GEMINI_API_KEY or ANTHROPIC_API_KEY is set, so a scripted mock plays the agent; it is not "
               "a language model)"), flush=True)
+    if kind == "openai":
+        if not om.load_key():
+            raise Stop("OPENAI_API_KEY / OPEN_AI_API_KEY is not set and no .env.local holds it; or use --model mock")
+        try:
+            return om.OpenAIModel(model=OPENAI_MODEL)
+        except RuntimeError as exc:
+            raise Stop(str(exc)) from exc
     if kind == "gemini":
         if not gm.load_key():
             raise Stop(f"GEMINI_API_KEY is not set and {gm.KEY_FILE} could not be read; or use --model mock")
@@ -98,7 +116,7 @@ def choose_model(kind: str, scenario: str | None, facts: dict) -> models.ModelCl
         except RuntimeError as exc:
             raise Stop(str(exc)) from exc
     if scenario is None:
-        raise Stop("the mock plays scripted scenarios only; live mode needs GEMINI_API_KEY or ANTHROPIC_API_KEY")
+        raise Stop("the mock plays scripted scenarios only; live mode needs an OpenAI, Gemini or Anthropic key")
     return MockModel(scenario, facts)
 
 
@@ -192,6 +210,45 @@ def live_prompt(demo: dict, min_lift: float, baseline: float) -> str:
     return "\n".join(lines)
 
 
+OPEN_STATES = ("draft", "signed", "starting", "active", "decided", "executing")
+
+
+def make_wake(url: str, token: str, every: float, max_wakes: int = 40):
+    """The harness's heartbeat for a live run, or None when ``every`` is 0.
+
+    A chat model ends its turn when it has nothing to do right now ("I will look again later"). An agent
+    runtime wakes it on a schedule. When the model ends its turn while a contract it drafted is still open
+    (read back from the service with the agent token), this sleeps ``every`` seconds and returns the next user
+    message; once every contract it drafted is closed, or it drafted none, or after ``max_wakes``, it returns
+    None and the run ends. The message carries no numbers: the model reads everything through its tools."""
+    if not every:
+        return None
+    import httpx
+
+    async def wake(out) -> str | None:
+        hashes = [c["result"]["hash"] for c in out.called("sign_contract") + out.called("request_amendment")
+                  if c["result"].get("hash")]
+        if not hashes or out.wakes >= max_wakes:
+            return None
+        open_ = []
+        with httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60) as http:
+            for h in hashes:
+                try:
+                    st = http.get(f"/api/contracts/{h}").json().get("state")
+                except (httpx.HTTPError, ValueError):
+                    st = "unreadable"
+                if st in OPEN_STATES or st == "unreadable":
+                    open_.append(h)
+        if not open_:
+            return None
+        await asyncio.sleep(every)
+        return (f"Harness wake-up: about {every / 60:.0f} minutes have passed since your last reply, and "
+                f"{len(open_)} contract(s) you drafted are still open. Continue toward your goal with your tools. "
+                "Keep your reply to the user to two or three sentences.")
+
+    return wake
+
+
 async def run_live(a, model: models.ModelClient | None = None) -> dict:
     """``model`` and ``a.run_dir`` exist for the offline test; the command line always picks the model itself."""
     run_dir = Path(getattr(a, "run_dir", None) or ROOT / ".run")
@@ -225,10 +282,11 @@ async def run_live(a, model: models.ModelClient | None = None) -> dict:
                                  "the variations")
             except Exception:  # noqa: BLE001 - the label is a convenience for the pages
                 pass
+        wake = make_wake(url, token, getattr(a, "wake_every", 0) or 0, getattr(a, "max_wakes", 40))
         async with harness.mcp_session(url, token) as (session, instructions):
             result = await harness.run_agent(session, model, system=harness.system_prompt(instructions),
                                              user=live_prompt(demo, a.min_lift, a.baseline_rate), transcript=tr,
-                                             local_tools=[harness.WAIT_TOOL], max_turns=a.max_turns)
+                                             local_tools=[harness.WAIT_TOOL], max_turns=a.max_turns, wake=wake)
     finally:
         for pr in procs:
             pr.terminate()
@@ -249,7 +307,7 @@ async def run_live(a, model: models.ModelClient | None = None) -> dict:
     meta = next(e for e in tr.events if e["kind"] == "meta")
     out = {"model_client": model.label, "model": meta["served_model"], "requested_model": meta["requested_model"],
            "served_model": meta["served_model"],
-           "turns": result.turns, "stop_reason": result.stop_reason, "stop_details": result.stop_details,
+           "turns": result.turns, "wakes": result.wakes, "stop_reason": result.stop_reason, "stop_details": result.stop_details,
            "stop": result.stop_text(), "tool_calls": len(result.tool_calls),
            "refused_403": [{"tool": r["name"], "kind": r["kind"], "input": r["input"],
                             "detail": r["result"].get("detail")} for r in result.refusals],
@@ -300,28 +358,40 @@ def main() -> None:
     lv.add_argument("--min-lift", type=float, default=0.5)
     lv.add_argument("--baseline-rate", type=float, default=0.10)
     lv.add_argument("--max-turns", type=int, default=200)
+    lv.add_argument("--wake-every", type=float, default=300,
+                    help="seconds the harness waits before waking the model when it ends its turn while a contract "
+                         "it drafted is still open (0: never wake it; the run ends at its first final reply)")
+    lv.add_argument("--max-wakes", type=int, default=40)
     lv.add_argument("--lab-lock", help="a shared lab's LAB-LOCK file: wait while it exists, hold it only for the run")
     for p in (s, lv):
-        p.add_argument("--model", choices=["auto", "gemini", "anthropic", "mock"], default="auto")
+        p.add_argument("--model", choices=["auto", "openai", "gemini", "anthropic", "mock"], default="auto")
+        p.add_argument("--openai-model", default=om.DEFAULT_MODEL, choices=sorted(om.PRICES),
+                       help="the OpenAI model for --model openai/auto (only models with a recorded price)")
         p.add_argument("--gemini-model", default=gm.DEFAULT_MODEL, help="the Gemini model for --model gemini/auto")
         p.add_argument("--export", action="store_true",
                        help="also write a scrubbed, time-free copy to examples/llm_agent/transcripts/ "
                             "(a mock run's copy goes to the git-ignored .run/llm_agent/export/)")
     argv = sys.argv[1:]
     a = ap.parse_args(argv)
-    global GEMINI_MODEL, COMMAND
+    global GEMINI_MODEL, OPENAI_MODEL, COMMAND
     GEMINI_MODEL = a.gemini_model
+    OPENAI_MODEL = a.openai_model
+    if a.model in ("auto", "openai"):
+        om.load_key()  # from the environment, else the git-ignored .env.local; never printed
     extra = {"gemini": " --extra gemini", "anthropic": " --extra llm"}.get(a.model, "")
     COMMAND = f"uv run{extra} python examples/llm_agent/run.py " + " ".join(argv)
     try:
         if a.model in REAL_MODELS or (a.mode == "live" and a.model == "auto"):
             # Fail in one line before starting anything.
-            choose_model(a.model if a.model in REAL_MODELS else "gemini" if gm.have_key() else "anthropic", None, {})
+            choose_model(a.model if a.model in REAL_MODELS else "openai" if om.have_key() else
+                         "gemini" if gm.have_key() else "anthropic", None, {})
         if a.mode == "live":
             with LabLock(getattr(a, "lab_lock", None)):
                 asyncio.run(run_live(a))
         else:
             asyncio.run(run_scenarios(list(SCENARIOS) if a.name == "all" else [a.name], a.model, export=a.export))
+        if om.have_key() and a.model in ("auto", "openai"):
+            print(om.spend_summary(), flush=True)
     except Stop as exc:
         print(f"llm agent stopped: {exc}", file=sys.stderr)
         sys.exit(1)

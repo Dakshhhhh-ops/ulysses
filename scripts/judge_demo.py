@@ -40,9 +40,12 @@ the recorded one, and the script exits non-zero if any differs.
     uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl [--minutes 2] [--open] [--no-hold]
 
 ``--llm`` puts a real language model in place of the scripted agent (``examples/llm_agent/``), driving only the
-Ulysses MCP tools with the same agent token: Gemini through the Google Gen AI SDK when GEMINI_API_KEY is set, else
-Claude through the Anthropic SDK when ANTHROPIC_API_KEY is set (``uv run --extra gemini --extra llm python
-scripts/judge_demo.py --llm`` installs both SDKs). Without a key or its SDK it says so and runs the scripted agent.
+Ulysses MCP tools with the same agent token: an OpenAI model (gpt-5-mini by default) over plain HTTPS when
+OPENAI_API_KEY or OPEN_AI_API_KEY is set (in the environment or the git-ignored .env.local), behind a spend guard
+that refuses any call that could take the running total past its cap; else Gemini through the Google Gen AI SDK
+when GEMINI_API_KEY is set; else Claude through the Anthropic SDK when ANTHROPIC_API_KEY is set (``uv run --extra
+gemini --extra llm python scripts/judge_demo.py --llm`` installs both SDKs). Without a key or its SDK it says so and
+runs the scripted agent.
 """
 
 from __future__ import annotations
@@ -130,6 +133,28 @@ def read_env(path: Path) -> dict[str, str]:
 LLM_MODEL = "claude-opus-5-5"
 
 
+OPENAI_KEY_VARS = ("OPENAI_API_KEY", "OPEN_AI_API_KEY")
+
+
+def _openai_model() -> str:
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT))
+    from examples.llm_agent.openai_model import DEFAULT_MODEL
+
+    return DEFAULT_MODEL
+
+
+def load_openai_key() -> bool:
+    """Put the OpenAI key into this process's environment from .env.local if it is not set. Never prints it."""
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT))
+    from examples.llm_agent.openai_model import load_key
+
+    return load_key()
+
+
 def _gemini_model() -> str:
     import sys as _sys
 
@@ -141,15 +166,20 @@ def _gemini_model() -> str:
 
 def choose_agent(want_llm: bool, environ: dict | None = None, sdk_installed: bool | None = None,
                  gemini_sdk_installed: bool | None = None) -> tuple[str, str]:
-    """Which agent runs and the line that says so: "gemini", "llm" (Claude) or "scripted".
+    """Which agent runs and the line that says so: "openai", "gemini", "llm" (Claude) or "scripted".
 
-    Gemini when GEMINI_API_KEY is set, else Claude when ANTHROPIC_API_KEY is set, else the scripted agent. A key
+    OpenAI when OPENAI_API_KEY or OPEN_AI_API_KEY is set (no SDK needed: plain HTTPS), else Gemini when
+    GEMINI_API_KEY is set, else Claude when ANTHROPIC_API_KEY is set, else the scripted agent. A key
     whose SDK is not installed is skipped, and the line says why. Never reads a key's value."""
     import importlib.util
 
     env = os.environ if environ is None else environ
     if not want_llm:
         return "scripted", "running the scripted agent (Ulysses agent token only)"
+    if any(env.get(k) for k in OPENAI_KEY_VARS):
+        return "openai", (f"running the LLM agent: {_openai_model()} through the OpenAI API (an OpenAI key is set; "
+                          "every call goes through the spend guard), acting only through the Ulysses MCP tools "
+                          "(Ulysses agent token only)")
     skipped = []
     if env.get("GEMINI_API_KEY"):
         if gemini_sdk_installed is None:
@@ -181,9 +211,9 @@ def agent_command(mode: str, py: str, shop_port: int, temptation: bool = True) -
 
     The scripted agent is tempted by default: it asks to ship whenever a look holds while Flagsmith reads
     "Winning" (95% or more), and the service refuses; ``temptation=False`` passes ``--no-temptation``."""
-    if mode in ("gemini", "llm"):
+    if mode in ("openai", "gemini", "llm"):
         return [py, str(ROOT / "examples/llm_agent/run.py"), "live", "--model",
-                "gemini" if mode == "gemini" else "anthropic", "--with-traffic", "--shop-port", str(shop_port)]
+                "anthropic" if mode == "llm" else mode, "--with-traffic", "--shop-port", str(shop_port)]
     return [py, str(ROOT / "scripts/agent_session.py"), "--with-traffic", "--shop-port", str(shop_port),
             *([] if temptation else ["--no-temptation"])]
 
@@ -199,8 +229,9 @@ def main() -> None:
     ap.add_argument("--agent-in-container", action="store_true",
                     help="run the agent and its MCP server in their own container (URL and token only)")
     ap.add_argument("--llm", action="store_true",
-                    help="use the LLM agent (examples/llm_agent): Gemini when GEMINI_API_KEY is set, else Claude "
-                         "when ANTHROPIC_API_KEY is set; else the scripted one")
+                    help="use the LLM agent (examples/llm_agent): OpenAI when OPENAI_API_KEY or OPEN_AI_API_KEY is "
+                         "set (or in .env.local), else Gemini when GEMINI_API_KEY is set, else Claude when "
+                         "ANTHROPIC_API_KEY is set; else the scripted one")
     ap.add_argument("--no-temptation", action="store_true",
                     help="the scripted agent does not try to ship on Flagsmith's 'Winning' reading while the "
                          "contract holds (by default it tries, and the service refuses)")
@@ -286,7 +317,9 @@ def main() -> None:
         keyfile.write_text("".join(f"{k}={v}\n" for k, v in passphrases.items()), encoding="utf-8")
 
     # Only the agent's process needs a model key; the service and the stand-in human never get one.
-    llm_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY")
+    if a.llm:
+        load_openai_key()  # into this process only; the service and the stand-in human never get it
+    llm_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", *OPENAI_KEY_VARS)
     operator = {**{k: v for k, v in os.environ.items() if k not in llm_keys}, **env_vals}
     py = sys.executable
     step("creating demo flags, metrics, the signed audit webhook and the Feature Health provider")

@@ -11,7 +11,8 @@ is appended to a JSONL file under ``.run/llm_agent/`` with a time on each
 event. The meta event names the ``requested_model`` and, once the run ends
 (``Transcript.settle_meta``), the ``served_model`` the turns came from.
 ``Transcript.export`` writes a scrubbed copy with no times, no
-timestamps inside tool results, no thinking signatures, and no token or key.
+timestamps inside tool results, no read capabilities in links (each carries an expiry time), no thinking
+signatures, and no token or key.
 """
 
 from __future__ import annotations
@@ -54,7 +55,8 @@ def system_prompt(server_instructions: str | None) -> str:
 # ---------------------------------------------------------------------------- transcripts
 
 _ISO = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?")
-_KEYLIKE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
+_CAP = re.compile(r"cap=\d+\.[A-Za-z0-9_\-]+")
+_KEYLIKE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+|\bsk-[A-Za-z0-9_\-]{16,}")
 
 
 def scrub(obj: Any, secrets: list[str], *, drop_times: bool) -> Any:
@@ -79,6 +81,7 @@ def scrub(obj: Any, secrets: list[str], *, drop_times: bool) -> Any:
         s = _KEYLIKE.sub("<redacted>", s)
         if drop_times:
             s = _ISO.sub("<time removed>", s)
+            s = _CAP.sub("cap=<read capability removed>", s)  # its first part is an expiry time
         return s
     return obj
 
@@ -87,7 +90,7 @@ class Transcript:
     def __init__(self, path: Path, secrets: list[str]):
         self.path = path
         self.secrets = [s for s in secrets if s]
-        for var in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY"):  # never in a transcript, whichever model ran
+        for var in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "OPEN_AI_API_KEY"):  # never in a transcript, whichever model ran
             env_key = os.environ.get(var)
             if env_key:
                 self.secrets.append(env_key)
@@ -221,6 +224,7 @@ _NOTABLE_STOPS = {
     "refusal": "the model declined to continue (a refusal stop)",
     "max_tokens": "the model's reply was cut off at max_tokens",
     "max_turns": "the harness stopped the loop at its turn limit",
+    "spend_cap": "the OpenAI spend guard refused the next call",
 }
 
 
@@ -243,6 +247,7 @@ class RunResult:
     tool_calls: list[dict] = field(default_factory=list)  # {name, input, result}
     refusals: list[dict] = field(default_factory=list)    # 403s where the contract service said no ({..., kind})
     confirm_waits: list[dict] = field(default_factory=list)  # 403s that only wait for the owner's confirm tap
+    wakes: int = 0  # times the harness woke the model after it ended its turn (live mode, --wake-every)
 
     def stop_text(self) -> str:
         return describe_stop(self.stop_reason, self.stop_details)
@@ -252,6 +257,8 @@ class RunResult:
 
 
 AfterTool = Callable[[str, dict, dict], "str | None"]
+# Called when the model ends its turn: the next user message (the harness waking the model), or None to stop.
+Wake = Callable[["RunResult"], Awaitable["str | None"]]
 
 
 def _say(text: str) -> None:
@@ -260,7 +267,7 @@ def _say(text: str) -> None:
 
 async def run_agent(session: ClientSession, model: ModelClient, *, system: str, user: str, transcript: Transcript,
                     local_tools: list[LocalTool] | None = None, after_tool: AfterTool | None = None,
-                    max_turns: int = 40, echo: bool = True) -> RunResult:
+                    max_turns: int = 40, echo: bool = True, wake: Wake | None = None) -> RunResult:
     listed = await session.list_tools()
     local = {lt.spec["name"]: lt for lt in (local_tools or [])}
     tools = [tool_spec(t) for t in listed.tools] + [lt.spec for lt in local.values()]
@@ -270,7 +277,16 @@ async def run_agent(session: ClientSession, model: ModelClient, *, system: str, 
     messages: list[dict] = [{"role": "user", "content": user}]
     out = RunResult()
     for _ in range(max_turns):
-        turn = await asyncio.to_thread(model.next_turn, system=system, tools=tools, messages=messages)
+        try:
+            turn = await asyncio.to_thread(model.next_turn, system=system, tools=tools, messages=messages)
+        except RuntimeError as exc:
+            if type(exc).__name__ != "SpendCapReached":
+                raise
+            out.stop_reason, out.stop_details = "spend_cap", {"detail": str(exc)}
+            transcript.event("harness", text=str(exc))
+            if echo:
+                _say(f"[harness] {exc}")
+            break
         out.turns += 1
         out.stop_reason = turn.stop_reason
         out.stop_details = turn.stop_details
@@ -283,7 +299,15 @@ async def run_agent(session: ClientSession, model: ModelClient, *, system: str, 
             continue
         if turn.stop_reason != "tool_use":
             out.final_text = turn.text()
-            break
+            note = await wake(out) if (wake and turn.stop_reason == "end_turn") else None
+            if not note:
+                break
+            out.wakes += 1
+            transcript.event("wake", text=note)
+            if echo:
+                _say(f"[harness wake-up] {note}")
+            messages.append({"role": "user", "content": note})
+            continue
         results = []
         for tu in turn.tool_uses():
             name, args = tu["name"], tu.get("input") or {}

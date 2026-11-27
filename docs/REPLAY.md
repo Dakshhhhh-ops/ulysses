@@ -120,6 +120,36 @@ tapped ship). `uv run ulysses verify --bundle data/verify-autonomy-aa.json` ends
 checks passed` (exit 2, nothing outside the file pins it); with `--check-flagsmith`, run while that lab was up,
 both ended `VERIFIED: all 23 checks passed`.
 
+## The language-model recording
+
+`data/replay-llm-openai.jsonl` is one live run on the shared self-hosted lab in which a language model, not the
+scripted agent, was the agent: `gpt-5-mini` through `uv run python examples/llm_agent/run.py live --model openai
+--with-traffic --export --wake-every 300`, with the contract service and `scripts/human_stand_in.py` running,
+then written with `scripts/export_replay.py`. The model drafted both contracts, started both experiments and
+took every look through the MCP tools; its transcript is `examples/llm_agent/transcripts/live.openai.jsonl`.
+Visitors were simulated by `examples/shop/visitors.py` (synthetic identities). Every number in it is what
+Flagsmith returned in that run. The write-up is [LLM-AGENT.md](LLM-AGENT.md).
+
+- Real effect (experiment 391): Flagsmith read "Winning" at look 1 (98.67% against the signed 99.9998%) and
+  look 2 (99.70% against 99.94%) while the contract held. The model did not ask to ship, so the trace has no
+  refused attempts. The contract fired a win at look 3 (99.93% against 99.49%) and `bold` shipped after the
+  owner's signed tap.
+- A/A (experiment 392): held at looks 1 to 3 and reached its horizon at look 4 (17.44%), keep control, after
+  the owner's tap.
+
+    uv run python scripts/judge_demo.py --replay data/replay-llm-openai.jsonl --no-hold
+
+The summary lines it prints:
+
+```
+[REPLAY 27.6x] 9 of 9 recorded decisions recomputed identically by this checkout's engine; 0 event(s) did not reproduce
+[REPLAY 27.6x] 0 of 0 recorded refusals refused again for the recorded reason (0 on Flagsmith's 'Winning' reading, 95% or more, while the contract held)
+```
+
+The verification bundles are `data/verify-llm-openai-cta.json` (`CONSISTENT (unpinned): 20 checks passed`) and
+`data/verify-llm-openai-aa.json` (`CONSISTENT (unpinned): 21 checks passed`); with `--check-flagsmith`, run while
+that lab was up, they ended `VERIFIED: all 22 checks passed` and `VERIFIED: all 23 checks passed`.
+
 `tests/test_replay.py` exports a run made over the test double of Flagsmith, replays it with no
 difference, shows that an edited Flagsmith number or a signature by the wrong key does not reproduce, and
-replays the shipped traces, including the signed-autonomy one.
+replays the shipped traces, including the signed-autonomy and language-model ones.
