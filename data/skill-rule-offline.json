@@ -1,0 +1,135 @@
+{
+ "label": "Agent skill stop rule on Flagsmith's stats.py, simulated synthetic identities (not user traffic)",
+ "rule": {
+  "early": 0.9987,
+  "final": 0.95,
+  "planned_identities_per_arm": 3000,
+  "reads": 30,
+  "identities_per_arm_per_read": 100,
+  "base_rate": 0.1
+ },
+ "engine": {
+  "constants.py": {
+   "tag": "v2.295.2",
+   "sha256": "d77d20ab300a198ca3ebacbace2c5ac22fc61529bff64ad166e9c55f10d4564d"
+  },
+  "stats.py": {
+   "tag": "v2.295.2",
+   "sha256": "97c5ebfca7c81a52ee234af24db5a831ec5f57bc9b461d23b50e5388d83bb880"
+  }
+ },
+ "command": "uv run python scripts/skill_rule_calibration.py --flagsmith-src <Flagsmith checkout>",
+ "aa": {
+  "relative_lift": 0.0,
+  "seeds": [
+   62944,
+   101,
+   202,
+   303,
+   404
+  ],
+  "skill_rule_ships": {
+   "count": 389,
+   "runs": 10000,
+   "rate": 0.0389,
+   "wilson95": [
+    0.0353,
+    0.0429
+   ]
+  },
+  "skill_rule_ships_before_planned_size": {
+   "count": 9,
+   "runs": 10000,
+   "rate": 0.0009,
+   "wilson95": [
+    0.0005,
+    0.0017
+   ]
+  },
+  "skill_rule_keeps_control_before_planned_size": {
+   "count": 0,
+   "runs": 10000,
+   "rate": 0.0,
+   "wilson95": [
+    0.0,
+    0.0004
+   ]
+  },
+  "first_read_over_95_ships": {
+   "count": 1337,
+   "runs": 10000,
+   "rate": 0.1337,
+   "wilson95": [
+    0.1272,
+    0.1405
+   ]
+  },
+  "one_read_at_planned_size_ships": {
+   "count": 389,
+   "runs": 10000,
+   "rate": 0.0389,
+   "wilson95": [
+    0.0353,
+    0.0429
+   ]
+  },
+  "mean_stop_read": 29.99
+ },
+ "lift_25pct": {
+  "relative_lift": 0.25,
+  "seeds": [
+   62945,
+   102,
+   203,
+   304,
+   405
+  ],
+  "skill_rule_ships": {
+   "count": 9096,
+   "runs": 10000,
+   "rate": 0.9096,
+   "wilson95": [
+    0.9038,
+    0.9151
+   ]
+  },
+  "skill_rule_ships_before_planned_size": {
+   "count": 4112,
+   "runs": 10000,
+   "rate": 0.4112,
+   "wilson95": [
+    0.4016,
+    0.4209
+   ]
+  },
+  "skill_rule_keeps_control_before_planned_size": {
+   "count": 0,
+   "runs": 10000,
+   "rate": 0.0,
+   "wilson95": [
+    0.0,
+    0.0004
+   ]
+  },
+  "first_read_over_95_ships": {
+   "count": 9097,
+   "runs": 10000,
+   "rate": 0.9097,
+   "wilson95": [
+    0.9039,
+    0.9152
+   ]
+  },
+  "one_read_at_planned_size_ships": {
+   "count": 9096,
+   "runs": 10000,
+   "rate": 0.9096,
+   "wilson95": [
+    0.9038,
+    0.9151
+   ]
+  },
+  "mean_stop_read": 26.19
+ },
+ "aligned_with": "data/offline.json (same draws: first-95% ships match)"
+}
