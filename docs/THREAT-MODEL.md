@@ -103,6 +103,23 @@ every action waits for the tap; existing contracts keep their hashes. Tests in `
 | A store edit marks a proposal autonomous for an action the signed clause does not list (or for an amendment's action) | `execute` re-checks the proposal against the signed clause at the moment of execution and refuses | `test_store_edit_marking_a_ship_autonomous_is_refused` |
 | An exporter marks an executed outcome `signed_autonomy` to skip the tap check | `ulysses verify` checks it against the contract's `[autonomy]` clause and fails it unless it is a look-fired action the clause lists | `test_verify_fails_an_autonomous_execution_the_clause_does_not_list` (`tests/test_autonomy.py`) |
 
+### Asking the owner (`ULYSSES_NOTIFY_URL`)
+
+The service can post a message when an action waits for the owner's tap, and an FYI after an autonomous
+`keep_control`. The message is outbound only and authorises nothing: an action that waits for a tap still runs
+only after the owner's signature over the card's text, made with the owner's key. Tests in `tests/test_notify.py`.
+
+| Attack | Defence | Test |
+|---|---|---|
+| Someone who can read the chat channel, or forge a message in it, treats it as approval | The service accepts no input from the channel; nothing about a proposal changes when a message is sent or answered; only the signed tap runs it | `test_the_message_grants_nothing_the_tap_still_runs_the_action` |
+| The hypothesis or an amendment reason carries `<https://evil|approve here>`, `@everyone` or markdown into Slack or Discord | That text appears only in one labelled field, cut to 160 characters, with everything outside a small plain set replaced by `?`; Discord mentions are turned off in the body | `test_no_secret_and_no_raw_agent_text_in_the_body` |
+| A message leaks the Flagsmith key, the agent token or a webhook secret | The message is built from the decision and contract facts only; one that would contain a configured secret is withheld and recorded as a failure. The URL itself is treated as a secret: it is never logged, stored, returned by a route, or put in a fault's text | `test_a_message_that_would_carry_a_secret_is_withheld`, `test_a_failed_delivery_is_a_fault_and_the_decision_is_unaffected` |
+| A slow or failing receiver blocks or changes a decision | The decision is committed before any message is sent; a failure is a service fault, retried a bounded number of times, never raised to the caller | `test_a_failed_delivery_is_a_fault_and_the_decision_is_unaffected`, `test_retries_are_bounded`, `test_a_transport_that_raises_anything_never_breaks_the_look` |
+| A restart re-sends every old message | Each (proposal, kind) is a row in the store; a sent one is never sent again | `test_restart_over_the_same_store_does_not_send_again` |
+
+The card URL in the message carries a read capability for that experiment (as every card link does); it lets the
+holder read the card until it expires, never sign or confirm.
+
 ### Races
 
 | Attack | Defence | Test |

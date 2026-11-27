@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 
+from .. import notify as nt
 from ..core import Settings, Ulysses
 from ..flagsmith.rest import RestFlagsmith
 from ..store import Store
@@ -91,10 +92,14 @@ def build(db_path: str | Path | None = None) -> tuple[Ulysses, dict]:
                         refresh_wait_seconds=float(os.environ.get("ULYSSES_REFRESH_WAIT", "150")),
                         **link_settings())
     store = Store(db_path or os.environ.get("ULYSSES_DB", ".run/ulysses.db"))
+    webhook_secret = os.environ.get("ULYSSES_WEBHOOK_SECRET") or None
+    # Asks the owner when an action waits for a tap. A message that would carry one of these is withheld.
+    notifier = nt.from_env(os.environ, secrets=[key, token, webhook_secret or "", health_url or "", slack or ""])
     svc = Ulysses(store, RestFlagsmith(url, key), settings,
-                  notify=slack_notifier(slack, public_url) if slack else None)
-    return svc, {"agent_token": token, "flagsmith_key": key, "webhook_secret": os.environ.get("ULYSSES_WEBHOOK_SECRET") or None,
-                 "public_url": public_url, "health_webhook_url": health_url}
+                  notify=slack_notifier(slack, public_url) if slack else None, notifier=notifier)
+    return svc, {"agent_token": token, "flagsmith_key": key, "webhook_secret": webhook_secret,
+                 "public_url": public_url, "health_webhook_url": health_url,
+                 "notify_url": notifier.url if notifier else None}
 
 
 def start_poller(svc: Ulysses, every_seconds: float) -> threading.Thread:
@@ -119,6 +124,9 @@ def make_asgi(poll_seconds: float | None = None):
     if poll_seconds:
         log.info("taking looks on schedule every %.0f s (subject to each contract's refresh floor)", poll_seconds)
         start_poller(svc, poll_seconds)
+    if svc.notifier is not None:
+        log.info("asking the owner by %s when an action waits for a tap", svc.notifier.channel)
+        svc.retry_notifications()  # failed messages get their next round; a sent one is never sent again
     insecure = os.environ.get("ULYSSES_WEBHOOK_INSECURE") == "1"
     if not cfg["webhook_secret"]:
         log.warning("ULYSSES_WEBHOOK_SECRET is not set: %s", "accepting UNSIGNED audit webhooks (dev only)"
@@ -128,7 +136,7 @@ def make_asgi(poll_seconds: float | None = None):
           f"{svc.overview_link()}", flush=True)
     return create_app(svc, agent_token=cfg["agent_token"],
                       protected_secrets=[cfg["flagsmith_key"], cfg["webhook_secret"] or "",
-                                         cfg["health_webhook_url"] or ""],
+                                         cfg["health_webhook_url"] or "", cfg["notify_url"] or ""],
                       webhook_secret=cfg["webhook_secret"], webhook_insecure=insecure)
 
 
