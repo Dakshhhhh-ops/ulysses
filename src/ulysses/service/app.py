@@ -173,6 +173,8 @@ class DraftBody(BaseModel):
     identities_per_arm: int | None = None
     expected_rate_per_hour: float | None = None
     start_within_days: int = 30
+    # How long the contract governs from the experiment's start, e.g. "30d" or "36h". None: no expiry.
+    expires_after: str | None = None
     guardrail_alpha: float = 0.01
     override_reason: str | None = None
     # Actions the agent may run without the owner's tap (only keep_control); the owner signs this clause.

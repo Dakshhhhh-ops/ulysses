@@ -59,6 +59,17 @@ A card that waits for a tap is no use if nobody opens it. Set `ULYSSES_NOTIFY_UR
 
 The card shows whether the owner was asked, or how to turn this on when it is not configured.
 
+### When a contract expires
+
+A contract can also sign how long it governs, counted from the experiment's start, so no calendar date lives in the file:
+
+```toml
+[validity]
+expires_after = "30d"   # or hours: "36h"
+```
+
+If no look has decided by then, the next look ends the experiment as **expired: no decision, keep control**, the same as reaching the horizon without crossing the boundary; it never ships. A win, a loss or a guardrail breach at that look still stands. A contract whose experiment has not started that long after the owner signed can no longer start one. The signing page says it in plain words, the card and the voyage show the expiry, and `ulysses verify` re-derives it offline from each look's time since the start (a duration, covered by the owner's tap). The `ulysses init` template signs 30 days; contracts without the line never expire and keep their hash.
+
 ## What is new here, and what is not
 
 Sequential testing is not new: Optimizely, Statsig, GrowthBook and Eppo all correct for peeking, and GrowthBook and Spotify's Confidence fix decision criteria before results arrive. Agents that run experiments through MCP are not new either. What Ulysses adds is the binding: the stop rule is a file the owner signs before any data exists, its hash is written into the Flagsmith experiment, and the agent's authority is exactly "the signed rule fired and the owner tapped" (or "the owner signed this outcome as autonomous"). Anyone can re-check a decision offline with `ulysses verify`.
@@ -148,6 +159,14 @@ Flagsmith does the assignment, the measurement, the inference and the rollout. U
 | Self-hosting with Docker | The demo and CI run a stock image pinned by digest. |
 
 ### Against your own Flagsmith
+
+In your own project, one command, no clone (it installs from this repository; the package is not on PyPI):
+
+```sh
+uvx --from git+https://github.com/Dakshhhhh-ops/ulysses ulysses init --flagsmith-url http://localhost:8000
+```
+
+That writes `.env`, a contract template and a `ulysses.mcp.json` whose server runs through the same `uvx --from git+...` line, and prints the next three commands (`keys new`, `signer add`, `serve`). The steps below use a clone instead, for the demo scripts.
 
 Self-hosted Flagsmith needs `EXPERIMENTATION_ENABLED=true`, and `SSRF_ALLOWED_HOSTS=host.docker.internal` if Flagsmith runs in Docker and the contract service on the host. Tested on self-hosted 2.295.2 only; Flagsmith Cloud is untested, and its webhook would need a public URL for the service.
 
@@ -317,7 +336,7 @@ ulysses lab setup [--no-webhook] [--no-health]
 ulysses notify test                send a sample "ask the owner" message to ULYSSES_NOTIFY_URL
 ```
 
-Errors print one line and a next step; `ULYSSES_DEBUG=1` shows the traceback. The distribution name is `flagsmith-ulysses` (`ulysses` is taken on PyPI); it is not published, so install from the repository.
+Errors print one line and a next step; `ULYSSES_DEBUG=1` shows the traceback. The distribution name is `flagsmith-ulysses` (`ulysses` is taken on PyPI); it is not published, so install from the repository: `uvx --from git+https://github.com/Dakshhhhh-ops/ulysses ulysses <command>` runs any command above without a clone.
 
 ## Limitations
 

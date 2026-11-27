@@ -81,12 +81,17 @@ EVIDENCE_SEED = "ulysses/v2/look-evidence"
 DECISION_FIELDS = ("outcome", "action", "counted", "look_number", "identities_per_arm", "fraction",
                    "chance_to_win", "boundary_z", "boundary_chance", "guardrail")
 GUARDRAIL_FIELDS = ("name", "chance_worse", "boundary_z", "state")
+EXPIRY_FIELDS = ("expires_after", "elapsed_seconds", "expired")
 
 
 def decision_record(decision: dict | None) -> dict:
     d = decision or {}
-    return ({k: d.get(k) for k in DECISION_FIELDS}
-            | {"guardrails": [{k: g.get(k) for k in GUARDRAIL_FIELDS} for g in d.get("guardrails") or []]})
+    out = ({k: d.get(k) for k in DECISION_FIELDS}
+           | {"guardrails": [{k: g.get(k) for k in GUARDRAIL_FIELDS} for g in d.get("guardrails") or []]})
+    if d.get("expiry") is not None:
+        # Only under a contract that signs an expiry, so records (and tap hashes) of other looks are unchanged.
+        out["expiry"] = {k: d["expiry"].get(k) for k in EXPIRY_FIELDS}
+    return out
 
 
 def evidence_hash(looks: Iterable[tuple[int, str, str, dict | None, bool, dict | None]]) -> str:
