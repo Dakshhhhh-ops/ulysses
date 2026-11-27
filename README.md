@@ -47,6 +47,21 @@ without_confirmation = ["keep_control"]
 
 With that clause the agent rolls back on its own when a guardrail breaks, the experiment loses or it reaches its planned size: keeping control changes nothing for users, and a harmful variation should stop at night without waking anyone. Shipping is never on that list. A contract that names `ship_treatment` is rejected when it is drafted, so putting a variation in front of everyone always waits for the owner's signed tap. Changing the clause is an amendment and needs both signers. Every executed action records which of the two authorised it, and `ulysses verify` fails an autonomous action the clause does not list.
 
+Recorded on self-hosted Flagsmith, both contracts signed with that clause (synthetic visitors, looks at the five-minute floor):
+
+| Experiment | What Flagsmith read | Contract | What the agent did |
+|---|---|---|---|
+| 388, two identical arms | 7.92%, 4.11%, 2.52%, 2.24%, then 1.30% at the planned size | loss (a false one: the arms are identical), keep control | Asked to ship: refused. Then ran `keep_control` itself, no tap, `authorised_by signed_autonomy` |
+| 387, a real effect | 33.96%, 88.80%, then 96.73% ("Winning") at look 3 | hold at look 3, win at look 4 (98.95% against 98.76%) | Asked to ship at look 3: refused. Asked again after the win, before the tap: refused. Shipped `bold` after the owner's signed tap, `authorised_by owner_tap` |
+
+```
+uv run python scripts/judge_demo.py --replay data/replay-autonomy.jsonl --no-hold
+[REPLAY] 11 of 11 recorded decisions recomputed identically by this checkout's engine; 0 event(s) did not reproduce
+[REPLAY] 5 of 5 recorded refusals refused again for the recorded reason (1 on Flagsmith's 'Winning' reading, 95% or more, while the contract held)
+uv run ulysses verify --bundle data/verify-autonomy-aa.json     # the autonomous keep control
+uv run ulysses verify --bundle data/verify-autonomy-cta.json    # the tapped ship
+```
+
 ### Asking the owner
 
 A card that waits for a tap is no use if nobody opens it. Set `ULYSSES_NOTIFY_URL` in `.env` and the service sends one message when an action waits for the owner's tap (a win's `ship_treatment`, any action the `[autonomy]` clause does not list, an amendment's immediate action), and one FYI after the agent ran a `keep_control` on its own under the signed clause. The message says, in plain words, which experiment and flag it is, what the contract decided and why, Flagsmith's reading at that look, what is waiting, and the card's absolute URL (from `ULYSSES_PUBLIC_URL`).
@@ -266,7 +281,7 @@ Real-effect rows: `uv run ulysses verify --bundle data/verify-judge-demo-cta.jso
 | Clear output | One card per look: Flagsmith's chance to win, what the contract needs at this look, each guardrail's reading against its rule, hold or fire, and the pre-signed action. |
 | A working demo | `uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl` in two minutes; `uv run python scripts/judge_demo.py` live with Docker and uv. |
 
-CI runs four jobs on every push (`.github/workflows/ci.yml`): the unit tests, a JS/Python parity test for the boundary drawing, the replay above (exits non-zero if any recorded decision, signature or execution does not reproduce), and a smoke test that boots the repo's Flagsmith, signs, starts and takes one look. Locally `uv run pytest -q` gives 454 passed (with a Flagsmith checkout next to the repository); the few skipped tests need a live Flagsmith, Docker, a Flagsmith checkout or Playwright.
+CI runs four jobs on every push (`.github/workflows/ci.yml`): the unit tests, a JS/Python parity test for the boundary drawing, the replay above (exits non-zero if any recorded decision, signature or execution does not reproduce), and a smoke test that boots the repo's Flagsmith, signs, starts and takes one look. Locally `uv run pytest -q` gives 493 passed (with a Flagsmith checkout next to the repository); the few skipped tests need a live Flagsmith, Docker, a Flagsmith checkout or Playwright.
 
 ## Agent skills (Track 04)
 
