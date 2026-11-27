@@ -295,3 +295,41 @@ def test_autonomy_trace_keeps_control_without_a_tap_and_ship_still_waits(tmp_pat
     assert any(s.kind == "attempt" and "before the owner's tap" in s.text for s in steps)
     assert [s.kind for s in steps].count("confirm") == 1
     assert sorted(r.fs.served.values()) == ["bold", "control"]
+
+
+LLM_OPENAI = ROOT / "data" / "replay-llm-openai.jsonl"
+LLM_TRANSCRIPT = ROOT / "examples" / "llm_agent" / "transcripts" / "live.openai.jsonl"
+
+
+@pytest.mark.skipif(not LLM_OPENAI.exists(), reason="the language-model live recording is not shipped")
+def test_language_model_trace_replays_and_matches_its_transcript(tmp_path):
+    """The live run where gpt-5-mini was the agent: it held through two looks at which Flagsmith read Winning,
+    the contract fired a win at look 3 and the A/A contract kept control at its horizon. Every look the
+    transcript shows the model is a look in the trace, with the same Flagsmith chance to win."""
+    header, events = load_trace(LLM_OPENAI)
+    for line in LLM_OPENAI.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        free = {k: v for k, v in row.items() if k not in ("signature", "public_key", "canonical", "hash")}
+        assert not DATE_OR_TIME.search(json.dumps(free)), free
+    r, steps = _play(header, events, tmp_path)
+    assert r.mismatches == [], [s.text for s in r.mismatches]
+    assert len([s for s in steps if s.kind == "look"]) == header["counts"]["look"]
+    assert r.sirens == []  # sirens count refused ship requests; the model made none
+    winning_held = [e for e in events if e["event"] == "look" and e["decision"]["outcome"] == "hold"
+                    and (e["decision"]["chance_to_win"] or 0) >= 0.95]
+    assert len(winning_held) == 2  # looks 1 and 2 of the real-effect experiment: Flagsmith read Winning
+    assert [s.kind for s in steps].count("confirm") == 2
+    assert sorted(r.fs.served.values()) == ["bold", "control"]
+    # The model's transcript: no 403 (it never asked to ship early), and its looks are the trace's looks.
+    rows = [json.loads(x) for x in LLM_TRANSCRIPT.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert rows[0]["model"] == "gpt-5-mini" and rows[0]["model_client"] == "openai"
+    assert not any(x.get("refused") for x in rows if x["kind"] == "tool_result")
+    assert not any(x["name"] == "execute" for x in rows if x["kind"] == "tool_call")
+    seen = {round(x["result"]["decision"]["chance_to_win"], 6) for x in rows
+            if x["kind"] == "tool_result" and x["name"] == "look"
+            and (x["result"].get("decision") or {}).get("chance_to_win") is not None}
+    traced = {round(e["decision"]["chance_to_win"], 6) for e in events
+              if e["event"] == "look" and e["decision"]["chance_to_win"] is not None}
+    assert seen and seen <= traced
+    text = LLM_TRANSCRIPT.read_text(encoding="utf-8")
+    assert not DATE_OR_TIME.search(text) and "cap=1" not in text and not re.search(r"\bsk-[A-Za-z0-9_\-]{16,}", text)

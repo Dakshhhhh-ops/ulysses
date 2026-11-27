@@ -278,6 +278,8 @@ def test_runner_offers_gemini_and_names_each_clients_model(monkeypatch):
     assert run.model_name(M("anthropic")) == run.MODEL_ID
     assert run.model_name(M("mock")).startswith("none: scripted mock")
     assert run.export_target(run.EXPORT_DIR, "gemini") == run.EXPORT_DIR
+    for var in ("OPENAI_API_KEY", "OPEN_AI_API_KEY"):  # an OpenAI key, when present, comes first
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-0000")
     monkeypatch.setattr(gm, "GeminiModel", lambda model: M("gemini", model))
     assert run.choose_model("auto", "early-96", {}).label == "gemini"

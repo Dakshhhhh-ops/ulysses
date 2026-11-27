@@ -101,7 +101,8 @@ def settings() -> tuple[str, str]:
 
 def start_traffic(a, procs: list) -> None:
     port = a.shop_port
-    env = {**os.environ, "SHOP_PORT": str(port)}
+    model_keys = ("OPENAI_API_KEY", "OPEN_AI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY")  # the shop needs none
+    env = {**{k: v for k, v in os.environ.items() if k not in model_keys}, "SHOP_PORT": str(port)}
     shop = subprocess.Popen([sys.executable, str(ROOT / "examples/shop/shop.py")], cwd=ROOT, env=env)
     procs.append(shop)
     deadline = time.time() + 90
@@ -121,7 +122,7 @@ def start_traffic(a, procs: list) -> None:
             "--per-minute", str(a.visitors_per_minute), "--minutes", "120",
             "--classic", str(a.classic), "--bold", str(a.bold),
             "--refund-classic", str(a.refund_classic), "--refund-bold", str(a.refund_bold)]
-    procs.append(subprocess.Popen(args, cwd=ROOT))
+    procs.append(subprocess.Popen(args, cwd=ROOT, env=env))
     say("SETUP", f"demo shop on :{port} and simulated visitors started (synthetic: purchase {a.classic:.0%} after "
                  f"classic, {a.bold:.0%} after bold; the headline flag is A/A)", DIM)
 
