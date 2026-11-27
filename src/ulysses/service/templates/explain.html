@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% from "_two_ships.html" import two_ships %}
+{% set nav = "explain" %}
+{% block title %}New here? · Ulysses{% endblock %}
+{%- set r = rates -%}
+{%- set st = story -%}
+{%- macro box(b, x, y, w, h, lab, fs) -%}
+<g class="xp-box" data-tone="{{ b.tone }}">
+  <rect x="{{ x }}" y="{{ y }}" width="{{ w }}" height="{{ h }}" rx="2" />
+  <text class="xp-lab" x="{{ x + 14 }}" y="{{ y + 24 }}" style="font-size:{{ lab }}px">{{ b.n }} · {{ b.lab }}</text>
+  <text class="xp-txt" x="{{ x + 14 }}" y="{{ y + 52 }}" style="font-size:{{ fs }}px">{{ b.a }}</text>
+  <text class="xp-txt" x="{{ x + 14 }}" y="{{ y + 52 + fs + 6 }}" style="font-size:{{ fs }}px">{{ b.b }}</text>
+</g>
+{%- endmacro -%}
+{%- set steps = [
+  {"n": 1, "lab": "BEFORE THE TEST", "a": "The owner signs", "b": "the stop contract", "tone": "contract"},
+  {"n": 2, "lab": "ALL DAY LONG", "a": "The agent reads", "b": "Flagsmith's scoreboard", "tone": "flagsmith"},
+  {"n": 3, "lab": "THE CONTRACT", "a": "Keep waiting (HOLD)", "b": "or stop now (STOP)", "tone": "rule"},
+  {"n": 4, "lab": "A PERSON", "a": "The owner taps", "b": "confirm", "tone": "contract"},
+  {"n": 5, "lab": "THE CHANGE", "a": "Flagsmith switches", "b": "the flag for everyone", "tone": "flagsmith"},
+] -%}
+{% block main %}
+<div class="xp">
+<div class="page-head">
+  <p class="label">New here? Start here · no maths, no Flagsmith needed</p>
+  <h1>Ulysses in five minutes</h1>
+  <p class="lede">A shop tries two versions of a button. A scoreboard says which one is winning. People, and now software agents, keep checking that scoreboard and stop the moment it looks good. That habit ships changes that do nothing. Ulysses is a signed promise, made before the test starts, about when stopping is allowed.</p>
+</div>
+
+<ol class="xp-toc" aria-label="On this page">
+  <li><a href="#story">The shop and its button</a></li>
+  <li><a href="#trap">The trap</a></li>
+  <li><a href="#agent">Why an agent makes it worse</a></li>
+  <li><a href="#mast">Tied to the mast</a></li>
+  <li><a href="#check">Check it yourself</a></li>
+  <li><a href="#words">Words used here</a></li>
+</ol>
+
+<section class="xp-sec" id="story" aria-labelledby="story-h">
+  <p class="xp-no">1</p>
+  <div class="xp-body">
+    <h2 id="story-h">The shop and its button</h2>
+    <p>Maya runs an online shop. She wonders if a bold <b>&#8220;Buy now&#8221;</b> button sells more than the plain <b>&#8220;Buy&#8221;</b> one.</p>
+    <p>So she runs a test. Half the visitors see the old button and half see the new one. Nobody is told.</p>
+    <p><b>Flagsmith</b> is the switchboard behind it. It decides who sees which button, counts who buys, and keeps a scoreboard.</p>
+    <p>The scoreboard shows a <b>chance to win</b>: how sure it is that the new button is better. Past 95%, Flagsmith&#8217;s guide calls the new button <b>&#8220;Winning&#8221;</b>.</p>
+    <div class="xp-buttons" aria-hidden="true">
+      <div class="xp-variant"><span class="label">Half the visitors</span><span class="xp-btn">Buy</span></div>
+      <div class="xp-variant"><span class="label">The other half</span><span class="xp-btn bold">Buy now</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="xp-sec" id="trap" aria-labelledby="trap-h">
+  <p class="xp-no">2</p>
+  <div class="xp-body">
+    <h2 id="trap-h">The trap: checking too often</h2>
+    <p>95% sounds safe. It is fair if you read the scoreboard once, at the end you planned.</p>
+    <p>But the score wobbles from hour to hour, just by luck. Check it every few minutes and stop the first time it says Winning, and luck alone will often get you there.</p>
+    {%- if r %}
+    <div class="xp-stat">
+      <p class="xp-big">{{ r.peek }}</p>
+      <p>We made both buttons <b>exactly the same</b>, so there was nothing real to find, and ran that test {{ r.n }} times on Flagsmith&#8217;s own scoring code. Stopping at the first &#8220;Winning&#8221; out of {{ r.looks }} checks shipped a do-nothing change in <b>{{ r.peek }}</b> of them.</p>
+      <p class="muted">Reading the scoreboard once, at the planned end: {{ r.once }}. Under a signed Ulysses contract just as strict: {{ r.same }}{% if r.default %} (and {{ r.default }} at its default setting){% endif %}.</p>
+    </div>
+    {%- else %}
+    <p class="err-panel">The committed calibration file (data/offline.json) could not be read, so the numbers are not shown.</p>
+    {%- endif %}
+    <p>Below are 100 of those identical tests, run twice. Each line is one test. Each red ship is a change that would have gone live for no reason.</p>
+  </div>
+</section>
+{%- if ts %}
+<div class="xp-ships">{{ two_ships(ts, 2) }}</div>
+{%- endif %}
+
+<section class="xp-sec" id="agent" aria-labelledby="agent-h">
+  <p class="xp-no">3</p>
+  <div class="xp-body">
+    <h2 id="agent-h">Why an AI agent makes it worse</h2>
+    <p>An <b>agent</b> is a program that acts on its own: it reads the scoreboard and flips the switch without asking.</p>
+    <p>A person checks a few times a day and gets bored. An agent checks every few minutes, all night, and never gets bored.</p>
+    <p>So it finds every lucky moment. Tell it &#8220;ship the best button fast&#8221; and it will ship the first lucky one.</p>
+  </div>
+</section>
+
+<section class="xp-sec" id="mast" aria-labelledby="mast-h">
+  <p class="xp-no">4</p>
+  <div class="xp-body">
+    <h2 id="mast-h">Tied to the mast</h2>
+    <p>In the old story, Ulysses wanted to hear the Sirens&#8217; song without steering onto the rocks. So before his ship came near, he had his crew tie him to the mast.</p>
+    <p>Ulysses does the same for a test. Before any visitor arrives, the owner signs a <b>stop contract</b>. It says three things:</p>
+    <ul class="xp-list">
+      <li><b>When</b> the test may stop. Early checks need a much higher score; the bar comes down as data piles up.</li>
+      <li><b>What counts as a win</b>, and what must not get worse (refunds, say).</li>
+      <li><b>What the agent may do alone.</b> Keeping the old button is allowed. Shipping the new one never is.</li>
+    </ul>
+    <p>The agent can read Flagsmith freely. It can only <b>act</b> through the contract. If it tries to ship early, it is refused, and the refusal is written down. Shipping always waits for the owner&#8217;s tap.</p>
+  </div>
+</section>
+
+<figure class="xp-flow">
+  <svg class="xp-wide" viewBox="0 0 1000 272" role="img" aria-labelledby="flow-t">
+    <title id="flow-t">How a test runs under Ulysses: 1, the owner signs the stop contract before the test. 2, the agent reads Flagsmith's scoreboard every few minutes. 3, the contract says hold (look again later) or stop. An early attempt to ship is refused and recorded. 4, the owner taps confirm. 5, Flagsmith switches the flag for everyone.</title>
+    <defs><marker id="xp-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" class="xp-head" /></marker>
+      <marker id="xp-arl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" class="xp-head-loss" /></marker></defs>
+    <path class="xp-loop" d="M500,58 C500,14 295,14 295,58" marker-end="url(#xp-ar)" />
+    <text class="xp-note" x="398" y="22" text-anchor="middle">HOLD: look again later</text>
+    {%- for b in steps %}
+    {{ box(b, 10 + loop.index0 * 205, 60, 160, 104, 11, 14) }}
+    {%- if not loop.last %}<line class="xp-arrow" x1="{{ 172 + loop.index0 * 205 }}" y1="112" x2="{{ 212 + loop.index0 * 205 }}" y2="112" marker-end="url(#xp-ar)" />{% endif %}
+    {%- endfor %}
+    <text class="xp-note xp-halo" x="592" y="104" text-anchor="middle">STOP</text>
+    <line class="xp-refuse" x1="500" y1="166" x2="500" y2="200" marker-end="url(#xp-arl)" />
+    <g class="xp-pill"><rect x="360" y="204" width="280" height="56" rx="2" />
+      <text x="500" y="227" text-anchor="middle" class="xp-txt" style="font-size:14px">Agent tries to ship early?</text>
+      <text x="500" y="248" text-anchor="middle" class="xp-txt xp-loss" style="font-size:14px">Refused, and the refusal is recorded</text></g>
+  </svg>
+  <svg class="xp-tall" viewBox="0 0 360 640" aria-hidden="true">
+    <path class="xp-loop" d="M40,318 C6,318 6,188 36,188" marker-end="url(#xp-ar2)" />
+    <defs><marker id="xp-ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" class="xp-head" /></marker>
+      <marker id="xp-arl2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" class="xp-head-loss" /></marker></defs>
+    <text class="xp-note" transform="translate(14,253) rotate(-90)" text-anchor="middle">HOLD</text>
+    {%- for b in steps %}
+    {{ box(b, 40, 10 + loop.index0 * 130, 204, 96, 10, 15) }}
+    {%- if not loop.last %}<line class="xp-arrow" x1="142" y1="{{ 108 + loop.index0 * 130 }}" x2="142" y2="{{ 136 + loop.index0 * 130 }}" marker-end="url(#xp-ar2)" />{% endif %}
+    {%- endfor %}
+    <text class="xp-note" x="152" y="392">STOP</text>
+    <line class="xp-refuse" x1="246" y1="318" x2="262" y2="318" marker-end="url(#xp-arl2)" />
+    <g class="xp-pill"><rect x="266" y="276" width="90" height="84" rx="2" />
+      <text x="311" y="300" text-anchor="middle" class="xp-txt" style="font-size:13px">Ship early?</text>
+      <text x="311" y="322" text-anchor="middle" class="xp-txt xp-loss" style="font-size:13px">Refused,</text>
+      <text x="311" y="342" text-anchor="middle" class="xp-txt xp-loss" style="font-size:13px">recorded</text></g>
+  </svg>
+  <figcaption class="cap">The agent can loop between steps 2 and 3 as often as it likes. It cannot reach step 5 without step 4.</figcaption>
+</figure>
+
+<section class="xp-sec" id="tempted" aria-labelledby="tempted-h">
+  <p class="xp-no" aria-hidden="true">&#8594;</p>
+  <div class="xp-body">
+    <h2 id="tempted-h">It really happened: the agent tried to ship. Twice.</h2>
+    {%- if st %}
+    <p>We told an agent to behave like a hurried person: whenever Flagsmith said Winning, ship. Then we ran a real test on our own copy of Flagsmith, with made-up visitors. The new version was called <code>{{ st.treatment }}</code>.</p>
+    <div class="table-wrap xp-table" role="region" aria-label="Each check in the recorded run" tabindex="0">
+    <table>
+      <thead><tr><th scope="col">Check</th><th scope="col" class="num">Flagsmith&#8217;s chance to win</th><th scope="col" class="num">Contract needs</th><th scope="col">What happened</th></tr></thead>
+      <tbody>
+      {%- for lk in st.looks %}
+        <tr{% if lk.refused %} class="xp-siren"{% endif %}>
+          <td>{{ lk.n }}{% if loop.last %} (last){% endif %}</td>
+          <td class="num">{{ lk.ctw }}{% if lk.winning %} <span class="xp-tag">Winning</span>{% endif %}</td>
+          <td class="num">{{ lk.needs }}</td>
+          <td>{% if lk.refused %}Agent asked to ship. <b class="xp-loss">Refused</b>, and recorded.{% elif loop.last and st.kept_control %}Test reached its planned size: keep the old version, as signed.{% else %}Keep waiting.{% endif %}</td>
+        </tr>
+      {%- endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p>Flagsmith said Winning at {{ st.sirens | length }} checks ({% for s in st.sirens %}{{ s.ctw }}{% if not loop.last %} and {% endif %}{% endfor %}). The contract held both times, and the agent&#8217;s {{ st.refused }} ship requests were refused. By the last check the score had fallen to {{ st.end.ctw }}.</p>
+    {%- if st.kept_control %}<p>The contract&#8217;s answer was to keep the old version.{% if st.tapped_by %} The owner, {{ st.tapped_by }}, tapped to confirm, and Flagsmith kept serving <code>{{ st.serving or st.control }}</code>.{% endif %} Nothing shipped by luck.</p>{% endif %}
+    <p class="muted">Read from <code>{{ st.file }}</code>, the recording of that run.</p>
+    {%- else %}
+    <p class="err-panel">The recorded run (data/replay-tempted.jsonl) could not be read.</p>
+    {%- endif %}
+  </div>
+</section>
+
+<section class="xp-sec" id="check" aria-labelledby="check-h">
+  <p class="xp-no">5</p>
+  <div class="xp-body">
+    <h2 id="check-h">Check it yourself</h2>
+    <p>You do not have to trust us, or this page.</p>
+    <div class="xp-checks">
+      <div class="sheet">
+        <p class="label">Re-check a decision</p>
+        <p><code>ulysses verify</code> re-reads the signed contract, checks the signatures, and redoes every check from Flagsmith&#8217;s own numbers.</p>
+        <p class="cmd"><code>uv run ulysses verify --bundle data/verify-judge-demo-cta.json</code></p>
+      </div>
+      <div class="sheet">
+        <p class="label">Replay the agent</p>
+        <p>The replay plays the recorded run above through the real service and opens its decision cards in your browser.</p>
+        <p class="cmd"><code>uv run python scripts/judge_demo.py --replay data/replay-tempted.jsonl --open</code></p>
+      </div>
+      <div class="sheet">
+        <p class="label">See the full numbers</p>
+        <p>The calibration page has every count and its margin of error, read from the files in <code>data/</code>.</p>
+        <p><a href="/calibration">Open the calibration page</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="xp-sec" id="words" aria-labelledby="words-h">
+  <p class="xp-no">6</p>
+  <div class="xp-body">
+    <h2 id="words-h">Words used here</h2>
+    <dl class="xp-gloss">
+      <dt>Feature flag</dt><dd>A switch in the software that turns a change on or off without a new release.</dd>
+      <dt>Variant</dt><dd>One version being tested, like the &#8220;Buy&#8221; button or the &#8220;Buy now&#8221; button.</dd>
+      <dt>A/B test</dt><dd>Showing two variants to different visitors at random and comparing what they do.</dd>
+      <dt>Chance to win</dt><dd>Flagsmith&#8217;s estimate of how likely the new variant is really better than the old one.</dd>
+      <dt>Peeking</dt><dd>Checking the scoreboard again and again and stopping as soon as it looks good.</dd>
+      <dt>Contract</dt><dd>The stop rule written before the test starts: when it may stop, what counts as a win, and what the agent may do alone.</dd>
+      <dt>Signature</dt><dd>A digital seal from the owner&#8217;s own key; if one word of the contract changes, the seal no longer fits.</dd>
+    </dl>
+  </div>
+</section>
+
+<p class="xp-next"><a href="/">See the experiments under contract</a> · <a href="/calibration">See the calibration</a></p>
+</div>
+{% endblock %}

@@ -54,14 +54,14 @@
 </figure>
 {%- endmacro -%}
 
-{%- macro two_ships(ts) -%}
+{%- macro two_ships(ts, hl=1) -%}
 {%- if ts.error %}
 <div class="err-panel" style="margin-bottom:24px">{{ ts.error }}</div>
 {%- else %}
 <section class="ts" id="two-ships" aria-labelledby="ts-title" data-ts style="--ts-dur:{{ ts.duration }}s">
   <div class="ts-head">
     <p class="label">Two ships · the same {{ ts.runs }} A/A experiments, sailed twice · lab simulation on Flagsmith&#8217;s own stats code</p>
-    <h1 id="ts-title">The agent can&#8217;t peek its way to a ship</h1>
+    <h{{ hl }} id="ts-title">The agent can&#8217;t peek its way to a ship</h{{ hl }}>
     <p class="ts-lede">Every variation here does nothing. Each red ship is a change that would have gone live anyway.</p>
   </div>
   <div class="ts-grid">
