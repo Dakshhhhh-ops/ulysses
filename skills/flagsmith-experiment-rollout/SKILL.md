@@ -29,7 +29,8 @@ decide each read. (`python3` below is `python` on Windows.)
   lock them; changing them invalidates the result.
 - Refresh results at most once per 5 minutes per experiment. A 429 means wait, not retry.
 - Never print or commit API keys. Use `flagsmith login`, or the person's env file.
-- Use `--jq` on every read so only the needed fields come back.
+- Use `--jq` on reads you look at, so only the needed fields come back. Never on the two bodies piped
+  into `check` (it needs them whole) or on a POST that answers with an empty body (`refresh`).
 - If a command fails, show the error and stop; do not work around it.
 
 ## 0. Connect
@@ -45,7 +46,9 @@ flagsmith api "api/v1/environments/$E/warehouse-connections/?exclude_event_stats
 
 No binding: ask which project and environment, then `flagsmith init --project <p> --environment <key>`.
 No warehouse connection: send the person to docs.flagsmith.com/experimentation/connect-a-warehouse and stop.
-Below, `X` is the experiment id and `A=api/v1/environments/$E/experiments/$X`.
+Below, `X` is the experiment id and `A=api/v1/environments/$E/experiments/$X`, with no `/` at the
+end: each path adds its own (`$A/`, `$A/start/`). Set `E` first: every path uses it. A path without
+its final `/` returns the dashboard's HTML, and a `//` returns 405.
 
 ## 1. Plan (before anything exists)
 
@@ -53,7 +56,7 @@ Ask: what changes, the success event, a guardrail event (errors, refunds), contr
 conversion rate, and the smallest relative lift worth shipping. Then:
 
 ```sh
-python3 scripts/stop_rule.py plan --baseline-rate 0.10 --min-lift 0.10 [--variants 2]
+python3 scripts/stop_rule.py plan --baseline-rate 0.10 --min-lift 0.10 [--variants 1]   # variations besides control
 # {"identities_per_arm": 12786, "tag": "[stop-rule v1 n=12786 early=0.9987 final=0.95 guard=0.95]"}
 ```
 
@@ -104,6 +107,8 @@ flagsmith api "$A/results/refresh/" -X POST          # 202, empty body; 429 = to
 { flagsmith api "$A/"; flagsmith api "$A/results/"; } | python3 scripts/stop_rule.py check -
 ```
 
+Run these two lines as written: no `--jq` on them, and `$A/` with its slash.
+
 `check` prints one JSON line. Act on `verdict` only:
 
 | verdict | do |
@@ -137,14 +142,17 @@ flagsmith eval <flag> --identity rollout-check-1 --jq '{enabled, value, variant}
 ```
 
 A rolled-out variant shows as `variant: <key>`; `flagsmith flag get` still shows control's `value`
-with that variant at weight 100. Undo (ask first): `flagsmith flag update <flag> --weight <key>=0`
-serves control again; `flagsmith flag disable <flag>` is the kill switch.
+with that variant at weight 100. Only if the person asks to reverse the decision (ask first):
+`flagsmith flag update <flag> --weight <key>=0` serves control again; `flagsmith flag disable <flag>`
+is the kill switch. Neither is cleanup: run neither after a rollout unless the person asked to undo it.
 
-## 6. Leave notes
+## 6. Leave notes, then stop
 
 Report the decision, the verdict line, the dashboard link
-(`<dashboard>/project/<project id>/environment/$E/experiments/$X`) and the follow-up: once the
-result is permanent, remove the losing variations and the experiment code path.
+(`<dashboard>/project/<project id>/environment/$E/experiments/$X`) and the follow-up for later, in
+the code, not now with the CLI: once the result is permanent, delete the code path that lost (control's,
+after a variant rollout) and the experiment code. Never set the rolled-out variation's weight to 0 and
+never delete the experiment: it is the record of the decision. The job ends here.
 
 For a stop rule the agent cannot bypass (signed before the start and enforced by a service that
 holds the Flagsmith key), see the `ulysses-stop-contract` skill.

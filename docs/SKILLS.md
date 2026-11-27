@@ -59,7 +59,9 @@ precision for something an agent can apply with no dependencies.
 - A sample-ratio mismatch, which Flagsmith's own `srm_p_value` cannot report for experiments created
   through the API, stops the agent with nothing shipped.
 - After `complete`, the agent checks what an identity is served, and knows the undo:
-  `flagsmith flag update <flag> --weight <key>=0`, or `flagsmith flag disable <flag>`.
+  `flagsmith flag update <flag> --weight <key>=0`, or `flagsmith flag disable <flag>`, for use only
+  when the person asks to reverse the decision. Then the job ends; cleanup is a later code change. A
+  live run showed why that line is needed: [SKILL-RUN.md](SKILL-RUN.md).
 - `ulysses-stop-contract` removes the Flagsmith credential from the agent's shell and leaves signing
   and confirming to people; the contract service refuses everything else.
 
@@ -69,9 +71,9 @@ Each look is three CLI calls and one line of output. The refresh call prints not
 the experiment and results bodies go straight into `check`, which prints one JSON line (the tests hold
 it under 700 characters). The raw bodies are several times that and grow with the experiment's age
 (hourly timeseries); the line does not. Every other read in the skill uses `--jq` to return only the
-ids and fields the next step needs. `SKILL.md` is about 8,000 characters (`wc -c`), loaded once; `references/REFERENCE.md` loads only when the
-agent needs a field or an endpoint. To record the token count of a demo run, read it from the agent's
-own usage display at the end of the run.
+ids and fields the next step needs. `SKILL.md` is about 9,000 characters (`wc -c`), loaded once; `references/REFERENCE.md` loads only when the
+agent needs a field or an endpoint. The measured token count of a live run by
+`gpt-5-mini`, call by call, is in [SKILL-RUN.md](SKILL-RUN.md).
 
 ## What the tests check
 
