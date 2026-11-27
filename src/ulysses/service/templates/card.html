@@ -89,6 +89,8 @@
     The horizon of {{ sc.contract.horizon | count }} identities per arm is reached without crossing the boundary.
   {%- elif outcome == 'guardrail_breach' -%}
     {{ dec.reason }}
+  {%- elif outcome == 'expired' -%}
+    The contract expired {{ dec.expiry.expires_after | default('') }} after the experiment started with no decision. It keeps control and ships nothing, the same as reaching the horizon without crossing the boundary. {{ dec.reason }}
   {%- endif -%}
   </p>
 </section>

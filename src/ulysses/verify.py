@@ -307,9 +307,7 @@ def _same_chance(a: float | None, b: float | None) -> bool:
 def _authorised(c: ct.Contract, outcome: str) -> str | None:
     if outcome == "amendment":
         return c.amendment.action_now if c.amendment else None
-    if outcome in FIRES:
-        return getattr(c.actions, outcome)
-    return None
+    return c.action_for(outcome) if outcome in FIRES else None
 
 
 def _shape_problem(bundle: Any) -> str | None:
@@ -356,6 +354,9 @@ def _shape_problem(bundle: Any) -> str | None:
         rg = lk["recorded"].get("guardrails")
         if not opt(rg, list) or not all(isinstance(g, dict) for g in rg or []):
             return f"looks[{i}].recorded.guardrails must be a list of objects"
+        rx = lk["recorded"].get("expiry")
+        if rx is not None and (not isinstance(rx, dict) or not is_int(rx.get("elapsed_seconds"))):
+            return f"looks[{i}].recorded.expiry must be an object with an integer elapsed_seconds"
         snap = lk.get("flagsmith")
         if snap is not None:
             if not isinstance(snap, dict):
@@ -605,6 +606,7 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
     # whichever contract counted it (an amendment integrates forward from them, as the service does).
     counted: list[CountedLook] = []
     first_fire: dict[str, dict] = {}  # contract hash -> the first look that fired under it
+    last_elapsed: int | None = None  # seconds since the start, at the last look that recorded it
     for lk in looks:
         lid = lk["id"]
         name = f"look {lk['seq']} ({lid})"
@@ -614,12 +616,26 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
             add("FAIL", name, f"recorded under {h}, which is not a verified contract in this bundle")
             continue
         obs = observation_from_snapshot(c, _snapshot(lk.get("flagsmith")))
-        d = evaluate(c, list(counted), obs)
+        rec = lk["recorded"]
+        diffs = []
+        # The signed expiry: the look's time since the start is the one number not from Flagsmith. It is
+        # covered by the owner's tap (signing.decision_record) and must never run backwards.
+        elapsed = (rec.get("expiry") or {}).get("elapsed_seconds")
+        if c.validity.expires_after is not None:
+            if elapsed is None:
+                diffs.append(f"the contract expires after {c.validity.expires_after}, but the look records no time "
+                             "since the start")
+            elif last_elapsed is not None and elapsed < last_elapsed:
+                diffs.append(f"time since the start runs backwards ({last_elapsed}s, then {elapsed}s)")
+            if elapsed is not None:
+                last_elapsed = elapsed
+        d = evaluate(c, list(counted), obs, elapsed if c.validity.expires_after is not None else None)
         recomputed[lid] = {"outcome": d.outcome, "action": d.action, "contract": h, "seq": lk["seq"]}
         if d.counted:
             counted.append(counted_look(d.to_dict()))
-        rec = lk["recorded"]
-        diffs = []
+        if d.expiry is not None and bool((rec.get("expiry") or {}).get("expired")) != d.expiry["expired"]:
+            diffs.append(f"expired recorded {(rec.get('expiry') or {}).get('expired')}, recomputed "
+                         f"{d.expiry['expired']}")
         if h in first_fire and d.counted:
             diffs.append(f"counted after look {first_fire[h]['id']} fired under the same contract; the service "
                          "takes no look once a contract has fired")
@@ -647,7 +663,10 @@ def _run_checks(bundle: dict, add, trusted_keys: dict[str, str], expect_hash: st
         if diffs:
             add("FAIL", name, "; ".join(diffs))
             continue
-        if d.outcome == "watch":
+        if d.outcome == "expired":
+            why = (f"{d.expiry['elapsed_seconds'] / 86400:.2f} days after the start, past the signed expiry "
+                   f"of {d.expiry['expires_after']}, with no decision -> expired, keep control")
+        elif d.outcome == "watch":
             why = (f"between looks at {d.identities_per_arm} per arm (next analysis at "
                    f"{d.next_look_at_identities}); nothing could fire")
         elif d.outcome == "not_ready":

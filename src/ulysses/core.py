@@ -485,6 +485,7 @@ class Ulysses:
         identities_per_arm: int | None = None,
         expected_rate_per_hour: float | None = None,
         start_within_days: int = 30,
+        expires_after: str | None = None,
         guardrail_alpha: float = ct.GUARDRAIL_ALPHA,
         horizon_action: str = "keep_control",
         override_reason: str | None = None,
@@ -551,7 +552,7 @@ class Ulysses:
             second_signer=ct.Signer(name=second_signer, public_key=s["public_key"]),
             alpha=alpha,
             actions=ct.Actions(horizon=horizon_action),
-            validity=ct.Validity(start_within_days=start_within_days),
+            validity=ct.Validity(start_within_days=start_within_days, expires_after=expires_after),
             design=ct.Design(baseline_rate=baseline_rate, min_relative_lift=min_relative_lift, power=power,
                              override_reason=override_reason),
             sample_ratio=_signed_split(exp, [CONTROL_KEY, *treatments]),
@@ -573,6 +574,7 @@ class Ulysses:
             }
         start_by = self._start_deadline(h, c)
         unstarted = row["state"] in ("draft", "signed")
+        expiry = self._expiry_view(h, c, row["state"])
         problems, warnings = self.policy_findings(c)
         return {
             "hash": h,
@@ -582,7 +584,9 @@ class Ulysses:
             "signatures": signed,
             "needs": self._needs(c, sigs) if row["state"] in ("draft", "signed") else [],
             # The window only bounds the start; once running, the contract governs until it ends.
-            "expired": unstarted and start_by is not None and self.clock() > start_by,
+            "expired": unstarted and ((start_by is not None and self.clock() > start_by)
+                                      or bool(expiry and expiry["expired"])),
+            "expiry": expiry,
             "expires_in_hours": (None if (start_by is None or not unstarted)
                                  else round((start_by - self.clock()) / 3600, 1)),
             "supersedes": row["supersedes"],
@@ -828,6 +832,11 @@ class Ulysses:
             self.store.log_refusal("start", "start window closed", h, now)
             raise Refused(f"this contract had to start within {c.validity.start_within_days} days of signing; "
                           "draft and sign a new one")
+        exp_view = self._expiry_view(h, c, row["state"])
+        if exp_view and exp_view["expired"]:
+            self.store.log_refusal("start", "contract expired before the start", h, now)
+            raise Refused(f"this contract expired: it governs for {exp_view['words']}, and that much time has "
+                          "passed since the owner signed it without the experiment starting; draft and sign a new one")
         if row["state"] != "signed":
             raise Conflict(f"contract is {row['state']}; only a signed, unused contract can start an experiment")
         gov = self.store.governing_contract(ref.environment, ref.experiment)
@@ -908,6 +917,37 @@ class Ulysses:
 
     # ------------------------------------------------------------------ looks
 
+    def started_at(self, environment: str, experiment_id: int) -> float | None:
+        """When the service started this experiment (its start write), or None if it never did."""
+        starts = [a for a in self.store.actions(environment, experiment_id) if a["kind"] == "start"]
+        landed = [a for a in starts if a["ok"]]
+        return (landed or starts)[-1]["at"] if starts else None
+
+    def _elapsed(self, c: ct.Contract) -> float | None:
+        """Seconds since the experiment started, for a contract that signs an expiry (None otherwise)."""
+        if c.validity.expires_after is None:
+            return None
+        t0 = self.started_at(c.experiment.environment, c.experiment.experiment)
+        return None if t0 is None else self.clock() - t0
+
+    def _expiry_view(self, h: str, c: ct.Contract, state: str) -> dict | None:
+        """The signed expiry and where the contract stands against it, for the status, cards and pages."""
+        limit = c.validity.expires_after_seconds
+        if limit is None:
+            return None
+        t0 = self.started_at(c.experiment.environment, c.experiment.experiment)
+        sig = self.store.signatures(self._root_hash(h)).get("owner")
+        if t0 is not None and state not in ("draft", "signed"):
+            ends, since = t0 + limit, "the experiment's start"
+        elif sig:
+            ends, since = sig["received_at"] + limit, "the owner's signature"
+        else:
+            ends, since = None, None
+        left = None if ends is None else ends - self.clock()
+        return {"expires_after": c.validity.expires_after, "words": ct.duration_words(c.validity.expires_after),
+                "counted_from": since, "expired": left is not None and left <= 0,
+                "expires_in_hours": None if left is None else round(left / 3600, 1)}
+
     def _history(self, ref) -> list[CountedLook]:
         """The alpha ledger: every counted look on the experiment, under whichever contract counted it, with
         the identities it landed at and the boundaries it actually applied."""
@@ -950,14 +990,15 @@ class Ulysses:
         # Decide outside the write lock (the boundary integration can take a moment), then confirm inside it
         # that no look was counted meanwhile; if one was, decide again against the ledger as it now stands.
         hist = self._history(ref)
-        d = evaluate(c, hist, obs)
+        elapsed = self._elapsed(c)
+        d = evaluate(c, hist, obs, elapsed)
         with self.store.transaction():
             if self.store.contract_state(h) != "active":
                 return None
             fresh = self._history(ref)
             if fresh != hist:
-                d = evaluate(c, fresh, obs)
-            if not d.counted and not record_watch:
+                d = evaluate(c, fresh, obs, elapsed)
+            if not d.counted and not d.fires and not record_watch:
                 return d, None, None
             look_id = self.store.add_look(
                 contract_hash=h, environment=ref.environment, experiment_id=ref.experiment, counted=d.counted,
@@ -1189,9 +1230,10 @@ class Ulysses:
             if not c.amendment or not c.amendment.action_now:
                 raise Refused("this amendment authorises no immediate action")
             return c.amendment.action_now
-        if outcome not in FIRES:
+        action = c.action_for(outcome) if outcome in FIRES else None
+        if action is None:
             raise Refused(f"{outcome!r} is not an outcome the contract acts on")
-        return getattr(c.actions, outcome)
+        return action
 
     def _governing(self, p: dict) -> tuple[ct.Contract, dict]:
         """The contract behind a proposal, refusing unless it still governs right now."""
@@ -2265,6 +2307,13 @@ def summarise(c: ct.Contract) -> dict:
         "owner": c.owner.name, "second_signer": c.second_signer.name,
         "start_within_days": c.validity.start_within_days,
         "expires_after_days": c.validity.start_within_days,  # older name, kept for the pages
+        "expiry": None if c.validity.expires_after is None else {
+            "expires_after": c.validity.expires_after, "words": ct.duration_words(c.validity.expires_after),
+            "text": (f"The contract expires {ct.duration_words(c.validity.expires_after)} after the experiment "
+                     "starts. If no look has decided by then, the next look ends it with no decision and keeps "
+                     "control; it never ships. If the experiment has not started "
+                     f"{ct.duration_words(c.validity.expires_after)} after the owner signs, it can no longer "
+                     "start.")},
         "design": c.design.model_dump() if c.design else None,
         "amendment": c.amendment.model_dump() if c.amendment else None,
         "autonomy": {"without_confirmation": [] if c.autonomy is None else list(c.autonomy.without_confirmation),
@@ -2279,7 +2328,8 @@ def summarise(c: ct.Contract) -> dict:
 
 
 _OUTCOME_WORDS = {"guardrail_breach": "a guardrail breaks", "loss": "the experiment loses",
-                  "horizon": "the experiment reaches its horizon without a decision", "win": "the treatment wins"}
+                  "horizon": "the experiment reaches its horizon without a decision", "win": "the treatment wins",
+                  "expired": "the contract expires without a decision"}
 
 
 def autonomy_text(c: ct.Contract) -> str:

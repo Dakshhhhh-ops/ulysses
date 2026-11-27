@@ -42,6 +42,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ulysses"]
 
+# The committed calibration outputs and the tempted-agent recording the calibration and explainer pages read,
+# so an installed copy (uvx --from git+https://github.com/Dakshhhhh-ops/ulysses ulysses serve) shows them too.
+[tool.hatch.build.targets.wheel.force-include]
+"data/offline.json" = "ulysses/service/data/offline.json"
+"data/paths-offline.json" = "ulysses/service/data/paths-offline.json"
+"data/replay-tempted.jsonl" = "ulysses/service/data/replay-tempted.jsonl"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

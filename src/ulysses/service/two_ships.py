@@ -20,7 +20,11 @@ from ..calibrate.live import _contract
 from ..calibrate.offline import PATHS_FILE, WIN
 from . import fmt
 
-SAMPLE = Path(__file__).resolve().parents[3] / "data" / PATHS_FILE
+# The committed copies live in the repository's data/; an installed wheel carries the same files in
+# ulysses/service/data/ (pyproject's force-include), so the pages work after `uvx ... ulysses serve` too.
+_REPO_DATA = Path(__file__).resolve().parents[3] / "data"
+DATA_DIR = _REPO_DATA if (_REPO_DATA / PATHS_FILE).exists() else Path(__file__).resolve().parent / "data"
+SAMPLE = DATA_DIR / PATHS_FILE
 SAME_LEVEL = "0.1"     # contract level with the same two-sided strictness as a 95% / 5% reading
 DEFAULT_LEVEL = "0.05"
 

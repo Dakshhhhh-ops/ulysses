@@ -69,12 +69,15 @@
           <li>If it loses: {{ s.on_loss | replace('_', ' ') }}.</li>
           <li>Horizon with no decision: {{ s.on_horizon | replace('_', ' ') }}.</li>
           <li>Guardrail breach: {{ s.on_guardrail_breach | replace('_', ' ') }}.</li>
+          {%- if s.expiry %}<li>Expiry with no decision: keep control.</li>{% endif %}
           {%- if am and am.action_now %}<li><span class="changed-label">now</span>This amendment authorises one action immediately: <strong>{{ am.action_now | replace('_', ' ') }}</strong>.</li>{% endif %}
         </ul><p>Each runs only after the owner confirms it with one tap.</p></div></div></div>
       <div class="clause{% if 'validity' in changed %} changed{% endif %}"><span class="no">§8</span><div><p class="h">Signers and validity</p>
         <p class="t">Owner <strong>{{ s.owner }}</strong>{% if c.signatures.owner %}, signed{% if not c.signatures.owner.verified %} (signature does not verify){% endif %}{% endif %}. Second signer <strong>{{ s.second_signer }}</strong>, needed for any amendment{% if c.signatures.second_signer %}, signed{% endif %}.
         {%- set win_days = s.start_within_days or s.expires_after_days %}
-        The experiment must start within {{ diff('validity', win_days ~ ' days', ((old.start_within_days or old.expires_after_days) ~ ' days') if old else '') }} of the owner's signature{% if c.expires_in_hours is not none and c.expires_in_hours > 0 and c.state in ('signed',) %}; {{ (c.expires_in_hours * 3600) | duration }} of that window are left{% endif %}.</p></div></div>
+        The experiment must start within {{ diff('validity', win_days ~ ' days', ((old.start_within_days or old.expires_after_days) ~ ' days') if old else '') }} of the owner's signature{% if c.expires_in_hours is not none and c.expires_in_hours > 0 and c.state in ('signed',) %}; {{ (c.expires_in_hours * 3600) | duration }} of that window are left{% endif %}.
+        {%- if s.expiry %} <span class="expiry">{{ s.expiry.text }}{% if c.expiry and c.expiry.expires_in_hours is not none and c.expiry.expires_in_hours > 0 and c.expiry.counted_from == "the experiment's start" %} About {{ (c.expiry.expires_in_hours * 3600) | duration }} are left.{% endif %}</span>
+        {%- else %} The contract has no expiry: once started, it governs until a look fires.{% endif %}</p></div></div>
       <div class="clause"><span class="no">§9</span><div><p class="h">Traffic split</p>
         <p class="t">{% if s.sample_ratio %}{{ s.sample_ratio.text }}. A broken split never ships; at the horizon it means no decision.{% else %}No split is signed: a win can ship even if Flagsmith's exposure counts show the arms did not get the traffic they were meant to.{% endif %}</p></div></div>
     </article>
@@ -85,7 +88,11 @@
       {%- if c.state == 'executing' %}
       <p><span class="state-chip" data-s="executing">sending to Flagsmith</span> The service is carrying out this contract's pre-signed action. It cannot be signed or amended until that finishes.</p>
       {%- elif c.expired %}
+      {%- if c.expiry and c.expiry.expired and c.state in ('draft', 'signed') %}
+      <p><span class="state-chip" data-s="expired">expired</span> It governs for {{ c.expiry.words }}, and that much time has passed since the owner signed it without the experiment starting, so it can no longer start one. Draft and sign a new one.</p>
+      {%- else %}
       <p><span class="state-chip" data-s="expired">expired</span> Its start window of {{ s.start_within_days or s.expires_after_days }} days after the owner's signature has passed, so it can no longer start an experiment. Draft and sign a new one.</p>
+      {%- endif %}
       {%- elif not needs %}
       <p>This contract has every signature it needs.</p>
       {%- else %}

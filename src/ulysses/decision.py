@@ -46,16 +46,17 @@ decision). It never ships and never stops the experiment by itself.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Literal
 
 from . import boundary as bd
 from . import srm
-from .contract import Contract
+from .contract import EXPIRED_ACTION, Contract, duration_words
 from .flagsmith.gateway import ResultsSnapshot
 
-Outcome = Literal["not_ready", "watch", "hold", "win", "loss", "horizon", "guardrail_breach"]
-FIRES = {"win", "loss", "horizon", "guardrail_breach"}
+Outcome = Literal["not_ready", "watch", "hold", "win", "loss", "horizon", "guardrail_breach", "expired"]
+FIRES = {"win", "loss", "horizon", "guardrail_breach", "expired"}
+DECIDES = {"win", "loss", "horizon", "guardrail_breach"}  # outcomes a read reaches on its own numbers
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,10 @@ class LookDecision:
     ledger: dict | None = None
     """The alpha ledger at this read: on a counted look the boundary it applied (full precision, per
     comparison) and the alpha spent once it is analysed; between looks the alpha spent so far."""
+    expiry: dict | None = None
+    """When the contract signs ``validity.expires_after``: the signed duration, the seconds since the
+    experiment started at this read, and whether it had expired. Left out of ``to_dict`` when absent, so
+    decisions under contracts without the clause read exactly as before."""
 
     @property
     def fires(self) -> bool:
@@ -114,8 +119,50 @@ class LookDecision:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        if d["expiry"] is None:
+            del d["expiry"]
         d["fires"] = self.fires
         return d
+
+
+def _span(seconds: int) -> str:
+    return f"{seconds / 86400:.1f} days" if seconds >= 2 * 86400 else f"{seconds / 3600:.1f} hours"
+
+
+def evaluate(contract: Contract, prior_fractions: list, obs: Observation,
+             elapsed_seconds: float | None = None) -> LookDecision:
+    """Analyse one read (see ``_evaluate``), then apply the signed expiry.
+
+    ``elapsed_seconds`` is the time since the experiment started, at this read. When the contract signs
+    ``validity.expires_after`` and that much time has passed, a read that decides nothing on its own numbers
+    (between looks, no result yet, or a hold) fires ``expired``: no decision, keep control. A read that wins,
+    loses, breaks a guardrail or reaches the horizon keeps that outcome. Without the clause, or without a time,
+    this is ``_evaluate`` unchanged.
+    """
+    d = _evaluate(contract, prior_fractions, obs)
+    limit = contract.validity.expires_after_seconds
+    if limit is None or elapsed_seconds is None:
+        return d
+    elapsed = max(0, int(elapsed_seconds))
+    info = {"expires_after": contract.validity.expires_after, "expires_after_seconds": limit,
+            "elapsed_seconds": elapsed, "expired": elapsed >= limit}
+    if not info["expired"] or d.outcome in DECIDES:
+        return replace(d, expiry=info)
+    signed = duration_words(contract.validity.expires_after)
+    if d.outcome == "hold":
+        state = (f"look {d.look_number} held (Flagsmith chance to win {_pct(d.chance_to_win)}, the contract "
+                 f"needed {_pct(d.boundary_chance)})")
+    elif d.outcome == "not_ready":
+        state = "Flagsmith had no result for the primary metric yet"
+    else:
+        state = (f"the read fell between looks at {d.identities_per_arm} identities in the smaller arm, short of "
+                 f"the next planned count {d.next_look_at_identities}")
+    return replace(
+        d, outcome="expired", action=EXPIRED_ACTION, next_look_at_identities=None, expiry=info,
+        reason=(f"Expired: the contract governs for {signed} from the experiment's start, and this read came "
+                f"{_span(elapsed)} in; {state}. No decision; pre-signed action: "
+                f"{EXPIRED_ACTION.replace('_', ' ')}."),
+    )
 
 
 @dataclass(frozen=True)
@@ -286,7 +333,7 @@ def _ledger(contract: Contract, k: int | None, n: int, t: float | None, b: float
     return out
 
 
-def evaluate(contract: Contract, prior_fractions: list, obs: Observation) -> LookDecision:
+def _evaluate(contract: Contract, prior_fractions: list, obs: Observation) -> LookDecision:
     """Analyse one read.
 
     ``prior_fractions`` are the earlier counted looks: either :class:`CountedLook` entries (the ledger: the

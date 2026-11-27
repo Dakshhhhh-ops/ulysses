@@ -40,9 +40,10 @@ WORDS = {
     "loss": "LOSS: KEEP CONTROL",
     "horizon": "NO DECISION: KEEP CONTROL",
     "guardrail_breach": "GUARDRAIL: STOP, KEEP CONTROL",
+    "expired": "EXPIRED: NO DECISION, KEEP CONTROL",
 }
 SHORT = {"hold": "Hold", "watch": "Between looks", "not_ready": "Collecting data", "win": "Win", "loss": "Loss",
-         "horizon": "No decision", "guardrail_breach": "Guardrail stop"}
+         "horizon": "No decision", "guardrail_breach": "Guardrail stop", "expired": "Expired"}
 
 
 def x_of(t: float) -> float:
@@ -206,7 +207,7 @@ def build_card(d: dict, *, source: dict | None, horizon: dict | None, alpha: flo
         },
         "money": money,
         "flagsmith_missing": snap is None,
-        "end_cap": outcome == "horizon",
+        "end_cap": outcome in ("horizon", "expired"),
         "dim_after": outcome == "guardrail_breach",
     }
 
@@ -266,7 +267,7 @@ def rings(scene: dict) -> list[dict]:
             applied[hrow["look_number"]] = hrow
     cur_k = dec.get("look_number")
     outcome = dec.get("outcome")
-    fired = {"win": WIN, "loss": LOSS, "horizon": HORIZON}.get(outcome or "")
+    fired = {"win": WIN, "loss": LOSS, "horizon": HORIZON, "expired": HORIZON}.get(outcome or "")
     executed = prop.get("state") == "executed"
     for p in planned:
         k = p["look"]

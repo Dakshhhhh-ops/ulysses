@@ -14,7 +14,7 @@ import httpx
 from rich.console import Console
 from rich.table import Table
 
-from . import DISTRIBUTION, __version__
+from . import DISTRIBUTION, SOURCE, __version__
 from . import boundary as bd
 from . import contract as ct
 from . import signing
@@ -119,13 +119,15 @@ def cmd_init(a) -> None:
     console.print(f"[green]{'wrote' if added else 'kept'}[/] {env}"
                   + (f" (added {', '.join(added)})" if added else "") + "; keep it out of git")
     token = _env_lines(env)["ULYSSES_AGENT_TOKEN"]
+    uvx = _installed_with_uvx(root) if getattr(a, "uvx", None) is None else a.uvx
+    run = f"uvx --from {SOURCE} ulysses" if uvx else "uv run ulysses"
     tpl = root / "ulysses.contract.example.toml"
     tpl.write_text(TEMPLATE, encoding="utf-8")
     console.print(f"[green]wrote[/] {tpl}")
     servers: dict = {
         "ulysses": {
-            "command": "uvx" if a.uvx else "uv",
-            "args": (["--from", DISTRIBUTION, "ulysses", "mcp"] if a.uvx
+            "command": "uvx" if uvx else "uv",
+            "args": (["--from", SOURCE, "ulysses", "mcp"] if uvx
                      else ["run", "--directory", str(root.resolve()), "ulysses", "mcp"]),
             "env": {"ULYSSES_URL": public, "ULYSSES_AGENT_TOKEN": token},
         }
@@ -148,16 +150,34 @@ def cmd_init(a) -> None:
     add = [x for x in (".env", ".run/", "ulysses.mcp.json") if x not in lines]
     if add:
         gi.write_text("\n".join(lines + add) + "\n")
+    if uvx:
+        steps = (
+            f"  2. {run} keys new <your name>   (your signing key; prints its public key)\n"
+            f"  3. {run} signer add <your name> <public key>\n"
+            f"  4. {run} serve                  (contract service on {public})\n"
+            "  Then give your MCP client ulysses.mcp.json and ask the agent to draft a contract.\n")
+    else:
+        steps = (
+            f"  2. {run} lab setup            (demo flag, metrics, audit webhook with the secret above)\n"
+            "  3. uv run python scripts/demo_setup.py (a fresh experiment and two signers)\n"
+            f"  4. {run} serve               (contract service on {public})\n"
+            "  For your own experiments instead of the demo: ulysses keys new <name>, ulysses signer add, "
+            "ulysses serve.\n")
     console.print(
         "\nNext:\n"
         "  1. put your organisation admin API key and organisation id in .env\n"
         "     (Flagsmith: Organisation settings > API Keys > create an admin key; the id is in that page's URL)\n"
-        "  2. uv run ulysses lab setup            (demo flag, metrics, audit webhook with the secret above)\n"
-        "  3. uv run python scripts/demo_setup.py (a fresh experiment and two signers)\n"
-        f"  4. uv run ulysses serve               (contract service on {public})\n"
-        "  For your own experiments instead of the demo: ulysses keys new <name>, ulysses signer add, ulysses serve.\n"
+        + steps +
         "  Keep .env, the service database and signer keys where the agent cannot read them."
     )
+
+
+def _installed_with_uvx(root: Path) -> bool:
+    """True unless ``root`` is a uv project that depends on Ulysses (or is its checkout), where `uv run` finds it."""
+    try:
+        return DISTRIBUTION not in (root / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return True
 
 
 TEMPLATE = """\
@@ -165,7 +185,7 @@ TEMPLATE = """\
 # sign_contract; you can also draft one with `ulysses contract draft`.
 # boundary.planned is computed for you; editing it by hand is rejected.
 
-ulysses_contract = 1
+ulysses_contract = 2
 hypothesis = "The new checkout button raises purchases without raising refunds"
 
 [experiment]
@@ -211,6 +231,9 @@ public_key = "ed25519:<their public key>"
 
 [validity]
 start_within_days = 30
+# How long the contract governs, counted from the experiment's start ("30d" days or "36h" hours; no calendar
+# date). A look after it with no decision ends the experiment as expired: no decision, keep control.
+expires_after = "30d"
 
 [design]
 baseline_rate = 0.05
@@ -817,7 +840,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8200, help="port for the service; written to every URL")
     s.add_argument("--with-flagsmith-mcp", action="store_true",
                    help="also add Flagsmith's official MCP server (needs an admin key on open source: not recommended)")
-    s.add_argument("--uvx", action="store_true", help=f"write the MCP config for the published package (uvx --from {DISTRIBUTION})")
+    s.add_argument("--uvx", action=argparse.BooleanOptionalAction, default=None,
+                   help=f"write the MCP config and next steps for uvx (uvx --from {SOURCE} ulysses mcp), or with "
+                        "--no-uvx for `uv run` in a project that depends on Ulysses. Default: uvx unless --dir "
+                        f"holds a pyproject.toml naming {DISTRIBUTION}")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("serve", help="run the contract service (holds the Flagsmith write key)")

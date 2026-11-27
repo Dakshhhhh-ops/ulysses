@@ -24,7 +24,8 @@ WINNING = 0.95  # Flagsmith's docs: over 95% chance to win reads as "Winning"
 _ORDER = {"signed": 0, "started": 1, "look": 2, "refusal": 3, "fired": 4, "tap": 5, "executed": 6}
 
 _OUTCOME = {"hold": "Hold", "watch": "Between looks", "not_ready": "Collecting data", "win": "Win",
-            "loss": "Loss", "horizon": "No decision", "guardrail_breach": "Guardrail stop"}
+            "loss": "Loss", "horizon": "No decision", "guardrail_breach": "Guardrail stop",
+            "expired": "Expired, no decision"}
 
 
 def is_siren(counted: bool, outcome: str | None, chance: float | None) -> bool:
@@ -148,15 +149,21 @@ def build(svc, c, h: str, current_seq: int | None = None) -> dict[str, Any]:
                 detail = "Flagsmith had no chance to win yet (too few identities)."
             else:
                 detail = "Flagsmith returned no results for this look."
+        elif outcome == "expired":
+            title = f"Refresh {lk['seq']} · expired"
+            detail = "Between looks, but past the signed expiry."
         else:
             title = f"Refresh {lk['seq']} · not a look"
             detail = ("Between looks: the contract withholds Flagsmith's numbers until the next planned look."
                       if ctw is None else f"Between looks: Flagsmith read {ctw}; the contract does not act on it.")
+        if outcome == "expired":
+            detail += (f" The contract expired {(d.get('expiry') or {}).get('expires_after', '')} after the start "
+                       "with no decision: keep control, nothing ships.")
         e = add("look", lk["at"], title, detail, seq=lk["seq"], look_id=lk["id"], look_number=k, counted=counted,
                 outcome=outcome, word=_OUTCOME.get(outcome, outcome), ctw=ctw, chance=chance, needs=needs, siren=siren,
-                hidden=not counted and lk["seq"] != current_seq, current=lk["seq"] == current_seq,
-                fires=bool(d.get("fires")))
-        if counted:
+                hidden=not counted and outcome != "expired" and lk["seq"] != current_seq,
+                current=lk["seq"] == current_seq, fires=bool(d.get("fires")))
+        if counted or outcome == "expired":
             counted_rows.append(e)
 
     for r in store.refusals():
@@ -232,7 +239,8 @@ def build(svc, c, h: str, current_seq: int | None = None) -> dict[str, Any]:
         word = {"win": f"shipped {treatment} at look {fired['look_number']}",
                 "loss": f"kept control at look {fired['look_number']} (a loss)",
                 "horizon": f"kept control at look {fired['look_number']} (the horizon, no decision)",
-                "guardrail_breach": f"stopped on a guardrail at look {fired['look_number']}"}.get(
+                "guardrail_breach": f"stopped on a guardrail at look {fired['look_number']}",
+                "expired": "kept control when the signed expiry passed with no decision"}.get(
             fired["outcome"], f"fired at look {fired['look_number']}")
         contract_line = f"The contract {word}."
     else:

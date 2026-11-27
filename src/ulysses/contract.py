@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import math
+import re
 import tomllib
 import unicodedata
 from pathlib import Path
@@ -38,6 +39,8 @@ SRM_MIN_TOTAL = 100
 MAX_TREATMENTS = 5
 
 Action = Literal["ship_treatment", "keep_control"]
+# An expired contract never ships: like a horizon without a decision, it keeps control.
+EXPIRED_ACTION = "keep_control"
 
 
 class _Model(BaseModel):
@@ -249,6 +252,12 @@ class Validity(_Model):
     start_within_days: int = Field(
         30, description="The signed contract can start its experiment only within this many days of the owner's "
         "signature. Once started it governs until the experiment ends.")
+    expires_after: str | None = Field(
+        None, description="How long the contract governs, counted from the experiment's start, as a duration: "
+        "'14d' (days) or '36h' (hours), so no calendar date lives in the file. A look after it with no decision "
+        "ends the experiment as 'expired': no decision, keep control. A contract that never starts expires the "
+        "same time after the owner's signature and can no longer start. Absent in contracts signed before the "
+        "clause existed; those never expire once started.")
 
     @field_validator("start_within_days")
     @classmethod
@@ -256,6 +265,41 @@ class Validity(_Model):
         if not (1 <= v <= 365):
             raise ValueError("start_within_days must be between 1 and 365")
         return v
+
+    @field_validator("expires_after")
+    @classmethod
+    def _expiry(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        parse_duration(v)
+        return v
+
+    @property
+    def expires_after_seconds(self) -> int | None:
+        return None if self.expires_after is None else parse_duration(self.expires_after)
+
+
+_DURATION = re.compile(r"^([1-9][0-9]{0,4})([dh])$")
+MAX_EXPIRY_DAYS = 365
+
+
+def parse_duration(text: str) -> int:
+    """Seconds in a signed duration: ``"14d"`` (days) or ``"36h"`` (hours), between 1 hour and 365 days."""
+    m = _DURATION.match(text) if isinstance(text, str) else None
+    if not m:
+        raise ValueError(f"expires_after must be a whole number of days or hours, like '14d' or '36h', not {text!r}")
+    n, unit = int(m.group(1)), m.group(2)
+    seconds = n * (86400 if unit == "d" else 3600)
+    if seconds > MAX_EXPIRY_DAYS * 86400:
+        raise ValueError(f"expires_after must be at most {MAX_EXPIRY_DAYS} days")
+    return seconds
+
+
+def duration_words(text: str) -> str:
+    """``"14d"`` -> ``"14 days"``, ``"1h"`` -> ``"1 hour"``."""
+    n, unit = int(text[:-1]), text[-1]
+    word = "day" if unit == "d" else "hour"
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 class Design(_Model):
@@ -385,6 +429,8 @@ class Contract(_Model):
                              f"not {sorted(self.sample_ratio.split)}")
         if self.autonomy is not None:
             assigned = {self.actions.win, self.actions.loss, self.actions.horizon, self.actions.guardrail_breach}
+            if self.validity.expires_after is not None:
+                assigned.add(EXPIRED_ACTION)
             for a in self.autonomy.without_confirmation:
                 if a not in assigned:
                     raise ValueError(f"autonomy.without_confirmation lists {a!r}, which the contract assigns to "
@@ -410,8 +456,19 @@ class Contract(_Model):
 
     def autonomous_outcomes(self) -> list[str]:
         """Outcomes a look can fire whose assigned action runs without the owner's tap, in a fixed order."""
-        return [o for o in ("guardrail_breach", "loss", "horizon", "win")
-                if self.autonomous(getattr(self.actions, o))]
+        out = [o for o in ("guardrail_breach", "loss", "horizon", "win")
+               if self.autonomous(getattr(self.actions, o))]
+        if self.validity.expires_after is not None and self.autonomous(EXPIRED_ACTION):
+            out.append("expired")
+        return out
+
+    def action_for(self, outcome: str) -> str | None:
+        """The action the contract assigns to a fired outcome. An expiry always keeps control."""
+        if outcome == "expired":
+            return EXPIRED_ACTION if self.validity.expires_after is not None else None
+        if outcome in ("win", "loss", "horizon", "guardrail_breach"):
+            return getattr(self.actions, outcome)
+        return None
 
     @property
     def comparisons(self) -> int:
