@@ -266,7 +266,22 @@ Real-effect rows: `uv run ulysses verify --bundle data/verify-judge-demo-cta.jso
 | Clear output | One card per look: Flagsmith's chance to win, what the contract needs at this look, each guardrail's reading against its rule, hold or fire, and the pre-signed action. |
 | A working demo | `uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl` in two minutes; `uv run python scripts/judge_demo.py` live with Docker and uv. |
 
-CI runs four jobs on every push (`.github/workflows/ci.yml`): the unit tests, a JS/Python parity test for the boundary drawing, the replay above (exits non-zero if any recorded decision, signature or execution does not reproduce), and a smoke test that boots the repo's Flagsmith, signs, starts and takes one look. Locally `uv run pytest -q` gives 307 passed; the few skipped tests need a live Flagsmith, Docker, a Flagsmith checkout or Playwright.
+CI runs four jobs on every push (`.github/workflows/ci.yml`): the unit tests, a JS/Python parity test for the boundary drawing, the replay above (exits non-zero if any recorded decision, signature or execution does not reproduce), and a smoke test that boots the repo's Flagsmith, signs, starts and takes one look. Locally `uv run pytest -q` gives 454 passed (with a Flagsmith checkout next to the repository); the few skipped tests need a live Flagsmith, Docker, a Flagsmith checkout or Playwright.
+
+## Agent skills (Track 04)
+
+`skills/` has two [Agent Skills](https://agentskills.io/specification) that take a coding agent through a whole Flagsmith experiment with the Flagsmith CLI, from sizing it to rolling the winner out to everyone:
+
+- [`flagsmith-experiment-rollout`](skills/flagsmith-experiment-rollout/SKILL.md) needs only the Flagsmith CLI v2 and Python's standard library, not Ulysses. The agent sizes the experiment, writes its stop rule into the experiment's hypothesis before the start (so the plan is visible in Flagsmith), sets up the flag, metrics, guardrail and experiment, and asks before it starts. Then at each look it refreshes once per five-minute window and pipes the experiment and results through `scripts/stop_rule.py check`, which prints one line: HOLD, SHIP or KEEP_CONTROL with the exact `complete` body. It asks before `complete`, then checks what users are served and knows the undo. On Flagsmith's own `stats.py` and the same draws as the table below, that rule shipped a do-nothing variation in 3.9% of 10,000 A/A runs against 13.4% for the first read over 95%, kept the same power on a +25% lift (91.0%), and shipped early in 41.1% of those runs (`uv run python scripts/skill_rule_calibration.py --flagsmith-src <Flagsmith checkout>`; simulated identities, not user traffic).
+- [`ulysses-stop-contract`](skills/ulysses-stop-contract/SKILL.md) does the same job with the rule enforced. It sets up with the Flagsmith CLI, hands over so the agent's shell holds no Flagsmith credential, then drives `ulysses` (or the MCP tools) and names the two steps only a person may take: signing and confirming.
+
+Install into Claude Code for every project:
+
+```sh
+mkdir -p ~/.claude/skills && cp -r skills/flagsmith-experiment-rollout skills/ulysses-stop-contract ~/.claude/skills/
+```
+
+For one repository, copy them to its `.claude/skills/`; other agents that read Agent Skills load them from their own skills folder (for example `.agents/skills/`). `uv run pytest -q tests/test_skills.py` checks the format against the specification, every `flagsmith` command and flag against CLI v2, every `ulysses` command against this parser, every API path against Flagsmith's routes, and every quoted number against `data/skill-rule-offline.json`. Design notes, the safety list and token use: [docs/SKILLS.md](docs/SKILLS.md).
 
 ## Statistics
 
