@@ -21,6 +21,7 @@
       <nav class="nav" aria-label="Main">
         <a href="/"{% if nav == "home" %} aria-current="page"{% endif %}>Contracts</a>
         <a href="/calibration"{% if nav == "calibration" %} aria-current="page"{% endif %}>Calibration</a>
+        <a href="/explain" class="nav-new"{% if nav == "explain" %} aria-current="page"{% endif %}>New here?</a>
       </nav>
       {{ data_chip(source if source is defined else none) }}
     </div>

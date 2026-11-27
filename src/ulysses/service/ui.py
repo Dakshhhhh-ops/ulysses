@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 from .. import contract as ct
 from ..decision import observation_from_snapshot
 from ..flagsmith.gateway import MetricResult, ResultsSnapshot
-from . import calibration_view, fmt, sources
+from . import calibration_view, explain, fmt, sources
 from . import voyage as vg
 from . import scene as sc
 
@@ -330,6 +330,11 @@ def calibration_dir(svc) -> Path:
 
 
 def register(app, svc, templates) -> None:
+    @app.get("/explain", response_class=HTMLResponse)
+    def explain_page(request: Request):
+        """New here? The whole idea in plain words, drawn only from committed data (no Flagsmith needed)."""
+        return templates.TemplateResponse(request, "explain.html", explain.page())
+
     @app.get("/calibration", response_class=HTMLResponse)
     def calibration(request: Request, tab: str | None = None):
         data = calibration_view.calibration_page(calibration_dir(svc))
