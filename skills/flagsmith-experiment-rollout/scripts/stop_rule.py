@@ -295,18 +295,23 @@ def read_json_docs(text: str) -> list:
 
 
 def _load(args) -> tuple[dict, dict]:
-    if args.experiment == "-":
-        docs = read_json_docs(sys.stdin.read())
-    else:
-        docs = []
-        for p in (args.experiment, args.results):
-            if p:
-                with open(p, encoding="utf-8") as fh:
-                    docs += read_json_docs(fh.read())
+    try:
+        if args.experiment == "-":
+            docs = read_json_docs(sys.stdin.read())
+        else:
+            docs = []
+            for p in (args.experiment, args.results):
+                if p:
+                    with open(p, encoding="utf-8") as fh:
+                        docs += read_json_docs(fh.read())
+    except ValueError:
+        raise Refused("a body is not JSON. An HTML page means a path without its trailing / "
+                      "(use \"$A/\", not \"$A\"); an error means the GET failed: show it to the person")
     exp = next((d for d in docs if isinstance(d, dict) and "status" in d and "metrics" in d), None)
     res = next((d for d in docs if isinstance(d, dict) and "results" in d), None)
     if exp is None or res is None:
-        raise Refused("need two JSON bodies: GET .../experiments/<id>/ and GET .../experiments/<id>/results/")
+        raise Refused("need two whole JSON bodies, unfiltered (no --jq): GET .../experiments/<id>/ and "
+                      "GET .../experiments/<id>/results/")
     return exp, res
 
 

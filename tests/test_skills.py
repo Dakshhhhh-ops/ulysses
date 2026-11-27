@@ -85,7 +85,7 @@ def test_frontmatter_follows_the_spec(skill):
         assert isinstance(meta["metadata"], dict) and all(isinstance(v, str) for v in meta["metadata"].values())
     assert len(body.splitlines()) < 500
     assert len(body) / 4 < 5000, "keep the body under about 5000 tokens"
-    assert len((skill / "SKILL.md").read_text(encoding="utf-8")) < 9000, "docs/SKILLS.md says about 8,000 characters"
+    assert len((skill / "SKILL.md").read_text(encoding="utf-8")) < 9000, "docs/SKILLS.md says about 9,000 characters"
 
 
 @pytest.mark.parametrize("skill", SKILL_DIRS, ids=lambda p: p.name)
