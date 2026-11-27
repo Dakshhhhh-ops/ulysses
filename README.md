@@ -109,6 +109,8 @@ So CLI, API and MCP are all covered: the REST API for the lifecycle and results,
 
 `skills/` has two [Agent Skills](https://agentskills.io/specification): [`flagsmith-experiment-rollout`](skills/flagsmith-experiment-rollout/SKILL.md) runs a whole Flagsmith experiment with the Flagsmith CLI and a pre-written stop rule, and [`ulysses-stop-contract`](skills/ulysses-stop-contract/SKILL.md) does the same with the rule enforced by Ulysses. Design notes and install: [docs/SKILLS.md](docs/SKILLS.md).
 
+**A model runs the skill.** `examples/skill_run/run.py` hands `gpt-5-mini` the `flagsmith-experiment-rollout` SKILL.md and one shell that runs only the Flagsmith CLI and the skill's stop rule. On self-hosted Flagsmith, with synthetic visitors and a harness standing in for the owner, it planned experiment 396, wrote the stop rule into the hypothesis and started it. It held at Flagsmith's "Winning" 99.76%, shipped when the rule fired at 99.88%, and checked what an identity is served: 39 calls, 249,641 input tokens (95% cached), 5,209 output, $0.019. It then reversed its own rollout after a blind yes from the stand-in owner, and the skill was changed because of it. Every look and every failed attempt: [docs/SKILL-RUN.md](docs/SKILL-RUN.md).
+
 ## More
 
 - [docs/RUNNING.md](docs/RUNNING.md): setup, the live demo, MCP clients, the LLM agent, how it works, the agent boundary, commands, the Track 02 checklist
