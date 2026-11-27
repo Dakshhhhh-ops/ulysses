@@ -49,7 +49,7 @@ Then one event per line, in recorded order, each with `t` and `event`:
 | `signer` | `name`, `public_key` | registers the signer's public key (no private key is ever in a trace) |
 | `experiment` | `environment`, `id`, `kind`, `flag`, `project`, `feature_id`, `control`, `treatment`, `treatment_option_id`, `metrics` (name, Flagsmith polarity `direction`, `expected_direction`), `rollout`, `source` | describes the experiment to the stand-in Flagsmith; `source` is the run's data-source record (`live`, `synthetic`, `lab`) |
 | `contract` | `hash`, `canonical` | `submit(canonical)`; the recomputed hash must equal `hash` |
-| `attempt` | `call` (`start_under_contract` or `execute`), `hash`, `action`, `expect: "refused"`, `recorded_reason` | repeats an agent call the service refused; it must be refused again, and the reason the service logs for that contract must equal `recorded_reason` (an unknown contract or any other error does not count). Recorded reasons it repeats: `no valid owner signature` (start before signing), `asked for X, contract says Y` (wrong action after a fire) and `no fired outcome authorises X` (execute before any look fired, for example the scripted agent shipping on Flagsmith's "Winning" reading while the contract held; the replay labels these and counts them in its summary) |
+| `attempt` | `call` (`start_under_contract` or `execute`), `hash`, `action`, `expect: "refused"`, `recorded_reason` | repeats an agent call the service refused; it must be refused again, and the reason the service logs for that contract must equal `recorded_reason` (an unknown contract or any other error does not count). Recorded reasons it repeats: `no valid owner signature` (start before signing), `asked for X, contract says Y` (wrong action after a fire) and `no fired outcome authorises X` (execute before any look fired, for example the scripted agent shipping on Flagsmith's "Winning" reading while the contract held; the replay labels these and counts them in its summary) and `waiting for the owner's one-tap confirmation` (execute of a fired action before the owner's tap; the trace names the action of the proposal that was waiting) |
 | `refusal_note` | `what`, `hash`, `recorded_reason` | a refusal the format cannot repeat; printed, not replayed |
 | `signature` | `hash`, `role`, `signer`, `signature` | `sign(...)`; must verify against the key in the contract |
 | `start` | `hash` | `start_under_contract(hash)`; the contract must become active |
@@ -79,6 +79,47 @@ The shipped `data/replay-judge-demo.jsonl` was written this way from the store o
 (synthetic identities). Its header carries the counts. The environment key inside the contracts is the
 client-side key of that throwaway local Flagsmith; it stays because it is part of the signed contract.
 
+## The signed-autonomy recording
+
+`data/replay-autonomy.jsonl` is one live run on the shared self-hosted lab (open-source Flagsmith with
+Experimentation on) in which both contracts carry the signed clause `[autonomy] without_confirmation =
+["keep_control"]`. It was made with the contract service, `scripts/human_stand_in.py` and
+`uv run python scripts/agent_session.py --with-traffic --autonomy`, then written with `scripts/export_replay.py`.
+Visitors were simulated by `examples/shop/visitors.py` (synthetic identities). Every number in it is what
+Flagsmith returned in that run.
+
+- A/A (experiment 388): the contract held for four looks and fired a loss at look 5, at the horizon
+  (Flagsmith chance to win 1.30% against the signed 1.94%). That is a false loss in an A/A, and its
+  pre-signed action keeps control. The agent asked to ship instead and was refused. It then ran
+  `keep_control` itself, with no tap, under the clause the owner signed (`authorised_by signed_autonomy`).
+- Real effect (experiment 387): Flagsmith read "Winning" at look 3 (96.73%) while the contract held, and the
+  agent's `ship_treatment` was refused. The contract fired a win at look 4 (98.95% against 98.76%). The clause
+  never covers shipping, so the agent's execute before the tap was refused, and so was its `keep_control`.
+  Bold shipped only after the owner's signed tap.
+
+    uv run python scripts/judge_demo.py --replay data/replay-autonomy.jsonl --no-hold
+
+The summary lines it prints:
+
+```
+[REPLAY 13.8x] 11 of 11 recorded decisions recomputed identically by this checkout's engine; 0 event(s) did not reproduce
+[REPLAY 13.8x] 5 of 5 recorded refusals refused again for the recorded reason (1 on Flagsmith's 'Winning' reading, 95% or more, while the contract held)
+```
+
+and, for the A/A experiment:
+
+```
+[REPLAY 13.8x] recorded + 27.5 min  contract fired: loss -> pre-signed action keep_control is authorised in advance by the signed autonomy clause (no tap)
+[REPLAY 13.8x] recorded + 27.5 min  agent asks to execute ship_treatment -> refused: the contract authorises 'keep_control' for this outcome, not 'ship_treatment'
+[REPLAY 13.8x] recorded + 27.5 min  agent executes keep_control under the signed autonomy clause, no tap -> flag ulysses_headline_aa serves control
+```
+
+The two experiments' verification bundles are `data/verify-autonomy-aa.json` (the autonomous keep control: its
+`outcome ... autonomy` line passes in place of a confirmation line) and `data/verify-autonomy-cta.json` (the
+tapped ship). `uv run ulysses verify --bundle data/verify-autonomy-aa.json` ends `CONSISTENT (unpinned): 21
+checks passed` (exit 2, nothing outside the file pins it); with `--check-flagsmith`, run while that lab was up,
+both ended `VERIFIED: all 23 checks passed`.
+
 `tests/test_replay.py` exports a run made over the test double of Flagsmith, replays it with no
 difference, shows that an edited Flagsmith number or a signature by the wrong key does not reproduce, and
-replays the shipped trace.
+replays the shipped traces, including the signed-autonomy one.

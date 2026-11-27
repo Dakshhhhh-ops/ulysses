@@ -70,6 +70,8 @@ def main() -> None:
                             s = st["summary"]
                             print(f"{TAG} read contract {h[:19]}: {s['hypothesis']} | {s['horizon']} | "
                                   f"{s['boundary']} | win: {s['on_win']}, horizon: {s['on_horizon']}", flush=True)
+                            if (s.get("autonomy") or {}).get("without_confirmation"):
+                                print(f"{TAG}   signed autonomy clause: {s.get('autonomy_text')}", flush=True)
                             for w in (st.get("policy") or {}).get("warnings", []):
                                 print(f"{TAG}   warning shown to the signer: {w}", flush=True)
                             sig = kp.sign(signing.contract_message(h, "owner"))

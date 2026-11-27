@@ -18,7 +18,14 @@ asks to ship the treatment anyway; the service refuses (403, logged in its refus
 table, repeated by a replay), and the agent goes on looking. ``--no-temptation``
 turns that off.
 
+``--autonomy`` drafts each contract with the signed autonomy clause
+(``[autonomy] without_confirmation = ["keep_control"]``): once the owner signs it, a
+fired keep_control (a guardrail breach, a loss or the horizon) is carried out by the
+agent's own ``execute`` call with no tap, and the result says ``authorised_by
+signed_autonomy``. A fired ship_treatment still waits for the owner's tap.
+
     uv run python scripts/agent_session.py --with-traffic
+    uv run python scripts/agent_session.py --with-traffic --autonomy  # keep control without a tap
     uv run python scripts/agent_session.py --resume <hash>[,<hash>]   # after an interruption
 """
 
@@ -179,9 +186,10 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
     looks_taken = refreshes = 0
     sirens: list[dict] = []
     if h is None:
+        extra = {"without_confirmation": ["keep_control"]} if getattr(agent.a, "autonomy", False) else {}
         out = await agent.tool("sign_contract", environment=demo["environment"], experiment_id=exp["id"],
                                owner=demo["owner"], second_signer=demo["second_signer"],
-                               min_relative_lift=agent.a.min_lift, baseline_rate=agent.a.baseline_rate,
+                               min_relative_lift=agent.a.min_lift, baseline_rate=agent.a.baseline_rate, **extra,
                                hypothesis=("A/A check: both headline variations are identical, so neither should win."
                                            if which == "aa" else
                                            "The bold call to action raises purchases without raising refund requests."))
@@ -189,9 +197,16 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
             raise SessionError(f"sign_contract failed: {out.get('detail')}")
         h = out["hash"]
         say(tag, f"sign_contract -> {h[:19]}  ({out['summary']['horizon']}; {out['summary']['boundary']})")
+        if extra:
+            say(tag, f"autonomy clause proposed: {out['summary'].get('autonomy_text')}")
         out = await agent.tool("start_under_contract", contract_hash=h)
-        say(tag, f"start_under_contract before the owner signs -> {out.get('status')} {out.get('detail')}", RED)
-        say("HUMAN NEEDED", f"owner signs at {out.get('sign_url') or agent.human_state(h).get('sign_url')}", YELLOW)
+        if out.get("ok"):  # the owner signed between the draft and this call
+            say(tag, "start_under_contract -> running (the owner had already signed); the contract hash is now in "
+                     "the experiment's hypothesis", GREEN)
+        else:
+            say(tag, f"start_under_contract before the owner signs -> {out.get('status')} {out.get('detail')}", RED)
+            say("HUMAN NEEDED", f"owner signs at {out.get('sign_url') or agent.human_state(h).get('sign_url')}",
+                YELLOW)
         while agent.human_state(h).get("needs"):
             await asyncio.sleep(3)
     st = agent.human_state(h).get("state")
@@ -237,6 +252,17 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
                     sirens.append(siren)
             await asyncio.sleep(REFRESH_FLOOR + 5)
     p = fired["proposal"]
+    autonomous = p.get("authorised_by") == "signed_autonomy"
+    if autonomous:
+        say(tag, f"{p['outcome']} fired; {p['action']} is listed in the signed autonomy clause, so no tap is needed",
+            GREEN)
+        if agent.a.temptation and p["action"] != "ship_treatment":
+            # The clause covers keep_control only: asking it to ship instead must still be refused.
+            out = await agent.tool("execute", contract_hash=h, action="ship_treatment")
+            if out.get("ok"):
+                raise SessionError("execute ship_treatment was ACCEPTED on a fired keep_control under autonomy")
+            say(tag, f"execute ship_treatment instead (the clause never covers shipping) -> {out.get('status')} "
+                     f"{out.get('detail')}", RED)
     if p["state"] == "pending":
         out = await agent.tool("execute", contract_hash=h, action=p["action"])
         say(tag, f"execute before the owner's tap -> {out.get('status')} {out.get('detail')}", RED)
@@ -252,10 +278,12 @@ async def govern(agent: Agent, demo: dict, which: str, h: str | None, results: d
     out = await agent.tool("execute", contract_hash=h, action=p["action"])
     if not out.get("ok"):
         raise SessionError(f"execute failed: {out.get('detail')}")
-    say(tag, f"execute -> {out.get('state')}; flag {out['result']['flag']} serves {out['result']['serving']}", GREEN)
+    say(tag, f"execute -> {out.get('state')}; flag {out['result']['flag']} serves {out['result']['serving']} "
+             f"(authorised_by {out.get('authorised_by') or (out.get('result') or {}).get('authorised_by')})", GREEN)
     elapsed = time.time() - t0
     results[which] = {
         "contract": h, "kind": label, "outcome": p["outcome"], "action": p["action"], "result": out.get("result"),
+        "authorised_by": out.get("authorised_by") or (out.get("result") or {}).get("authorised_by"),
         "card": (agent.http.get(f"/api/proposals/{p['id']}").json().get("confirm_url")
                  or f"{agent.url}/card/{p['look_id'] or p['id']}"),
         "minutes_from_start_to_decision": round(elapsed / 60, 1),
@@ -374,6 +402,9 @@ def main() -> None:
     ap.add_argument("--with-traffic", action="store_true", help="start the demo shop and simulated visitors")
     ap.add_argument("--no-temptation", dest="temptation", action="store_false",
                     help="do not try to ship when a look holds while Flagsmith reads 'Winning' (95%% or more)")
+    ap.add_argument("--autonomy", action="store_true",
+                    help="draft each contract with the signed autonomy clause: a fired keep_control runs without "
+                         "the owner's tap; ship_treatment still waits for it")
     ap.add_argument("--demo", help="the demo's names and ids as JSON (environment, owner, second_signer, "
                     "experiments); default: read from .run/demo.json. The agent container gets it this way.")
     ap.add_argument("--shop-port", type=int, default=int(os.environ.get("SHOP_PORT", "8210")))

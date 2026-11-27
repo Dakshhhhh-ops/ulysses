@@ -48,6 +48,9 @@ VERSION = 1
 # Anything that looks like a calendar date or a clock time. The exporter refuses to write one.
 _DATEISH = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}:\d{2}|\b\d{10}(\.\d+)?\b")
 
+# The refusal the service logs when the agent executes a fired action before the owner's tap.
+WAITING_FOR_TAP = "waiting for the owner's one-tap confirmation"
+
 # Flagsmith metric polarity from the direction the contract signs, when no snapshot names it.
 _POLARITY = {"increase": "up", "decrease": "down", "not_increase": "down", "not_decrease": "up"}
 
@@ -158,11 +161,19 @@ def export_store(db_path: str | Path, *, title: str, flagsmith: str, note: str |
         h = r["contract_hash"]
         m = re.fullmatch(r"asked for (\w+), contract says (\w+)", r["reason"] or "") or \
             re.fullmatch(r"no fired outcome authorises (\w+)", r["reason"] or "")
+        # An execute before the owner's tap names no action in its reason: it is the action of the proposal
+        # that was waiting on that contract when the agent asked.
+        waiting = [p for p in props if p["contract_hash"] == h and p["created_at"] <= r["at"]] \
+            if r["what"] == "execute" and r["reason"] == WAITING_FOR_TAP else []
         if r["what"] == "start" and r["reason"] == "no valid owner signature":
             ev = {"event": "attempt", "call": "start_under_contract", "hash": h, "expect": "refused",
                   "recorded_reason": r["reason"]}
         elif r["what"] == "execute" and m:
             ev = {"event": "attempt", "call": "execute", "hash": h, "action": m.group(1), "expect": "refused",
+                  "recorded_reason": r["reason"]}
+        elif waiting:
+            ev = {"event": "attempt", "call": "execute", "hash": h,
+                  "action": max(waiting, key=lambda p: p["created_at"])["action"], "expect": "refused",
                   "recorded_reason": r["reason"]}
         else:
             ev = {"event": "refusal_note", "what": r["what"], "hash": h, "recorded_reason": r["reason"]}
@@ -463,6 +474,8 @@ class Replayer:
             else:
                 refused, why = self._expect_refused(ev, svc.execute_for_contract, ev["hash"], ev["action"])
                 label = f"agent asks to execute {ev['action']}"
+                if ev.get("recorded_reason") == WAITING_FOR_TAP:
+                    label = f"agent asks to execute {ev['action']} before the owner's tap"
                 siren = self._siren(ev)
                 if siren is not None:
                     label = (f"agent, tempted by Flagsmith's 'Winning' reading ({siren * 100:.2f}% chance to win) "
