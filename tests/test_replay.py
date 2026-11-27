@@ -31,7 +31,7 @@ def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat()
 
 
-def _recorded_run(tmp_path: Path, keys, siren: bool = False) -> Path:
+def _recorded_run(tmp_path: Path, keys, siren: bool = False, before_tap: bool = False) -> Path:
     """A small finished run over the test double of Flagsmith: refused start, sign, start, hold, win, refused
     wrong action, the owner's signed confirmation."""
     clock = Clock(T0)
@@ -65,6 +65,10 @@ def _recorded_run(tmp_path: Path, keys, siren: bool = False) -> Path:
     clock.advance(1)
     with pytest.raises(Refused):
         svc.execute_for_contract(h, "keep_control")
+    if before_tap:  # the agent asks for the fired action itself before the owner has tapped
+        clock.advance(1)
+        with pytest.raises(Refused, match="one-tap"):
+            svc.execute_for_contract(h, "ship_treatment")
     p = out["proposal"]
     sig = tap(svc, keys, p)
     clock.advance(5)
@@ -192,6 +196,18 @@ def test_a_siren_refusal_is_exported_and_refused_again(tmp_path, keys):
     assert [m.kind for m in r.mismatches] == ["attempt"] and r.sirens == []
 
 
+def test_an_execute_before_the_tap_is_exported_and_refused_again(tmp_path, keys):
+    db = _recorded_run(tmp_path, keys, before_tap=True)
+    lines = export_store(db, title="t", flagsmith="test double")
+    assert lines[0]["not_replayed"]["refusal_notes"] == 0
+    early = [x for x in lines if x.get("event") == "attempt" and x["recorded_reason"].startswith("waiting for")]
+    assert [(x["call"], x["action"]) for x in early] == [("execute", "ship_treatment")]
+    r, steps = _play(lines[0], lines[1:], tmp_path / "ok")
+    assert r.mismatches == [], [m.text for m in r.mismatches]
+    said = [s.text for s in steps if s.kind == "attempt" and "before the owner's tap" in s.text]
+    assert said and "refused" in said[0]
+
+
 def test_calibration_traces_are_not_replay_traces():
     with pytest.raises(TraceError):
         load_trace(ROOT / "data" / "live-72e1bc.jsonl")
@@ -246,3 +262,36 @@ def test_tempted_trace_replays_every_siren_refusal(tmp_path):
     assert r.mismatches == [], [s.text for s in r.mismatches]
     assert len(r.sirens) >= 1
     assert all(s.ok for s in steps if s.kind == "attempt")
+
+
+AUTONOMY = ROOT / "data" / "replay-autonomy.jsonl"
+
+
+@pytest.mark.skipif(not AUTONOMY.exists(), reason="the signed-autonomy recording is not shipped")
+def test_autonomy_trace_keeps_control_without_a_tap_and_ship_still_waits(tmp_path):
+    """The live run on the shared lab: the A/A contract fires and the agent keeps control on its own under the
+    signed clause; the real-effect contract fires a win and shipping still waits for the owner's signed tap."""
+    header, events = load_trace(AUTONOMY)
+    for line in AUTONOMY.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        free = {k: v for k, v in row.items() if k not in ("signature", "public_key", "canonical", "hash")}
+        assert not DATE_OR_TIME.search(json.dumps(free)), free
+    assert all(e["canonical"]["autonomy"] == {"without_confirmation": ["keep_control"]}
+               for e in events if e["event"] == "contract")
+    r, steps = _play(header, events, tmp_path)
+    assert r.mismatches == [], [s.text for s in r.mismatches]
+    looks = [s for s in steps if s.kind == "look"]
+    assert len(looks) == header["counts"]["look"]
+    assert all(s.ok for s in steps if s.kind == "attempt")
+    assert len([s for s in steps if s.kind == "attempt"]) == header["counts"]["attempt"]
+    assert len(r.sirens) >= 1
+    props = {e["action"]: e for e in events if e["event"] == "proposal"}
+    # keep_control ran under the signed clause, by the agent's own execute call, with no tap ...
+    assert props["keep_control"].get("authorised_by") == "signed_autonomy"
+    auto = [s for s in steps if s.kind == "autonomous_execute"]
+    assert len(auto) == 1 and auto[0].ok and "no tap" in auto[0].text
+    # ... while the fired ship_treatment waited for the owner's tap, and the agent's early call was refused.
+    assert "authorised_by" not in props["ship_treatment"]
+    assert any(s.kind == "attempt" and "before the owner's tap" in s.text for s in steps)
+    assert [s.kind for s in steps].count("confirm") == 1
+    assert sorted(r.fs.served.values()) == ["bold", "control"]
