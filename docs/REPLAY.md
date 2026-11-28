@@ -150,6 +150,17 @@ The verification bundles are `data/verify-llm-openai-cta.json` (`CONSISTENT (unp
 `data/verify-llm-openai-aa.json` (`CONSISTENT (unpinned): 21 checks passed`); with `--check-flagsmith`, run while
 that lab was up, they ended `VERIFIED: all 22 checks passed` and `VERIFIED: all 23 checks passed`.
 
+## The Flagsmith Cloud recording
+
+`data/replay-cloud.jsonl` is the one-command demo run once on Flagsmith Cloud (free plan, an existing organisation) with `scripts/judge_demo.py --flagsmith https://api.flagsmith.com --org-key-env ... --organisation ...`, then written with `scripts/export_replay.py`. Real effect (experiment 1696): Flagsmith read Winning at look 2 (98.67% against the signed 99.95%), the agent's ship was refused, and the contract fired a win at look 3 (99.77% against 99.52%). A/A (experiment 1697): held for four looks and reached its horizon at look 5 (55.60%), keep control. Both actions ran after the owner's signed tap. Its bundles are `data/verify-cloud-cta.json` and `data/verify-cloud-aa.json`. The write-up, including what was not exercised on Cloud: [CLOUD.md](CLOUD.md).
+
+    uv run python scripts/judge_demo.py --replay data/replay-cloud.jsonl --no-hold
+
+```
+10 of 10 recorded decisions recomputed identically by this checkout's engine; 0 event(s) did not reproduce
+6 of 6 recorded refusals refused again for the recorded reason (1 on Flagsmith's 'Winning' reading, 95% or more, while the contract held)
+```
+
 `tests/test_replay.py` exports a run made over the test double of Flagsmith, replays it with no
 difference, shows that an edited Flagsmith number or a signature by the wrong key does not reproduce, and
-replays the shipped traces, including the signed-autonomy and language-model ones.
+replays the shipped traces, including the signed-autonomy, language-model and Flagsmith Cloud ones.

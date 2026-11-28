@@ -46,6 +46,8 @@ jobs:
       - run: uv sync
       # Exits non-zero if any recorded decision, signature or execution does not reproduce.
       - run: uv run python scripts/judge_demo.py --replay data/replay-judge-demo.jsonl --minutes 0.25 --lead 0 --no-hold
+      # The same demo recorded on Flagsmith Cloud (docs/CLOUD.md).
+      - run: uv run python scripts/judge_demo.py --replay data/replay-cloud.jsonl --minutes 0.25 --lead 0 --no-hold
 
   compose-smoke:
     name: Stock Flagsmith (docker compose) - sign, start, one look

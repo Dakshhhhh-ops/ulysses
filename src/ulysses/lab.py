@@ -47,6 +47,30 @@ CAL_VARIATION = "twin"
 
 STATE_PATH = Path(".run/lab.json")
 
+# Flagsmith Cloud takes SDK events (exposures, track_event) on its own host; the core API there answers
+# /api/v1/events with 404 "This environment does not store events in Flagsmith". Self-hosted Flagsmith
+# takes them on the core API under /api/.
+CLOUD_HOSTS = ("api.flagsmith.com", "edge.api.flagsmith.com")
+CLOUD_EVENTS_API_URL = "https://events.api.flagsmith.com/"
+
+
+def is_flagsmith_cloud(api_url: str) -> bool:
+    """True for Flagsmith's hosted API (https://api.flagsmith.com), not for a self-hosted instance."""
+    from urllib.parse import urlparse
+
+    return (urlparse(api_url).hostname or "").lower() in CLOUD_HOSTS
+
+
+def events_api_url(api_url: str) -> str:
+    """Where the SDK sends events for this Flagsmith: ``FLAGSMITH_EVENTS_API_URL`` if set, else the
+    Cloud events host for Flagsmith Cloud, else the instance's own ``/api/``."""
+    override = os.environ.get("FLAGSMITH_EVENTS_API_URL")
+    if override:
+        return override.rstrip("/") + "/"
+    if is_flagsmith_cloud(api_url):
+        return CLOUD_EVENTS_API_URL
+    return api_url.rstrip("/") + "/api/"
+
 
 def results_list(data: Any) -> list:
     if isinstance(data, dict) and "results" in data:
@@ -283,7 +307,8 @@ def setup_demo(cfg: LabConfig) -> dict:
                                "Ulysses demo: an A/A flag; both variations show the same headline")
     state = load_state()
     state["demo"] = {
-        "api_url": cfg.api_url, "organisation_id": cfg.organisation_id, "project_id": pid,
+        "api_url": cfg.api_url, "events_api_url": events_api_url(cfg.api_url),
+        "organisation_id": cfg.organisation_id, "project_id": pid,
         "environment_id": env["id"], "environment_key": env["key"], "server_key": a.server_key(env["key"]),
         "flag": DEMO_FLAG, "feature_id": fid, "variation": DEMO_VARIATION, "variation_option_id": oid,
         "metrics": {"purchase": m_buy, "refund": m_ref},
