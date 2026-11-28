@@ -61,6 +61,16 @@ uv run python scripts/judge_demo.py
 
 `uv run python scripts/judge_demo.py --agent-in-container` runs the agent and its MCP server in their own container (see [The agent boundary](#the-agent-boundary)).
 
+### On Flagsmith Cloud
+
+Against an organisation you already have (Flagsmith Cloud or any instance), no Docker and no sign-up:
+
+```sh
+uv run python scripts/judge_demo.py --flagsmith https://api.flagsmith.com     --org-key-env FLAGSMITH_CLOUD_ADMIN_KEY --organisation <organisation id>
+```
+
+`--org-key-env` names the variable (environment, or the git-ignored `.env.local` / `.env`) that holds the organisation's admin API key; the run's state goes to `.run/judge-cloud.env`, never `.run/judge.env`. Cloud cannot reach the service on 127.0.0.1, so the audit-log webhook is skipped unless you pass `--webhook-url` with a public URL. One recorded run on Cloud's free plan, look by look, with what was not exercised there: [CLOUD.md](CLOUD.md). Replay it with `uv run python scripts/judge_demo.py --replay data/replay-cloud.jsonl`.
+
 ## With a language model
 
 In place of the scripted agent (Gemini when `GEMINI_API_KEY` is set, else Claude when `ANTHROPIC_API_KEY` is set; without a key it says so and runs the scripted agent):
@@ -105,7 +115,7 @@ uvx --from git+https://github.com/Dakshhhhh-ops/ulysses ulysses init --flagsmith
 
 That writes `.env`, a contract template and a `ulysses.mcp.json` whose server runs through the same `uvx --from git+...` line, and prints the next three commands (`keys new`, `signer add`, `serve`). The steps below use a clone instead, for the demo scripts.
 
-Self-hosted Flagsmith needs `EXPERIMENTATION_ENABLED=true`, and `SSRF_ALLOWED_HOSTS=host.docker.internal` if Flagsmith runs in Docker and the contract service on the host.
+Self-hosted Flagsmith needs `EXPERIMENTATION_ENABLED=true`, and `SSRF_ALLOWED_HOSTS=host.docker.internal` if Flagsmith runs in Docker and the contract service on the host. Flagsmith Cloud needs neither, but its audit-log webhook needs a public URL for the service ([CLOUD.md](CLOUD.md)).
 
 ```sh
 uv run ulysses init --flagsmith-url http://localhost:8000   # .env, contract template, ulysses.mcp.json
@@ -265,7 +275,7 @@ Errors print one line and a next step; `ULYSSES_DEBUG=1` shows the traceback. Th
 
 ### Use of Flagsmith
 
-Ulysses is built on Flagsmith's experiments, not beside them: the results endpoint is the only source of evidence, the lifecycle actions are the only way anything ships, the hypothesis field carries the governing contract so it is visible in Flagsmith's UI, and the signed audit-log webhook catches anyone who changes an experiment outside the contract. The calibration runs Flagsmith's own `stats.py`, unmodified and pinned by hash, so the claim about peeking is tested on the engine Flagsmith users get. Everything runs on a stock self-hosted Flagsmith.
+Ulysses is built on Flagsmith's experiments, not beside them: the results endpoint is the only source of evidence, the lifecycle actions are the only way anything ships, the hypothesis field carries the governing contract so it is visible in Flagsmith's UI, and the signed audit-log webhook catches anyone who changes an experiment outside the contract. The calibration runs Flagsmith's own `stats.py`, unmodified and pinned by hash, so the claim about peeking is tested on the engine Flagsmith users get. Everything runs on a stock self-hosted Flagsmith, and the full demo has also run once on Flagsmith Cloud ([CLOUD.md](CLOUD.md)).
 
 ### What is new here, and what is not
 

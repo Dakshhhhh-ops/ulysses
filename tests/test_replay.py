@@ -333,3 +333,25 @@ def test_language_model_trace_replays_and_matches_its_transcript(tmp_path):
     assert seen and seen <= traced
     text = LLM_TRANSCRIPT.read_text(encoding="utf-8")
     assert not DATE_OR_TIME.search(text) and "cap=1" not in text and not re.search(r"\bsk-[A-Za-z0-9_\-]{16,}", text)
+
+
+CLOUD = ROOT / "data" / "replay-cloud.jsonl"
+
+
+@pytest.mark.skipif(not CLOUD.exists(), reason="the Flagsmith Cloud recording is not shipped")
+def test_flagsmith_cloud_trace_replays_both_decisions(tmp_path):
+    """The live run on Flagsmith Cloud (docs/CLOUD.md): both demo experiments decided under signed contracts,
+    every decision recomputed from Cloud's numbers, both fired actions confirmed by the owner's signed tap."""
+    header, events = load_trace(CLOUD)
+    assert "Flagsmith Cloud" in header["flagsmith"]
+    for line in CLOUD.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        free = {k: v for k, v in row.items() if k not in ("signature", "public_key", "canonical", "hash")}
+        assert not DATE_OR_TIME.search(json.dumps(free)), free
+    r, steps = _play(header, events, tmp_path)
+    assert r.mismatches == [], [s.text for s in r.mismatches]
+    assert len([s for s in steps if s.kind == "look"]) == header["counts"]["look"]
+    assert all(s.ok for s in steps if s.kind == "attempt")
+    assert {e["kind"] for e in events if e["event"] == "experiment"} >= {"A/A"}
+    assert [s.kind for s in steps].count("confirm") == 2
+    assert len(r.fs.served) == 2

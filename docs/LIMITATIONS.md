@@ -8,7 +8,7 @@ What Ulysses does not do, and what the evidence in this repository does not show
 - **The live batches are small.** They cannot separate the rules, and false "Winning" moments were rare in them (1 of 60 experiments in the two signed-contract batches). The 10,000-run simulation carries the claim about how often a false "Winning" happens.
 - **The language-model runs used a test double.** The Gemini transcripts are real model outputs against the real contract service, but Flagsmith was the test double with fixture results. Only three of the four scenarios were recorded, and no `--llm` run against a live Flagsmith was recorded: the Gemini free-tier quota ran out (`examples/llm_agent/transcripts/gemini-spike.json` shows the 429 quota errors).
 - **The confirm-page screenshot is a UI fixture** over a test double of Flagsmith, not live data.
-- **Tested on self-hosted 2.295.2 only; Flagsmith Cloud is untested, and its webhook would need a public URL for the service.**
+- **Recorded on self-hosted 2.295.2, and once on Flagsmith Cloud.** One full demo run (both experiments, to a decision each) ran on Flagsmith Cloud's free plan ([CLOUD.md](CLOUD.md)). Not exercised there: the audit-log webhook, which needs a public URL for the service (Cloud cannot reach 127.0.0.1), so deviation detection on Cloud rested on the state check at each look and at execute; the audit-log API, which returns nothing on the free plan; and a deliberate deviation. One run is not a soak test of Cloud's rate limits or results latency.
 - **The agent container path is tested in parts** (image, compose config, a live container check), not yet end to end against Flagsmith.
 
 ## The statistics

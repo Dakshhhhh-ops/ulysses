@@ -27,6 +27,14 @@ visitors then run here, on the service's side, since they need that key.
     uv run python scripts/judge_demo.py [--flagsmith-port 8280] [--port 8240] [--shop-port 8241] [--down]
                                         [--agent-in-container] [--llm] [--no-temptation]
 
+Against an organisation you already have, for example on Flagsmith Cloud, pass its admin key by the name of
+the variable that holds it (in the environment, or the git-ignored .env.local / .env). Nothing is signed up,
+Docker is not used, and the run's state goes to .run/judge-cloud.env (Cloud) or .run/judge-org-<id>.env, never
+.run/judge.env. Flagsmith Cloud cannot reach a service on 127.0.0.1, so the audit-log webhook is registered only
+with ``--webhook-url`` (a public URL); docs/CLOUD.md is one such run.
+
+    uv run python scripts/judge_demo.py --flagsmith https://api.flagsmith.com         --org-key-env FLAGSMITH_CLOUD_ADMIN_KEY --organisation <id> [--project <id>] [--webhook-url <url>]
+
 The scripted agent is tempted on purpose: whenever a look holds while Flagsmith reads "Winning" (chance to
 win 95% or more), it asks to ship anyway, and the service refuses with 403 and logs the refusal; a replay
 repeats every such refusal. ``--no-temptation`` turns that off.
@@ -128,6 +136,95 @@ def read_env(path: Path) -> dict[str, str]:
         if sep:
             out[k.strip()] = v.strip()
     return out
+
+
+# ---- an existing organisation (Flagsmith Cloud, or any instance you already have an admin key for) ----
+
+
+def state_path(api: str, organisation: int | None) -> Path:
+    """Where this run's state lives. The bootstrapped default keeps ``.run/judge.env``; a run against an
+    existing organisation never touches it: ``.run/judge-cloud.env`` on Flagsmith Cloud, else
+    ``.run/judge-org-<id>.env``."""
+    from ulysses import lab
+
+    if organisation is None:
+        return JUDGE_ENV
+    return RUN / ("judge-cloud.env" if lab.is_flagsmith_cloud(api) else f"judge-org-{organisation}.env")
+
+
+def keys_dir(state: Path) -> Path:
+    """The signer keys for a state file, in the user profile. The default run's directory is wiped when it
+    bootstraps a new instance, so the other states keep theirs beside it, not inside it."""
+    if state.name == JUDGE_ENV.name:
+        return JUDGE_KEYS
+    return JUDGE_KEYS.with_name(f"{JUDGE_KEYS.name}-{state.stem.removeprefix('judge-')}")
+
+
+def resolve_org_key(var: str, environ: dict | None = None, files: list[Path] | None = None) -> str | None:
+    """The admin key named by ``var``: from the environment, else from the git-ignored .env.local or .env.
+
+    The value goes only into the environment of the processes that need it (the contract service and the
+    operator's setup); it is never printed and never written to the state file."""
+    env = os.environ if environ is None else environ
+    if env.get(var):
+        return env[var]
+    for f in files if files is not None else [ROOT / ".env.local", ROOT / ".env"]:
+        if f.exists():
+            v = read_env(f).get(var, "").strip().strip('"').strip("'")
+            if v:
+                return v
+    return None
+
+
+def org_key_works(api: str, key: str, organisation: int) -> bool:
+    """One call: the key is an organisation key that can see this organisation."""
+    try:
+        r = httpx.get(f"{api}/api/v1/organisations/", headers={"Authorization": f"Api-Key {key}"}, timeout=30)
+    except httpx.HTTPError:
+        return False
+    if r.status_code != 200:
+        return False
+    body = r.json()
+    rows = body.get("results", []) if isinstance(body, dict) else body
+    return any(int(o.get("id", -1)) == int(organisation) for o in rows or [])
+
+
+def existing_org_values(api: str, organisation: int, project: int | None, key_var: str, port: int,
+                        webhook_url: str | None, state: Path, old: dict) -> tuple[dict, bool]:
+    """The state-file values for a run against an existing organisation, and whether they are new.
+
+    The admin key is not among them: only the name of the variable that holds it. The agent token, webhook
+    secret, store and signer keys are kept from an earlier run on the same organisation, so a rerun reuses
+    the signers registered in that store."""
+    db = f".run/{state.stem}.db"
+    same = (old.get("FLAGSMITH_API_URL") == api and old.get("FLAGSMITH_ORGANISATION_ID") == str(organisation)
+            and old.get("FLAGSMITH_ADMIN_KEY_ENV") == key_var and old.get("ULYSSES_AGENT_TOKEN"))
+    vals = {
+        "FLAGSMITH_API_URL": api,
+        "FLAGSMITH_ORGANISATION_ID": str(organisation),
+        # Empty means the organisation's first project; set so the self-hosted .env's value cannot leak in.
+        "FLAGSMITH_PROJECT_ID": str(project) if project else "",
+        "FLAGSMITH_ADMIN_KEY_ENV": key_var,
+        "ULYSSES_AGENT_TOKEN": old["ULYSSES_AGENT_TOKEN"] if same else secrets.token_urlsafe(24),
+        "ULYSSES_PUBLIC_URL": f"http://127.0.0.1:{port}",
+        "ULYSSES_WEBHOOK_URL": webhook_url or "",
+        "ULYSSES_WEBHOOK_SECRET": old.get("ULYSSES_WEBHOOK_SECRET") if same and old.get("ULYSSES_WEBHOOK_SECRET")
+        else secrets.token_urlsafe(32),
+        "ULYSSES_DB": db,
+        "ULYSSES_KEY_DIR": str(keys_dir(state) / "keys"),
+    }
+    if same and old.get("ULYSSES_HEALTH_WEBHOOK_URL"):
+        vals["ULYSSES_HEALTH_WEBHOOK_URL"] = old["ULYSSES_HEALTH_WEBHOOK_URL"]
+    return vals, not same
+
+
+def lab_setup_command(py: str, state: Path, existing: bool, webhook_url: str | None) -> list[str]:
+    """``ulysses lab setup`` for this run. Against an existing organisation with no public webhook URL the
+    audit-log webhook is not registered: Flagsmith (Cloud especially) cannot reach a service on 127.0.0.1."""
+    cmd = [py, "-m", "ulysses.cli", "lab", "setup", "--env-file", str(state)]
+    if existing and not webhook_url:
+        cmd.append("--no-webhook")
+    return cmd
 
 
 LLM_MODEL = "claude-opus-5-5"
@@ -242,26 +339,49 @@ def main() -> None:
     ap.add_argument("--lead", type=float, default=6.0, help="with --replay: seconds to open the browser first")
     ap.add_argument("--open", action="store_true", help="with --replay: open the overview in your browser")
     ap.add_argument("--no-hold", action="store_true", help="with --replay: stop serving when the playback ends")
+    ap.add_argument("--org-key-env", metavar="VAR",
+                    help="run against an existing organisation on --flagsmith (for example Flagsmith Cloud): the "
+                         "name of the variable, in the environment or the git-ignored .env.local / .env, that holds "
+                         "its organisation admin API key. Nothing is signed up and Docker is not used; the run's "
+                         "state goes to .run/judge-cloud.env (Cloud) or .run/judge-org-<id>.env, never judge.env")
+    ap.add_argument("--organisation", type=int, help="with --org-key-env: the organisation's id")
+    ap.add_argument("--project", type=int,
+                    help="with --org-key-env: the project for the ulysses-* environments (default: the first one)")
+    ap.add_argument("--webhook-url",
+                    help="with --org-key-env: a public URL at which Flagsmith reaches this service's "
+                         "/webhooks/flagsmith (a tunnel); without it the audit-log webhook is not registered")
     a = ap.parse_args()
     if a.replay:
         replay(a)
         return
+    existing = bool(a.org_key_env)
+    if existing and (not a.flagsmith or a.organisation is None):
+        stop("--org-key-env needs --flagsmith URL and --organisation ID: it uses an organisation you already have")
+    if not existing and (a.organisation is not None or a.project is not None or a.webhook_url):
+        stop("--organisation, --project and --webhook-url go with --org-key-env")
+    api = (a.flagsmith or f"http://localhost:{a.flagsmith_port}").rstrip("/")
+    state = state_path(api, a.organisation if existing else None)
     if a.serve_only:
-        if not JUDGE_ENV.exists():
-            stop("no earlier run here (.run/judge.env is missing); run without --serve-only first")
-        vals = read_env(JUDGE_ENV)
+        if not state.exists():
+            stop(f"no earlier run here (.run/{state.name} is missing); run without --serve-only first")
+        vals = read_env(state)
+        extra = {}
+        if vals.get("FLAGSMITH_ADMIN_KEY_ENV"):
+            key = resolve_org_key(vals["FLAGSMITH_ADMIN_KEY_ENV"])
+            if not key:
+                stop(f"{vals['FLAGSMITH_ADMIN_KEY_ENV']} is not set (environment, .env.local or .env)")
+            extra["FLAGSMITH_ADMIN_KEY"] = key
         port = vals["ULYSSES_PUBLIC_URL"].rsplit(":", 1)[-1]
         step(f"serving the cards at {vals['ULYSSES_PUBLIC_URL']}/ (Ctrl+C to stop)")
         print(f"  open the contract list with its read link: {overview_link(vals)}", flush=True)
         try:
             subprocess.run([sys.executable, "-m", "ulysses.cli", "serve", "--port", port], cwd=ROOT,
-                           env={**os.environ, **vals, "PYTHONPATH": str(ROOT / "src")})
+                           env={**os.environ, **vals, **extra, "PYTHONPATH": str(ROOT / "src")})
         except KeyboardInterrupt:
             pass
         return
     RUN.mkdir(exist_ok=True)
     started = time.time()
-    api = (a.flagsmith or f"http://localhost:{a.flagsmith_port}").rstrip("/")
     for label, port in (("contract service", a.port), ("demo shop", a.shop_port)):
         if not port_free(port):
             stop(f"port {port} for the {label} is in use; pick another with --port / --shop-port")
@@ -280,8 +400,27 @@ def main() -> None:
 
     from ulysses import lab
 
-    old = read_env(JUDGE_ENV) if JUDGE_ENV.exists() else {}
-    if old.get("FLAGSMITH_API_URL") == api and key_works(api, old.get("FLAGSMITH_ADMIN_KEY", "")):
+    keys = keys_dir(state)
+    old = read_env(state) if state.exists() else {}
+    secret_env: dict[str, str] = {}  # values the setup and the service need that no file gets
+    if existing:
+        key = resolve_org_key(a.org_key_env)
+        if not key:
+            stop(f"{a.org_key_env} is not set (in the environment, .env.local or .env)")
+        if not org_key_works(api, key, a.organisation):
+            stop(f"the key in {a.org_key_env} cannot read organisation {a.organisation} on {api}")
+        secret_env["FLAGSMITH_ADMIN_KEY"] = key
+        env_vals, fresh = existing_org_values(api, a.organisation, a.project, a.org_key_env, a.port, a.webhook_url,
+                                              state, old)
+        if fresh:
+            step(f"using existing organisation {a.organisation} on {api} (no sign-up); state in .run/{state.name}")
+            # New state means new signers: drop the keys and the store an earlier run on another org left.
+            shutil.rmtree(keys, ignore_errors=True)
+            state.with_suffix(".db").unlink(missing_ok=True)  # the store named by ULYSSES_DB, beside the state
+        else:
+            step(f"reusing organisation {a.organisation} on {api} and the state in .run/{state.name}")
+        state.write_text("".join(f"{k}={v}\n" for k, v in env_vals.items()), encoding="utf-8")
+    elif old.get("FLAGSMITH_API_URL") == api and key_works(api, old.get("FLAGSMITH_ADMIN_KEY", "")):
         env_vals = old
         step("reusing the organisation and keys in .run/judge.env")
     else:
@@ -309,7 +448,7 @@ def main() -> None:
     # The two demo signers' passphrases exist only in this process and the stand-in human's.
     passphrases = {"ULYSSES_KEY_PASSPHRASE_MAYA": secrets.token_urlsafe(16),
                    "ULYSSES_KEY_PASSPHRASE_SAM": secrets.token_urlsafe(16)}
-    keyfile = JUDGE_KEYS / "passphrases.env"
+    keyfile = keys / "passphrases.env"
     if keyfile.exists():
         passphrases = read_env(keyfile)
     else:
@@ -320,14 +459,21 @@ def main() -> None:
     if a.llm:
         load_openai_key()  # into this process only; the service and the stand-in human never get it
     llm_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", *OPENAI_KEY_VARS)
-    operator = {**{k: v for k, v in os.environ.items() if k not in llm_keys}, **env_vals}
+    # The variable an existing organisation's key was read from never reaches the agent or the stand-in human.
+    hidden = (*llm_keys, *([a.org_key_env] if existing else []))
+    operator = {**{k: v for k, v in os.environ.items() if k not in hidden}, **env_vals, **secret_env}
     py = sys.executable
-    step("creating demo flags, metrics, the signed audit webhook and the Feature Health provider")
-    if subprocess.run([py, "-m", "ulysses.cli", "lab", "setup", "--env-file", str(JUDGE_ENV)], cwd=ROOT,
+    if existing and not a.webhook_url:
+        step("creating demo flags, metrics and the Feature Health provider; NOT registering the audit-log webhook: "
+             f"{api} cannot reach a service on 127.0.0.1 (pass --webhook-url with a public URL to register it). "
+             "Deviations are still caught by the state check at every look and at execute")
+    else:
+        step("creating demo flags, metrics, the signed audit webhook and the Feature Health provider")
+    if subprocess.run(lab_setup_command(py, state, existing, a.webhook_url), cwd=ROOT,
                       env={**operator, "PYTHONPATH": str(ROOT / "src")}).returncode != 0:
         stop("ulysses lab setup failed")
-    # lab setup keeps the Feature Health webhook URL (a signed path) in judge.env; the service reads it.
-    health_url = read_env(JUDGE_ENV).get("ULYSSES_HEALTH_WEBHOOK_URL")
+    # lab setup keeps the Feature Health webhook URL (a signed path) in the state file; the service reads it.
+    health_url = read_env(state).get("ULYSSES_HEALTH_WEBHOOK_URL")
     if health_url:
         env_vals["ULYSSES_HEALTH_WEBHOOK_URL"] = health_url
         operator["ULYSSES_HEALTH_WEBHOOK_URL"] = health_url
@@ -344,7 +490,7 @@ def main() -> None:
                                       cwd=ROOT, env={**operator, "PYTHONPATH": str(ROOT / "src")}))
         wait_healthy(f"http://127.0.0.1:{a.port}/healthz", 3)
         step("starting the stand-in for the owner's browser taps (separate process; holds maya's key)")
-        human_env = {k: v for k, v in os.environ.items() if not k.startswith("FLAGSMITH_") and k not in llm_keys}
+        human_env = {k: v for k, v in os.environ.items() if not k.startswith("FLAGSMITH_") and k not in hidden}
         human_env.update({**passphrases, "ULYSSES_PUBLIC_URL": env_vals["ULYSSES_PUBLIC_URL"],
                           "ULYSSES_DB": env_vals["ULYSSES_DB"], "ULYSSES_KEY_DIR": env_vals["ULYSSES_KEY_DIR"]})
         procs.append(subprocess.Popen([py, str(ROOT / "scripts/human_stand_in.py"), "--owner", "maya"],
@@ -360,7 +506,7 @@ def main() -> None:
         else:
             step(line)
             agent_env = {k: v for k, v in os.environ.items()
-                         if not k.startswith(("FLAGSMITH_", "ULYSSES_KEY"))}
+                         if not k.startswith(("FLAGSMITH_", "ULYSSES_KEY")) and k not in hidden}
             agent_env.update({"ULYSSES_URL": env_vals["ULYSSES_PUBLIC_URL"],
                               "ULYSSES_AGENT_TOKEN": env_vals["ULYSSES_AGENT_TOKEN"],
                               "ULYSSES_DB": env_vals["ULYSSES_DB"], "SHOP_PORT": str(a.shop_port)})
@@ -369,7 +515,8 @@ def main() -> None:
             rc = subprocess.run(agent_command(mode, py, a.shop_port, not a.no_temptation), cwd=ROOT, env=agent_env).returncode
         if rc != 0:
             stop("the agent session did not finish (see above); rerun this command to continue from a fresh setup")
-        ok = summarise(time.time() - started, api, a.port, "scripted" if mode == "scripted" else "llm")
+        ok = summarise(time.time() - started, api, a.port, "scripted" if mode == "scripted" else "llm",
+                       docker=not a.flagsmith, state=state)
         print(f"  Contract list (read link, it expires): {overview_link(env_vals)}", flush=True)
         if not ok:
             stop("the LLM agent did not complete every experiment (see the summary and transcript above)")
@@ -475,7 +622,8 @@ def overview_link(vals: dict) -> str:
     return local_service(vals["ULYSSES_PUBLIC_URL"], ROOT / db if not Path(db).is_absolute() else db).overview_link()
 
 
-def summarise(seconds: float, api: str, port: int, mode: str = "scripted", run: Path = RUN) -> bool:
+def summarise(seconds: float, api: str, port: int, mode: str = "scripted", run: Path = RUN, docker: bool = True,
+              state: Path | None = None) -> bool:
     """One table from what the agent session wrote, so the outcome is on screen at the end.
 
     Returns False when the LLM agent did not complete every experiment (the scripted agent's own exit code
@@ -508,8 +656,14 @@ def summarise(seconds: float, api: str, port: int, mode: str = "scripted", run: 
         print(f"  Flagsmith dashboard: {api}")
         print(f"[1;33m  warning: the LLM agent completed {done} of {expected} experiments; see the transcript[0m",
               flush=True)
-    print("  Browse the cards again:  uv run python scripts/judge_demo.py --serve-only", flush=True)
-    print(f"  Remove Flagsmith:        docker compose -p ulysses down -v", flush=True)
+    again = "uv run python scripts/judge_demo.py --serve-only"
+    if state is not None and state.name != JUDGE_ENV.name:
+        vals = read_env(state) if state.exists() else {}
+        again += (f" --flagsmith {api} --org-key-env {vals.get('FLAGSMITH_ADMIN_KEY_ENV', '<VAR>')} "
+                  f"--organisation {vals.get('FLAGSMITH_ORGANISATION_ID', '<ID>')}")
+    print(f"  Browse the cards again:  {again}", flush=True)
+    if docker:
+        print("  Remove Flagsmith:        docker compose -p ulysses down -v", flush=True)
     return complete
 
 

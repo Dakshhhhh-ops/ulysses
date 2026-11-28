@@ -42,7 +42,10 @@ flagsmith = Flagsmith(
     enable_local_evaluation=True,
     environment_refresh_interval_seconds=10,
     enable_events=True,
-    event_processor_config=EventProcessorConfig(events_api_url=demo["api_url"] + "/api/", flush_interval_seconds=2.0),
+    # Self-hosted Flagsmith takes events under /api/; Flagsmith Cloud on its events host (``ulysses lab setup``
+    # writes which one into .run/lab.json).
+    event_processor_config=EventProcessorConfig(events_api_url=demo.get("events_api_url") or demo["api_url"] + "/api/",
+                                                flush_interval_seconds=2.0),
 )
 
 app = FastAPI(title="Ulysses demo shop")
