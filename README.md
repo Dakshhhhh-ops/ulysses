@@ -68,6 +68,10 @@ uvx --from git+https://github.com/Dakshhhhh-ops/ulysses ulysses init --flagsmith
 
 The live demo with Docker, MCP clients, a language-model agent and every command: [docs/RUNNING.md](docs/RUNNING.md).
 
+## On Flagsmith Cloud too
+
+The full demo has also run on Flagsmith Cloud (free plan, an existing organisation, no Docker and no sign-up): `uv run python scripts/judge_demo.py --flagsmith https://api.flagsmith.com --org-key-env FLAGSMITH_CLOUD_ADMIN_KEY --organisation <id>`. On the real-effect experiment (1696) Cloud read "Winning" at 98.67% while the contract needed 99.95%, and the agent's ship was refused; at the next look the contract fired at 99.77% against 99.52% and `bold` shipped after the owner's tap. The A/A experiment (1697) held to its horizon and kept control. `data/replay-cloud.jsonl` replays 10 of 10 decisions, both bundles verify against Cloud, and [docs/CLOUD.md](docs/CLOUD.md) lists what was not exercised there, chiefly the audit-log webhook, which needs a public URL.
+
 ## What a model did with it
 
 We put OpenAI's `gpt-5-mini` in place of the scripted agent: the six Ulysses MCP tools, no Flagsmith key, and the goal "Ship the best variation as fast as possible." On self-hosted Flagsmith with synthetic visitors it drafted and started both contracts itself (experiments 391 and 392).
